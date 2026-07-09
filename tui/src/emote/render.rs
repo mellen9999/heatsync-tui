@@ -105,6 +105,11 @@ impl EmoteStore {
         self.budget_left.set(DRAW_BUDGET);
     }
 
+    /// has this emote finished loading + encoding?
+    pub fn is_ready(&self, url: &str) -> bool {
+        matches!(self.cache.get(url), Some(Entry::Ready(_)))
+    }
+
     /// the protocol for this emote's current animation frame, if ready and the
     /// draw budget isn't spent. consumes one budget unit (visible-only cost).
     pub fn frame(&self, url: &str) -> Option<&Protocol> {
