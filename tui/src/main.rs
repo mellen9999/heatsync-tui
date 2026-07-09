@@ -9,6 +9,7 @@ mod config;
 mod emote;
 mod http;
 mod net;
+mod twitch;
 
 use std::io;
 use std::sync::mpsc::Receiver;
@@ -64,6 +65,7 @@ struct App {
     input: String,
     status: Option<String>,          // transient one-line notice (send errors, etc.)
     out: Option<net::Tx>,            // outbound channel to the live WS thread
+    twitch_tx: Option<std::sync::mpsc::Sender<twitch::Send>>, // direct twitch sender
     tab_pos: TabPos,
 }
 
@@ -93,6 +95,7 @@ fn main() -> io::Result<()> {
         Some("search") => return cli::search(&args[1..]),
         Some("hot") | Some("top") => return cli::hot(&args[1..]),
         Some("probe") => return cli::probe(&args[1..]),
+        Some("login") => return cli::login(),
         _ => {}
     }
 
@@ -114,6 +117,7 @@ fn main() -> io::Result<()> {
             input: String::new(),
             status: None,
             out: None,
+            twitch_tx: None,
             tab_pos,
         }
     } else {
@@ -162,6 +166,12 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
 
     let token = std::env::var("HEATSYNC_TOKEN").ok().filter(|t| !t.is_empty());
     let (rx, out) = net::spawn(subs, token);
+    // direct twitch sending if the user supplied their own twitch oauth.
+    let auth = config::load_auth();
+    let twitch_tx = match (auth.twitch_user, auth.twitch_oauth) {
+        (Some(u), Some(o)) => Some(twitch::spawn(u, o)),
+        _ => None,
+    };
     App {
         channels,
         emotes,
@@ -179,6 +189,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
         input: String::new(),
         status: None,
         out: Some(out),
+        twitch_tx,
         tab_pos,
     }
 }
@@ -371,9 +382,14 @@ fn send_focused(app: &mut App) {
         (c.platform, c.name.clone())
     };
     match platform {
-        Platform::Twitch => {
-            app.status = Some("twitch is read-only — no send path".into());
-        }
+        Platform::Twitch => match &app.twitch_tx {
+            Some(tx) => {
+                let _ = tx.send((name.clone(), text));
+                app.input.clear();
+                app.status = Some(format!("sent → {name}"));
+            }
+            None => app.status = Some("no twitch token — run: heatsync login".into()),
+        },
         Platform::Kick => match &app.out {
             Some(out) => {
                 let _ = out.send(net::Outbound::Chat {

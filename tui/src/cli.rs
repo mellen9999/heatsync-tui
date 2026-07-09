@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use heatsync_core::Platform;
 
+use crate::config;
 use crate::http;
 use crate::net::{self, ChatEvent};
 
@@ -100,6 +101,24 @@ pub fn hot(args: &[String]) -> std::io::Result<()> {
             eprintln!("request failed");
             std::process::exit(1);
         }
+    }
+    Ok(())
+}
+
+/// `heatsync login` — set up direct twitch sending (chatterino-style).
+pub fn login() -> std::io::Result<()> {
+    match config::ensure_token_file() {
+        Some(p) => {
+            println!("twitch sending — sends go DIRECT to twitch (like chatterino), not via heatsync:");
+            println!("  1. get a twitch oauth token with the 'chat:edit' scope");
+            println!("     e.g. https://twitchtokengenerator.com  (pick a bot/chat token)");
+            println!("  2. edit {}", p.display());
+            println!("       twitch_user=your_twitch_username");
+            println!("       twitch_oauth=oauth:xxxxxxxxxxxxxxxx");
+            println!("  3. restart heatsync. reading still comes through heatsync; only sending is direct.");
+            println!("  (or set TWITCH_USER / TWITCH_OAUTH env instead of the file.)");
+        }
+        None => eprintln!("could not resolve ~/.config/heatsync/"),
     }
     Ok(())
 }
