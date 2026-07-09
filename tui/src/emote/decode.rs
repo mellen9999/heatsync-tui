@@ -18,14 +18,18 @@ pub struct Frame {
     pub delay_ms: u32,
 }
 
-/// a fully decoded emote — one or more frames. `animated` is a convenience flag.
+/// a fully decoded emote — one or more frames.
 pub struct Decoded {
     pub frames: Vec<Frame>,
+    /// native pixel dims (frame 0) — used by tests + future aspect handling.
+    #[allow(dead_code)]
     pub width: u32,
+    #[allow(dead_code)]
     pub height: u32,
 }
 
 impl Decoded {
+    #[allow(dead_code)]
     pub fn animated(&self) -> bool {
         self.frames.len() > 1
     }

@@ -18,3 +18,7 @@ image = { version = "0.25", default-features = false, features = ["gif", "webp",
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "2", default-features = false, features = ["tls", "json", "gzip"] }
 serde = { version = "1", features = ["derive"] }
+unicode-width = "0.2"
+# terminal graphics protocols (sixel/halfblock/kitty are core — no chafa C lib,
+# no image-defaults codecs; we hand it already-decoded frames from `image`).
+ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }

@@ -5,7 +5,6 @@
 
 #[allow(dead_code)]
 mod cli;
-#[allow(dead_code)]
 mod emote;
 mod http;
 mod net;
@@ -15,6 +14,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use emote::render::{EmoteStore, EMOTE_H, EMOTE_W};
 use heatsync_core::emote::{tokenize, EmoteSet, Token};
 use heatsync_core::heat::Tier;
 use heatsync_core::{mock, Channel, Message, Platform};
@@ -24,6 +24,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
+use ratatui_image::protocol::Protocol;
+use ratatui_image::Image;
+use unicode_width::UnicodeWidthStr;
 
 const BRAND: Color = Color::Indexed(208);
 
@@ -44,6 +47,7 @@ struct App {
     scroll: usize,
     paused: bool,
     feed: Feed,
+    store: Option<EmoteStore>, // None → text-only (no graphics terminal / mock)
 }
 
 fn main() -> io::Result<()> {
@@ -67,11 +71,13 @@ fn main() -> io::Result<()> {
             scroll: 0,
             paused: false,
             feed: Feed::Mock(mock::Driver::new()),
+            store: None,
         }
     } else {
         build_live(&chan_args)
     };
 
+    // must probe the terminal for graphics BEFORE raw mode / alt screen.
     let mut terminal = ratatui::init();
     let res = run(&mut terminal, app);
     ratatui::restore();
@@ -93,6 +99,8 @@ fn build_live(chan_args: &[&String]) -> App {
     };
 
     eprintln!("heatsync: fetching emotes + connecting to {} channels…", subs.len());
+    // probe graphics support now, while we're still a normal terminal.
+    let store = EmoteStore::new();
     let mut channels = Vec::new();
     let mut emotes = Vec::new();
     for (platform, name) in &subs {
@@ -112,6 +120,7 @@ fn build_live(chan_args: &[&String]) -> App {
             start: Instant::now(),
             connected: false,
         },
+        store,
     }
 }
 
@@ -172,25 +181,22 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     }
 }
 
-/// pull new data into the channel buffers for this tick.
+/// pull new data into the channel buffers for this tick, and keep the emote
+/// image cache warm for what's on screen.
 fn advance(app: &mut App) {
-    match &mut app.feed {
-        Feed::Mock(driver) => driver.tick(&mut app.channels),
+    let App { channels, emotes, feed, store, .. } = app;
+    match feed {
+        Feed::Mock(driver) => driver.tick(channels),
         Feed::Live { rx, start, connected } => {
             let now = start.elapsed().as_millis() as u64;
             while let Ok(ev) = rx.try_recv() {
                 match ev {
                     ChatEvent::Line(l) => {
-                        if let Some(ch) = app.channels.iter_mut().find(|c| {
+                        if let Some(ch) = channels.iter_mut().find(|c| {
                             c.platform == l.platform && c.name.eq_ignore_ascii_case(&l.channel)
                         }) {
                             ch.record(
-                                Message {
-                                    user: l.user,
-                                    text: l.content,
-                                    color: l.color,
-                                    heat: 0.0,
-                                },
+                                Message { user: l.user, text: l.content, color: l.color, heat: 0.0 },
                                 now,
                             );
                         }
@@ -199,10 +205,32 @@ fn advance(app: &mut App) {
                     ChatEvent::Disconnected => *connected = false,
                 }
             }
-            for ch in &mut app.channels {
+            for ch in channels.iter_mut() {
                 ch.cool(now);
             }
         }
+    }
+
+    // request loads for emotes near the bottom of each channel, then drain
+    // finished loads. cheap: request() is idempotent, frame budget resets here.
+    if let Some(store) = store {
+        for (ci, ch) in channels.iter().enumerate() {
+            let set = &emotes[ci];
+            if set.is_empty() {
+                continue;
+            }
+            let start = ch.messages.len().saturating_sub(60);
+            for m in ch.messages.iter().skip(start) {
+                for tok in tokenize(&m.text, set) {
+                    if let Token::Emote(name) = tok {
+                        if let Some(e) = set.get(&name) {
+                            store.request(&e.url);
+                        }
+                    }
+                }
+            }
+        }
+        store.pump();
     }
 }
 
@@ -236,20 +264,23 @@ fn ui(f: &mut Frame, app: &App) {
             *area,
             &app.channels[ch_idx],
             &app.emotes[ch_idx],
+            app.store.as_ref(),
             slot + 1,
             ch_idx == app.focus,
             scroll,
         );
     }
 
-    draw_footer(f, footer, &app, order.len());
+    draw_footer(f, footer, app, order.len());
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_channel(
     f: &mut Frame,
     area: Rect,
     ch: &Channel,
     set: &EmoteSet,
+    store: Option<&EmoteStore>,
     slot: usize,
     focused: bool,
     scroll: usize,
@@ -292,33 +323,64 @@ fn draw_channel(
     let total = ch.messages.len();
     let end = total.saturating_sub(scroll);
     let start = end.saturating_sub(cap);
-    let lines: Vec<Line> = ch.messages.iter().take(end).skip(start).map(|m| line_for(m, set)).collect();
-    f.render_widget(Paragraph::new(lines), body);
+
+    // one message per row; text via paragraph, emotes overlaid as images on the
+    // spaces reserved for them (ready ones) or drawn as their name (still loading).
+    for (r, m) in ch.messages.iter().take(end).skip(start).enumerate() {
+        let y = body.y + r as u16;
+        let (line, overlays) = layout_message(m, set, store, body.x, body.width);
+        f.render_widget(Paragraph::new(line), Rect { x: body.x, y, width: body.width, height: 1 });
+        for (x, proto) in overlays {
+            f.render_widget(Image::new(proto), Rect { x, y, width: EMOTE_W, height: EMOTE_H });
+        }
+    }
 }
 
-/// one chat line: user (own color if sent) then text split into words + emotes.
-/// emotes render as their name in brand color for now — the image layer lands next.
-fn line_for(m: &Message, set: &EmoteSet) -> Line<'static> {
+/// lay a message onto one row: returns the text line (with blank cells reserved
+/// where ready emotes go) plus the (x, protocol) overlays to blit there. an
+/// emote that isn't loaded yet falls back to its name in brand color.
+fn layout_message<'a>(
+    m: &Message,
+    set: &EmoteSet,
+    store: Option<&'a EmoteStore>,
+    x0: u16,
+    maxw: u16,
+) -> (Line<'static>, Vec<(u16, &'a Protocol)>) {
     let text_hue = Color::Indexed(heatsync_core::heat::color(m.heat));
-    let user_color = m
-        .color
-        .as_deref()
-        .and_then(parse_hex)
-        .unwrap_or(Color::Indexed(244));
+    let user_color = m.color.as_deref().and_then(parse_hex).unwrap_or(Color::Indexed(244));
     let mut spans = vec![
         Span::styled(m.user.clone(), Style::default().fg(user_color)),
         Span::styled(": ", Style::default().fg(Color::Indexed(238))),
     ];
+    let mut col = UnicodeWidthStr::width(m.user.as_str()) as u16 + 2;
+    let mut overlays = Vec::new();
+
     for tok in tokenize(&m.text, set) {
+        if col >= maxw {
+            break;
+        }
         match tok {
-            Token::Text(t) => spans.push(Span::styled(t, Style::default().fg(text_hue))),
-            Token::Emote(name) => spans.push(Span::styled(
-                name,
-                Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
-            )),
+            Token::Text(t) => {
+                col += UnicodeWidthStr::width(t.as_str()) as u16;
+                spans.push(Span::styled(t, Style::default().fg(text_hue)));
+            }
+            Token::Emote(name) => {
+                let proto = store
+                    .zip(set.get(&name))
+                    .filter(|_| col + EMOTE_W <= maxw)
+                    .and_then(|(s, e)| s.frame(&e.url));
+                if let Some(p) = proto {
+                    overlays.push((x0 + col, p));
+                    spans.push(Span::raw(" ".repeat(EMOTE_W as usize)));
+                    col += EMOTE_W;
+                } else {
+                    col += UnicodeWidthStr::width(name.as_str()) as u16;
+                    spans.push(Span::styled(name, Style::default().fg(BRAND).add_modifier(Modifier::BOLD)));
+                }
+            }
         }
     }
-    Line::from(spans)
+    (Line::from(spans), overlays)
 }
 
 /// `#rrggbb` → nearest-ish terminal color (truecolor if the term supports it).
