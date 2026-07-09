@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod emote;
 mod http;
+mod kick;
 mod net;
 mod twitch;
 
@@ -67,6 +68,7 @@ struct App {
     status: Option<String>,          // transient one-line notice (send errors, etc.)
     out: Option<net::Tx>,            // outbound channel to the live WS thread
     twitch_tx: Option<std::sync::mpsc::Sender<twitch::Send>>, // direct twitch sender
+    kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>,     // direct kick sender
     tab_pos: TabPos,
     manage_cursor: usize, // cursor in the Manage view
 }
@@ -97,6 +99,7 @@ fn main() -> io::Result<()> {
         Some("search") => return cli::search(&args[1..]),
         Some("hot") | Some("top") => return cli::hot(&args[1..]),
         Some("probe") => return cli::probe(&args[1..]),
+        Some("login") if args.get(1).map(String::as_str) == Some("kick") => return kick::login(),
         Some("login") => return cli::login(),
         _ => {}
     }
@@ -120,6 +123,7 @@ fn main() -> io::Result<()> {
             status: None,
             out: None,
             twitch_tx: None,
+            kick_tx: None,
             tab_pos,
             manage_cursor: 0,
         }
@@ -169,8 +173,9 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
 
     let token = std::env::var("HEATSYNC_TOKEN").ok().filter(|t| !t.is_empty());
     let (rx, out) = net::spawn(subs, token);
-    // direct twitch sending if the user supplied their own twitch oauth.
+    // direct-to-platform sending if the user supplied their own platform tokens.
     let auth = config::load_auth();
+    let kick_tx = auth.kick_token.clone().map(kick::spawn);
     let twitch_tx = match (auth.twitch_user, auth.twitch_oauth) {
         (Some(u), Some(o)) => Some(twitch::spawn(u, o)),
         _ => None,
@@ -193,6 +198,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
         status: None,
         out: Some(out),
         twitch_tx,
+        kick_tx,
         tab_pos,
         manage_cursor: 0,
     }
@@ -472,18 +478,24 @@ fn send_focused(app: &mut App) {
             }
             None => app.status = Some("no twitch token — run: heatsync login".into()),
         },
-        Platform::Kick => match &app.out {
-            Some(out) => {
+        // prefer direct kick send (own token); fall back to the ext-relay path.
+        Platform::Kick => {
+            if let Some(ktx) = &app.kick_tx {
+                let _ = ktx.send((name.clone(), text));
+                app.input.clear();
+                app.status = Some(format!("sent → {name}"));
+            } else if let Some(out) = &app.out {
                 let _ = out.send(net::Outbound::Chat {
                     platform: Platform::Kick,
                     channel: name.clone(),
                     text,
                 });
                 app.input.clear();
-                app.status = Some(format!("sent → {name}"));
+                app.status = Some(format!("sent → {name} (via ext)"));
+            } else {
+                app.status = Some("no kick auth — run: heatsync login kick".into());
             }
-            None => app.status = Some("not connected".into()),
-        },
+        }
     }
 }
 

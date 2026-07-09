@@ -58,6 +58,7 @@ pub struct Config {
 pub struct Auth {
     pub twitch_user: Option<String>,
     pub twitch_oauth: Option<String>,
+    pub kick_token: Option<String>,
 }
 
 fn dir() -> Option<PathBuf> {
@@ -80,6 +81,7 @@ fn token_path() -> Option<PathBuf> {
 pub fn load_auth() -> Auth {
     let mut user = std::env::var("TWITCH_USER").ok().filter(|s| !s.is_empty());
     let mut oauth = std::env::var("TWITCH_OAUTH").ok().filter(|s| !s.is_empty());
+    let mut kick = std::env::var("KICK_TOKEN").ok().filter(|s| !s.is_empty());
     if let Some(p) = token_path() {
         if let Ok(text) = fs::read_to_string(&p) {
             for line in text.lines() {
@@ -88,6 +90,7 @@ pub fn load_auth() -> Auth {
                     match k.trim() {
                         "twitch_user" if user.is_none() && !v.is_empty() => user = Some(v),
                         "twitch_oauth" if oauth.is_none() && !v.is_empty() => oauth = Some(v),
+                        "kick_token" if kick.is_none() && !v.is_empty() => kick = Some(v),
                         _ => {}
                     }
                 }
@@ -95,7 +98,29 @@ pub fn load_auth() -> Auth {
         }
     }
     let oauth = oauth.map(|o| o.trim_start_matches("oauth:").trim_start_matches('#').to_string());
-    Auth { twitch_user: user, twitch_oauth: oauth }
+    Auth { twitch_user: user, twitch_oauth: oauth, kick_token: kick }
+}
+
+/// persist a `kick_token=` line into the token file, preserving other keys.
+pub fn save_kick_token(token: &str) {
+    let Some(p) = token_path() else { return };
+    if let Some(d) = p.parent() {
+        let _ = fs::create_dir_all(d);
+    }
+    let mut lines: Vec<String> = fs::read_to_string(&p)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("kick_token="))
+        .map(str::to_string)
+        .collect();
+    lines.push(format!("kick_token={token}"));
+    if fs::write(&p, lines.join("\n") + "\n").is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 pub fn load() -> Config {
