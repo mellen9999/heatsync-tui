@@ -44,12 +44,13 @@ enum Feed {
 }
 
 /// vim-style modes: navigate in Normal, type a message in Insert, type a channel
-/// to join in Join.
+/// to join in Join, or manage channels rover-style in Manage.
 #[derive(Clone, Copy, PartialEq)]
 enum InputMode {
     Normal,
     Insert,
     Join,
+    Manage,
 }
 
 struct App {
@@ -67,6 +68,7 @@ struct App {
     out: Option<net::Tx>,            // outbound channel to the live WS thread
     twitch_tx: Option<std::sync::mpsc::Sender<twitch::Send>>, // direct twitch sender
     tab_pos: TabPos,
+    manage_cursor: usize, // cursor in the Manage view
 }
 
 /// which emote backend a channel column should draw with this frame.
@@ -119,6 +121,7 @@ fn main() -> io::Result<()> {
             out: None,
             twitch_tx: None,
             tab_pos,
+            manage_cursor: 0,
         }
     } else {
         build_live(&chan_args, tab_pos)
@@ -191,6 +194,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
         out: Some(out),
         twitch_tx,
         tab_pos,
+        manage_cursor: 0,
     }
 }
 
@@ -272,6 +276,37 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             KeyCode::Char(c) => app.input.push(c),
             _ => {}
         },
+        // rover-style channel manager: j/k move, enter open, a add, d leave,
+        // K/J reorder, esc back.
+        InputMode::Manage => {
+            let last = app.channels.len().saturating_sub(1);
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => app.mode = InputMode::Normal,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    app.manage_cursor = (app.manage_cursor + 1).min(last)
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    app.manage_cursor = app.manage_cursor.saturating_sub(1)
+                }
+                KeyCode::Char('g') | KeyCode::Home => app.manage_cursor = 0,
+                KeyCode::Char('G') | KeyCode::End => app.manage_cursor = last,
+                KeyCode::Enter | KeyCode::Char('l') => {
+                    if !app.channels.is_empty() {
+                        app.focus = app.manage_cursor.min(last);
+                        app.scroll = 0;
+                        app.mode = InputMode::Normal;
+                    }
+                }
+                KeyCode::Char('a') | KeyCode::Char('n') | KeyCode::Char('o') => {
+                    app.mode = InputMode::Join;
+                    app.input.clear();
+                }
+                KeyCode::Char('d') | KeyCode::Char('x') => manage_delete(app),
+                KeyCode::Char('K') => manage_move(app, -1),
+                KeyCode::Char('J') => manage_move(app, 1),
+                _ => {}
+            }
+        }
         InputMode::Normal => {
             let vert = app.tab_pos.is_vertical();
             match k.code {
@@ -298,6 +333,10 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                     app.status = None;
                 }
                 KeyCode::Char('x') => close_channel(app),
+                KeyCode::Char('m') => {
+                    app.mode = InputMode::Manage;
+                    app.manage_cursor = app.focus;
+                }
                 KeyCode::Char('T') => {
                     app.tab_pos = app.tab_pos.next();
                     config::save(&config::Config { tab_pos: app.tab_pos });
@@ -350,6 +389,49 @@ fn join_channel(app: &mut App) {
     app.emotes.push(http::emote_set(&name, platform).unwrap_or_default());
     app.focus = app.channels.len() - 1;
     app.scroll = 0;
+}
+
+/// leave the channel under the Manage cursor.
+fn manage_delete(app: &mut App) {
+    if app.channels.is_empty() {
+        return;
+    }
+    let i = app.manage_cursor.min(app.channels.len() - 1);
+    let (platform, name) = {
+        let c = &app.channels[i];
+        (c.platform, c.name.clone())
+    };
+    if let Some(out) = &app.out {
+        let _ = out.send(net::Outbound::Part { platform, channel: name });
+    }
+    app.channels.remove(i);
+    app.emotes.remove(i);
+    let last = app.channels.len().saturating_sub(1);
+    app.manage_cursor = i.min(last);
+    app.focus = app.focus.min(last);
+}
+
+/// reorder the channel under the cursor by `delta` (-1 up, +1 down), keeping the
+/// active channel and cursor pointed at the same items.
+fn manage_move(app: &mut App, delta: isize) {
+    let n = app.channels.len();
+    if n < 2 {
+        return;
+    }
+    let i = app.manage_cursor.min(n - 1);
+    let j = i as isize + delta;
+    if j < 0 || j >= n as isize {
+        return;
+    }
+    let j = j as usize;
+    app.channels.swap(i, j);
+    app.emotes.swap(i, j);
+    if app.focus == i {
+        app.focus = j;
+    } else if app.focus == j {
+        app.focus = i;
+    }
+    app.manage_cursor = j;
 }
 
 /// leave the active channel tab.
@@ -490,6 +572,12 @@ fn ui(f: &mut Frame, app: &App) {
     let [main, footer] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
 
+    if app.mode == InputMode::Manage {
+        draw_manage(f, main, app);
+        draw_footer(f, footer, app, app.channels.len());
+        return;
+    }
+
     if app.channels.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -611,6 +699,58 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     }
 }
 
+/// rover-style channel manager: a single-pane list, cursor row highlighted, the
+/// active channel marked. reorder/leave/open from here.
+fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
+    let [head, list] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" channels ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {} open", app.channels.len()), Style::default().fg(Color::Indexed(244))),
+        ])),
+        head,
+    );
+
+    if app.channels.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  empty — press a to add a channel",
+                Style::default().fg(Color::Indexed(244)),
+            ))),
+            list,
+        );
+        return;
+    }
+
+    for (i, ch) in app.channels.iter().enumerate() {
+        if i as u16 >= list.height {
+            break;
+        }
+        let sel = i == app.manage_cursor;
+        let hue = Color::Indexed(Tier::of(ch.heat).xterm());
+        let style = if sel {
+            Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(hue)
+        };
+        let cursor = if sel { "❯" } else { " " };
+        let active = if i == app.focus { "●" } else { " " };
+        let label = format!(
+            " {cursor} {active} {}·{}   {:>6.0}   {} msg",
+            ch.name,
+            ch.platform.tag(),
+            ch.heat,
+            ch.messages.len(),
+        );
+        let row = Rect { x: list.x, y: list.y + i as u16, width: list.width, height: 1 };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(fit(label, list.width), style))),
+            row,
+        );
+    }
+}
+
 /// does this message contain at least one loaded (ready-to-draw) emote?
 fn has_ready_emote(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
     tokenize(&m.text, set).into_iter().any(|t| match t {
@@ -698,6 +838,18 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
+    // Manage mode → rover-style key hints.
+    if app.mode == InputMode::Manage {
+        let hint = |k: &'static str, d: &'static str| {
+            [Span::styled(k, Style::default().fg(BRAND)), Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244)))]
+        };
+        let mut spans = vec![Span::styled(" manage ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)), Span::raw("  ")];
+        for pair in [hint("jk", "move"), hint("enter", "open"), hint("a", "add"), hint("d", "leave"), hint("JK", "reorder"), hint("esc", "back")] {
+            spans.extend(pair);
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     // Join mode → type a channel to open.
     if app.mode == InputMode::Join {
         let spans = vec![
@@ -743,8 +895,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         Span::raw("say  "),
         Span::styled("o ", Style::default().fg(BRAND)),
         Span::raw("join  "),
-        Span::styled("x ", Style::default().fg(BRAND)),
-        Span::raw("close  "),
+        Span::styled("m ", Style::default().fg(BRAND)),
+        Span::raw("manage  "),
         Span::styled("T ", Style::default().fg(BRAND)),
         Span::raw("tabs  "),
         Span::styled("q ", Style::default().fg(BRAND)),
