@@ -196,7 +196,9 @@ fn b64url(bytes: &[u8]) -> String {
 
 fn rand_b64url(n: usize) -> String {
     let mut buf = vec![0u8; n];
-    let _ = getrandom::getrandom(&mut buf);
+    // security-critical (PKCE verifier + CSRF state): never fall back to zeroed
+    // bytes — abort the flow loudly if the CSPRNG is unavailable.
+    getrandom::getrandom(&mut buf).expect("CSPRNG unavailable — cannot generate secure OAuth values");
     b64url(&buf)
 }
 
