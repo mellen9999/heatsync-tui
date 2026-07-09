@@ -20,9 +20,11 @@ use ratatui_image::Resize;
 use super::decode;
 use crate::http;
 
-/// inline emote footprint in cells (≈square once font aspect is applied).
-pub const EMOTE_W: u16 = 2;
-pub const EMOTE_H: u16 = 1;
+/// inline emote footprint in cells. 2 rows tall so emotes read big (≈32px on a
+/// bare console, and chunky in emulators); width ≈square once font aspect applies.
+/// messages containing a ready emote get EMOTE_H rows in the layout.
+pub const EMOTE_W: u16 = 3;
+pub const EMOTE_H: u16 = 2;
 /// cap graphics blits per frame — a raid of fresh emotes can't firehose the pty.
 const DRAW_BUDGET: usize = 64;
 

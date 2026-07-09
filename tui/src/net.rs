@@ -26,6 +26,8 @@ pub type Sub = (Platform, String);
 /// outbound requests from the app to the WS thread.
 pub enum Outbound {
     Chat { platform: Platform, channel: String, text: String },
+    Join { platform: Platform, channel: String },
+    Part { platform: Platform, channel: String },
 }
 
 /// the app's handle for sending outbound frames.
@@ -50,11 +52,11 @@ pub enum ChatEvent {
     SendResult { ok: bool, error: Option<String> },
 }
 
-fn run(subs: Vec<Sub>, token: Option<String>, tx: Sender<ChatEvent>, out: Receiver<Outbound>) {
+fn run(mut subs: Vec<Sub>, token: Option<String>, tx: Sender<ChatEvent>, out: Receiver<Outbound>) {
     let mut backoff = Duration::from_secs(1);
     let mut req = 0u64;
     loop {
-        match session(&subs, &token, &tx, &out, &mut req) {
+        match session(&mut subs, &token, &tx, &out, &mut req) {
             // receiver gone → app closed, stop the thread.
             SessionEnd::ReceiverGone => return,
             SessionEnd::Dropped => {
@@ -72,7 +74,7 @@ enum SessionEnd {
 }
 
 fn session(
-    subs: &[Sub],
+    subs: &mut Vec<Sub>,
     token: &Option<String>,
     tx: &Sender<ChatEvent>,
     out: &Receiver<Outbound>,
@@ -92,7 +94,7 @@ fn session(
             return SessionEnd::Dropped;
         }
     }
-    for (platform, channel) in subs {
+    for (platform, channel) in subs.iter() {
         if ws.send(WsMsg::Text(proto::join(*platform, channel).into())).is_err() {
             return SessionEnd::Dropped;
         }
@@ -136,17 +138,28 @@ fn session(
             Err(_) => return SessionEnd::Dropped,
         }
 
-        // drain queued outbound chat sends (kick only; twitch has no send path).
+        // drain queued outbound requests.
         while let Ok(o) = out.try_recv() {
-            match o {
+            let frame = match o {
                 Outbound::Chat { platform: Platform::Kick, channel, text } => {
                     *req += 1;
-                    let frame = proto::send_kick(&channel, &text, *req);
-                    if ws.send(WsMsg::Text(frame.into())).is_err() {
-                        return SessionEnd::Dropped;
-                    }
+                    proto::send_kick(&channel, &text, *req)
                 }
-                Outbound::Chat { platform: Platform::Twitch, .. } => {}
+                // twitch has no send path — silently drop.
+                Outbound::Chat { platform: Platform::Twitch, .. } => continue,
+                Outbound::Join { platform, channel } => {
+                    if !subs.iter().any(|(p, c)| *p == platform && c == &channel) {
+                        subs.push((platform, channel.clone()));
+                    }
+                    proto::join(platform, &channel)
+                }
+                Outbound::Part { platform, channel } => {
+                    subs.retain(|(p, c)| !(*p == platform && c == &channel));
+                    proto::part(platform, &channel)
+                }
+            };
+            if ws.send(WsMsg::Text(frame.into())).is_err() {
+                return SessionEnd::Dropped;
             }
         }
 

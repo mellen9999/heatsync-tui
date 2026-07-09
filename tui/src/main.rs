@@ -5,6 +5,7 @@
 
 #[allow(dead_code)]
 mod cli;
+mod config;
 mod emote;
 mod http;
 mod net;
@@ -13,6 +14,7 @@ use std::io;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use config::TabPos;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use emote::fb::FbEmotes;
 use emote::render::{EmoteStore, EMOTE_H, EMOTE_W};
@@ -23,7 +25,7 @@ use net::{ChatEvent, Sub};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 use ratatui_image::Image;
 use unicode_width::UnicodeWidthStr;
@@ -40,11 +42,13 @@ enum Feed {
     },
 }
 
-/// vim-style modes: navigate in Normal, type a message in Insert.
+/// vim-style modes: navigate in Normal, type a message in Insert, type a channel
+/// to join in Join.
 #[derive(Clone, Copy, PartialEq)]
 enum InputMode {
     Normal,
     Insert,
+    Join,
 }
 
 struct App {
@@ -60,6 +64,7 @@ struct App {
     input: String,
     status: Option<String>,          // transient one-line notice (send errors, etc.)
     out: Option<net::Tx>,            // outbound channel to the live WS thread
+    tab_pos: TabPos,
 }
 
 /// which emote backend a channel column should draw with this frame.
@@ -93,6 +98,7 @@ fn main() -> io::Result<()> {
 
     let mock_mode = args.iter().any(|a| a == "--mock");
     let chan_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    let tab_pos = config::load().tab_pos;
 
     let app = if mock_mode {
         App {
@@ -108,9 +114,10 @@ fn main() -> io::Result<()> {
             input: String::new(),
             status: None,
             out: None,
+            tab_pos,
         }
     } else {
-        build_live(&chan_args)
+        build_live(&chan_args, tab_pos)
     };
 
     // must probe the terminal for graphics BEFORE raw mode / alt screen.
@@ -122,7 +129,7 @@ fn main() -> io::Result<()> {
 
 /// parse channel args (`name`, `twitch:name`, `kick:name`), fetch emote sets,
 /// and start the live feed. prints a one-line loading note before raw mode.
-fn build_live(chan_args: &[&String]) -> App {
+fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
     let subs: Vec<Sub> = if chan_args.is_empty() {
         vec![
             (Platform::Twitch, "xqc".into()),
@@ -172,6 +179,7 @@ fn build_live(chan_args: &[&String]) -> App {
         input: String::new(),
         status: None,
         out: Some(out),
+        tab_pos,
     }
 }
 
@@ -223,7 +231,10 @@ enum Flow {
     Quit,
 }
 
-/// dispatch a keypress by mode. Normal = hjkl navigation; Insert = type a line.
+/// dispatch a keypress by mode. Normal = navigation; Insert = compose a message;
+/// Join = type a channel to open. tab nav is orientation-aware: with a vertical
+/// bar (left/right) j/k move between tabs; with a horizontal bar h/l do. arrows
+/// always work (left/right = tabs, up/down = scroll).
 fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
         return Flow::Quit;
@@ -238,31 +249,47 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             KeyCode::Char(c) => app.input.push(c),
             _ => {}
         },
+        InputMode::Join => match k.code {
+            KeyCode::Esc => {
+                app.mode = InputMode::Normal;
+                app.input.clear();
+            }
+            KeyCode::Enter => join_channel(app),
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            KeyCode::Char(c) => app.input.push(c),
+            _ => {}
+        },
         InputMode::Normal => {
-            let order = sorted_order(&app.channels);
-            let pos = order.iter().position(|&i| i == app.focus).unwrap_or(0);
+            let vert = app.tab_pos.is_vertical();
             match k.code {
                 KeyCode::Char('q') => return Flow::Quit,
-                // h/l move focus between columns (left/right), j/k scroll.
-                KeyCode::Char('h') => {
-                    if pos > 0 {
-                        app.focus = order[pos - 1];
-                        app.scroll = 0;
-                    }
-                }
-                KeyCode::Char('l') => {
-                    if pos + 1 < order.len() {
-                        app.focus = order[pos + 1];
-                        app.scroll = 0;
-                    }
-                }
-                KeyCode::Char('j') => app.scroll = app.scroll.saturating_sub(1), // toward newest
-                KeyCode::Char('k') => app.scroll = app.scroll.saturating_add(1), // toward older
-                KeyCode::Char('g') => app.scroll = usize::MAX / 2,               // jump to oldest loaded
-                KeyCode::Char('G') => app.scroll = 0,                            // jump to newest
+                KeyCode::Char('j') if vert => next_tab(app),
+                KeyCode::Char('k') if vert => prev_tab(app),
+                KeyCode::Char('j') => app.scroll = app.scroll.saturating_sub(1), // newer
+                KeyCode::Char('k') => app.scroll = app.scroll.saturating_add(1), // older
+                KeyCode::Char('h') if !vert => prev_tab(app),
+                KeyCode::Char('l') if !vert => next_tab(app),
+                KeyCode::Left => prev_tab(app),
+                KeyCode::Right => next_tab(app),
+                KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
+                KeyCode::Up => app.scroll = app.scroll.saturating_add(1),
+                KeyCode::Char('g') => app.scroll = usize::MAX / 2, // oldest loaded
+                KeyCode::Char('G') => app.scroll = 0,              // newest
                 KeyCode::Char('i') | KeyCode::Char('a') => {
                     app.mode = InputMode::Insert;
                     app.status = None;
+                }
+                KeyCode::Char('o') => {
+                    app.mode = InputMode::Join;
+                    app.input.clear();
+                    app.status = None;
+                }
+                KeyCode::Char('x') => close_channel(app),
+                KeyCode::Char('T') => {
+                    app.tab_pos = app.tab_pos.next();
+                    config::save(&config::Config { tab_pos: app.tab_pos });
                 }
                 KeyCode::Char(' ') => app.paused = !app.paused,
                 KeyCode::Esc => app.status = None,
@@ -271,6 +298,65 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         }
     }
     Flow::Continue
+}
+
+fn next_tab(app: &mut App) {
+    if app.focus + 1 < app.channels.len() {
+        app.focus += 1;
+        app.scroll = 0;
+    }
+}
+
+fn prev_tab(app: &mut App) {
+    if app.focus > 0 {
+        app.focus -= 1;
+        app.scroll = 0;
+    }
+}
+
+/// open a new channel tab from the Join input (`name` or `kick:name`). fetches
+/// its emote set inline (~1s) and subscribes over the live WS.
+fn join_channel(app: &mut App) {
+    let tok = app.input.trim().to_string();
+    app.mode = InputMode::Normal;
+    app.input.clear();
+    if tok.is_empty() {
+        return;
+    }
+    let (platform, name) = parse_sub(&tok);
+    if let Some(i) = app
+        .channels
+        .iter()
+        .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
+    {
+        app.focus = i; // already open → just switch to it
+        return;
+    }
+    if let Some(out) = &app.out {
+        let _ = out.send(net::Outbound::Join { platform, channel: name.clone() });
+    }
+    app.channels.push(Channel::new(&name, platform, 200));
+    app.emotes.push(http::emote_set(&name, platform).unwrap_or_default());
+    app.focus = app.channels.len() - 1;
+    app.scroll = 0;
+}
+
+/// leave the active channel tab.
+fn close_channel(app: &mut App) {
+    if app.channels.is_empty() {
+        return;
+    }
+    let (platform, name) = {
+        let c = &app.channels[app.focus];
+        (c.platform, c.name.clone())
+    };
+    if let Some(out) = &app.out {
+        let _ = out.send(net::Outbound::Part { platform, channel: name });
+    }
+    app.channels.remove(app.focus);
+    app.emotes.remove(app.focus);
+    app.focus = app.focus.min(app.channels.len().saturating_sub(1));
+    app.scroll = 0;
 }
 
 /// send the current input line to the focused channel (kick only; twitch has no
@@ -370,123 +456,160 @@ fn advance(app: &mut App) {
     }
 }
 
-fn sorted_order(channels: &[Channel]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..channels.len()).collect();
-    order.sort_by(|&a, &b| {
-        channels[b]
-            .heat
-            .partial_cmp(&channels[a].heat)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(channels[a].name.cmp(&channels[b].name))
-    });
-    order
-}
+/// width of the tab column when the bar is vertical (left/right).
+const TAB_COL_W: u16 = 16;
 
-fn ui(f: &mut Frame, app: &App) {
-    let [grid, footer] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
-
-    let order = sorted_order(&app.channels);
-    if order.is_empty() {
-        return;
-    }
-    let cols = Layout::horizontal(order.iter().map(|_| Constraint::Fill(1)).collect::<Vec<_>>())
-        .split(grid);
-
-    let mode = if let Some(s) = &app.store {
+fn emote_mode(app: &App) -> EmoteMode<'_> {
+    if let Some(s) = &app.store {
         EmoteMode::Term(s)
     } else if let Some(f) = &app.fb {
         EmoteMode::Fb(f)
     } else {
         EmoteMode::Text
-    };
-
-    for (slot, (&ch_idx, area)) in order.iter().zip(cols.iter()).enumerate() {
-        let scroll = if ch_idx == app.focus { app.scroll } else { 0 };
-        draw_channel(
-            f,
-            *area,
-            &app.channels[ch_idx],
-            &app.emotes[ch_idx],
-            mode,
-            slot + 1,
-            ch_idx == app.focus,
-            scroll,
-        );
     }
-
-    draw_footer(f, footer, app, order.len());
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_channel(
-    f: &mut Frame,
-    area: Rect,
-    ch: &Channel,
-    set: &EmoteSet,
-    mode: EmoteMode,
-    slot: usize,
-    focused: bool,
-    scroll: usize,
-) {
-    let tier = Tier::of(ch.heat);
-    let hue = Color::Indexed(tier.xterm());
-    let border = if focused { BRAND } else { Color::Indexed(240) };
+fn ui(f: &mut Frame, app: &App) {
+    let mode = emote_mode(app);
+    let [main, footer] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
 
-    let mut title = vec![
-        Span::styled(format!(" {slot} "), Style::default().fg(Color::Black).bg(border)),
-        Span::raw(" "),
-        Span::styled(&ch.name, Style::default().fg(hue).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("·{}", ch.platform.tag()), Style::default().fg(Color::Indexed(240))),
-        Span::raw("  "),
-        Span::styled(format!("{:.0}", ch.heat), Style::default().fg(hue).add_modifier(Modifier::BOLD)),
-    ];
-    if !tier.marker().is_empty() {
-        title.push(Span::raw(" "));
-        title.push(Span::styled(
-            tier.marker(),
-            Style::default().fg(Color::Indexed(231)).add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border))
-        .title(Line::from(title));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.height == 0 || inner.width == 0 {
+    if app.channels.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  no channels — press ", Style::default().fg(Color::Indexed(244))),
+                Span::styled("o", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
+                Span::styled(" to join one", Style::default().fg(Color::Indexed(244))),
+            ])),
+            main,
+        );
+        draw_footer(f, footer, app, 0);
         return;
     }
 
-    let bar_area = Rect { height: 1, ..inner };
-    f.render_widget(Paragraph::new(heat_bar(ch.heat, inner.width as usize)), bar_area);
+    // carve the tab bar out of `main` according to the configured position.
+    let (tabs, chat) = match app.tab_pos {
+        TabPos::Top => {
+            let a = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(main);
+            (a[0], a[1])
+        }
+        TabPos::Bottom => {
+            let a = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(main);
+            (a[1], a[0])
+        }
+        TabPos::Left => {
+            let a = Layout::horizontal([Constraint::Length(TAB_COL_W), Constraint::Min(0)]).split(main);
+            (a[0], a[1])
+        }
+        TabPos::Right => {
+            let a = Layout::horizontal([Constraint::Min(0), Constraint::Length(TAB_COL_W)]).split(main);
+            (a[1], a[0])
+        }
+    };
 
-    let body = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
+    draw_tabs(f, tabs, app);
+    draw_active(f, chat, app, mode);
+    draw_footer(f, footer, app, app.channels.len());
+}
+
+/// the channel tab bar — horizontal row (top/bottom) or vertical list (left/right).
+fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
+    let tab_style = |i: usize, heat: f64| {
+        if i == app.focus {
+            Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Indexed(Tier::of(heat).xterm()))
+        }
+    };
+
+    if app.tab_pos.is_vertical() {
+        for (i, ch) in app.channels.iter().enumerate() {
+            if i as u16 >= area.height {
+                break;
+            }
+            let label = fit(format!(" {} {:.0} ", ch.name, ch.heat), area.width);
+            let row = Rect { x: area.x, y: area.y + i as u16, width: area.width, height: 1 };
+            f.render_widget(Paragraph::new(Line::from(Span::styled(label, tab_style(i, ch.heat)))), row);
+        }
+    } else {
+        let mut spans = Vec::new();
+        for (i, ch) in app.channels.iter().enumerate() {
+            spans.push(Span::styled(
+                format!(" {}·{} {:.0} ", ch.name, ch.platform.tag(), ch.heat),
+                tab_style(i, ch.heat),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+}
+
+/// the active channel: a heat bar, then its chat. messages with a ready emote
+/// occupy EMOTE_H rows (text on the bottom row, emote painted across the block),
+/// so emotes render big without colliding with neighbouring lines. bottom-anchored.
+fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
+    let ch = &app.channels[app.focus];
+    let set = &app.emotes[app.focus];
+    let [barrow, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    f.render_widget(Paragraph::new(heat_bar(ch.heat, barrow.width as usize)), barrow);
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
+
     let cap = body.height as usize;
-    let total = ch.messages.len();
-    let end = total.saturating_sub(scroll);
-    let start = end.saturating_sub(cap);
+    // plan visible messages newest-first, honouring per-message height + scroll.
+    let mut plan: Vec<(&Message, usize)> = Vec::new();
+    let mut used = 0usize;
+    for m in ch.messages.iter().rev().skip(app.scroll) {
+        let h = if has_ready_emote(m, set, mode) { EMOTE_H as usize } else { 1 };
+        if used + h > cap {
+            break;
+        }
+        used += h;
+        plan.push((m, h));
+    }
+    plan.reverse();
 
-    // one message per row; text via paragraph. ready emotes get blank cells
-    // reserved, then filled by the active tier (terminal image widget inline, or
-    // framebuffer pixels after the frame). unloaded emotes show their name.
-    for (r, m) in ch.messages.iter().take(end).skip(start).enumerate() {
-        let y = body.y + r as u16;
+    let mut y = body.y + (cap - used) as u16; // bottom-anchor
+    for (m, h) in plan {
+        let text_row = y + (h as u16 - 1);
         let (line, places) = layout_message(m, set, mode, body.width);
-        f.render_widget(Paragraph::new(line), Rect { x: body.x, y, width: body.width, height: 1 });
+        f.render_widget(
+            Paragraph::new(line),
+            Rect { x: body.x, y: text_row, width: body.width, height: 1 },
+        );
         for p in &places {
             let x = body.x + p.col;
             match mode {
                 EmoteMode::Term(store) => {
                     if let Some(proto) = store.frame(&p.url) {
-                        f.render_widget(Image::new(proto), Rect { x, y, width: EMOTE_W, height: EMOTE_H });
+                        f.render_widget(Image::new(proto), Rect { x, y, width: EMOTE_W, height: h as u16 });
                     }
                 }
                 EmoteMode::Fb(fb) => fb.push(x, y, &p.url),
                 EmoteMode::Text => {}
             }
         }
+        y += h as u16;
+    }
+}
+
+/// does this message contain at least one loaded (ready-to-draw) emote?
+fn has_ready_emote(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
+    tokenize(&m.text, set).into_iter().any(|t| match t {
+        Token::Emote(name) => set.get(&name).map_or(false, |e| mode.ready(&e.url)),
+        Token::Text(_) => false,
+    })
+}
+
+/// truncate a label to `w` display columns (approximate; ASCII-dominant labels).
+fn fit(s: String, w: u16) -> String {
+    let w = w as usize;
+    if UnicodeWidthStr::width(s.as_str()) <= w {
+        s
+    } else {
+        s.chars().take(w.saturating_sub(1)).collect()
     }
 }
 
@@ -559,8 +682,20 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
+    // Join mode → type a channel to open.
+    if app.mode == InputMode::Join {
+        let spans = vec![
+            Span::styled(" join ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
+            Span::styled(" ❯ ", Style::default().fg(BRAND)),
+            Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))),
+            Span::styled("\u{2588}", Style::default().fg(BRAND)),
+            Span::styled("   name or kick:name", Style::default().fg(Color::Indexed(240))),
+        ];
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     // Insert mode → the message composer for the focused channel.
-    if app.mode == InputMode::Insert {
+    if app.mode == InputMode::Insert && !app.channels.is_empty() {
         let ch = &app.channels[app.focus];
         let readonly = ch.platform == Platform::Twitch;
         let prompt = format!(" {}·{} ", ch.name, ch.platform.tag());
@@ -583,14 +718,19 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         Feed::Live { connected: true, .. } => ("\u{25cf} ", Color::Indexed(46), "live".to_string()),
         Feed::Live { connected: false, .. } => ("\u{25cf} ", Color::Indexed(214), "connecting".to_string()),
     };
+    let nav = if app.tab_pos.is_vertical() { "jk" } else { "hl" };
     let mut spans = vec![
         Span::styled(" heatsync ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
-        Span::styled("  hl ", Style::default().fg(BRAND)),
+        Span::styled(format!("  {nav} "), Style::default().fg(BRAND)),
         Span::raw("chan  "),
-        Span::styled("jk ", Style::default().fg(BRAND)),
-        Span::raw("scroll  "),
         Span::styled("i ", Style::default().fg(BRAND)),
         Span::raw("say  "),
+        Span::styled("o ", Style::default().fg(BRAND)),
+        Span::raw("join  "),
+        Span::styled("x ", Style::default().fg(BRAND)),
+        Span::raw("close  "),
+        Span::styled("T ", Style::default().fg(BRAND)),
+        Span::raw("tabs  "),
         Span::styled("q ", Style::default().fg(BRAND)),
         Span::raw("quit  "),
     ];
