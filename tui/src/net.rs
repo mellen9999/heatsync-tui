@@ -23,12 +23,22 @@ const BACKOFF_MAX: Duration = Duration::from_secs(15);
 /// a channel to subscribe to.
 pub type Sub = (Platform, String);
 
-/// spawn the live feed. returns the receiver of chat lines; the thread runs
-/// until the receiver is dropped (app exit).
-pub fn spawn(subs: Vec<Sub>) -> Receiver<ChatEvent> {
+/// outbound requests from the app to the WS thread.
+pub enum Outbound {
+    Chat { platform: Platform, channel: String, text: String },
+}
+
+/// the app's handle for sending outbound frames.
+pub type Tx = mpsc::Sender<Outbound>;
+
+/// spawn the live feed. returns the inbound chat receiver and an outbound sender.
+/// the thread runs until the inbound receiver is dropped (app exit). if `token`
+/// is set, the thread authenticates on every (re)connect so sends are allowed.
+pub fn spawn(subs: Vec<Sub>, token: Option<String>) -> (Receiver<ChatEvent>, Tx) {
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || run(subs, tx));
-    rx
+    let (out_tx, out_rx) = mpsc::channel();
+    thread::spawn(move || run(subs, token, tx, out_rx));
+    (rx, out_tx)
 }
 
 /// what the feed reports upward — chat plus connection state for the status bar.
@@ -36,12 +46,15 @@ pub enum ChatEvent {
     Line(proto::ChatLine),
     Connected,
     Disconnected,
+    Auth(bool),
+    SendResult { ok: bool, error: Option<String> },
 }
 
-fn run(subs: Vec<Sub>, tx: Sender<ChatEvent>) {
+fn run(subs: Vec<Sub>, token: Option<String>, tx: Sender<ChatEvent>, out: Receiver<Outbound>) {
     let mut backoff = Duration::from_secs(1);
+    let mut req = 0u64;
     loop {
-        match session(&subs, &tx) {
+        match session(&subs, &token, &tx, &out, &mut req) {
             // receiver gone → app closed, stop the thread.
             SessionEnd::ReceiverGone => return,
             SessionEnd::Dropped => {
@@ -58,14 +71,26 @@ enum SessionEnd {
     Dropped,
 }
 
-fn session(subs: &[Sub], tx: &Sender<ChatEvent>) -> SessionEnd {
+fn session(
+    subs: &[Sub],
+    token: &Option<String>,
+    tx: &Sender<ChatEvent>,
+    out: &Receiver<Outbound>,
+    req: &mut u64,
+) -> SessionEnd {
     let mut ws = match tungstenite::connect(WS_URL) {
         Ok((ws, _resp)) => ws,
         Err(_) => return SessionEnd::Dropped,
     };
-    // non-blocking-ish reads so we can heartbeat from this one thread.
+    // non-blocking-ish reads so we can heartbeat + drain sends from one thread.
     if let Ok(sock) = tcp_of(&mut ws) {
         let _ = sock.set_read_timeout(Some(READ_TIMEOUT));
+    }
+    // authenticate first (required before any send is accepted).
+    if let Some(t) = token {
+        if ws.send(WsMsg::Text(proto::authenticate(t).into())).is_err() {
+            return SessionEnd::Dropped;
+        }
     }
     for (platform, channel) in subs {
         if ws.send(WsMsg::Text(proto::join(*platform, channel).into())).is_err() {
@@ -92,6 +117,12 @@ fn session(subs: &[Sub], tx: &Sender<ChatEvent>) -> SessionEnd {
                         }
                     }
                 }
+                Event::Auth(ok) => {
+                    let _ = tx.send(ChatEvent::Auth(ok));
+                }
+                Event::SendResult { ok, error } => {
+                    let _ = tx.send(ChatEvent::SendResult { ok, error });
+                }
                 _ => {}
             },
             Ok(WsMsg::Ping(p)) => {
@@ -99,10 +130,24 @@ fn session(subs: &[Sub], tx: &Sender<ChatEvent>) -> SessionEnd {
             }
             Ok(WsMsg::Close(_)) => return SessionEnd::Dropped,
             Ok(_) => {}
-            // read timeout / would-block → not an error, go heartbeat.
+            // read timeout / would-block → not an error, go drain sends + heartbeat.
             Err(tungstenite::Error::Io(e))
                 if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
             Err(_) => return SessionEnd::Dropped,
+        }
+
+        // drain queued outbound chat sends (kick only; twitch has no send path).
+        while let Ok(o) = out.try_recv() {
+            match o {
+                Outbound::Chat { platform: Platform::Kick, channel, text } => {
+                    *req += 1;
+                    let frame = proto::send_kick(&channel, &text, *req);
+                    if ws.send(WsMsg::Text(frame.into())).is_err() {
+                        return SessionEnd::Dropped;
+                    }
+                }
+                Outbound::Chat { platform: Platform::Twitch, .. } => {}
+            }
         }
 
         if last_hb.elapsed() >= HEARTBEAT {

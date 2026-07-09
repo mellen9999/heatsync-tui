@@ -22,6 +22,10 @@ pub struct ChatLine {
 pub enum Event {
     Chat(ChatLine),
     Backfill(Vec<ChatLine>),
+    /// authentication outcome (true = ok).
+    Auth(bool),
+    /// result of an outbound send: ok, or an error reason.
+    SendResult { ok: bool, error: Option<String> },
     Pong,
     Ignore,
 }
@@ -56,6 +60,12 @@ pub fn parse(raw: &str) -> Event {
                 .unwrap_or_default();
             Event::Backfill(lines)
         }
+        "authenticated" => Event::Auth(true),
+        "authentication_failed" => Event::Auth(false),
+        "chat:send_kick_result" | "chat:send_youtube_result" => Event::SendResult {
+            ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false),
+            error: v.get("error").and_then(Value::as_str).map(|s| s.to_string()),
+        },
         "pong" => Event::Pong,
         _ => Event::Ignore,
     }
@@ -118,6 +128,25 @@ pub fn part(platform: Platform, channel: &str) -> String {
 /// outbound: keepalive, send every ~10s (server replies `pong`).
 pub fn heartbeat() -> String {
     json!({ "type": "presence:heartbeat" }).to_string()
+}
+
+/// outbound: authenticate a session so sends are accepted. server replies
+/// `authenticated` / `authentication_failed`.
+pub fn authenticate(token: &str) -> String {
+    json!({ "type": "authenticate", "token": token }).to_string()
+}
+
+/// outbound: post a message to a kick channel (relayed via the user's extension).
+/// text is 1–500 chars server-side; `req` correlates the result frame.
+/// note: twitch has NO send path — the relay ingests twitch read-only.
+pub fn send_kick(channel: &str, text: &str, req: u64) -> String {
+    json!({
+        "type": "chat:send_kick",
+        "channel": channel,
+        "text": text,
+        "reqId": req.to_string(),
+    })
+    .to_string()
 }
 
 #[cfg(test)]

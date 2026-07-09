@@ -40,6 +40,13 @@ enum Feed {
     },
 }
 
+/// vim-style modes: navigate in Normal, type a message in Insert.
+#[derive(Clone, Copy, PartialEq)]
+enum InputMode {
+    Normal,
+    Insert,
+}
+
 struct App {
     channels: Vec<Channel>,
     emotes: Vec<EmoteSet>, // index-aligned with channels
@@ -49,6 +56,10 @@ struct App {
     feed: Feed,
     store: Option<EmoteStore>, // terminal graphics tier (sixel/kitty/…)
     fb: Option<FbEmotes>,      // bare-console framebuffer tier (TERM=linux)
+    mode: InputMode,
+    input: String,
+    status: Option<String>,          // transient one-line notice (send errors, etc.)
+    out: Option<net::Tx>,            // outbound channel to the live WS thread
 }
 
 /// which emote backend a channel column should draw with this frame.
@@ -93,6 +104,10 @@ fn main() -> io::Result<()> {
             feed: Feed::Mock(mock::Driver::new()),
             store: None,
             fb: None,
+            mode: InputMode::Normal,
+            input: String::new(),
+            status: None,
+            out: None,
         }
     } else {
         build_live(&chan_args)
@@ -138,7 +153,8 @@ fn build_live(chan_args: &[&String]) -> App {
         emotes.push(http::emote_set(name, *platform).unwrap_or_default());
     }
 
-    let rx = net::spawn(subs);
+    let token = std::env::var("HEATSYNC_TOKEN").ok().filter(|t| !t.is_empty());
+    let (rx, out) = net::spawn(subs, token);
     App {
         channels,
         emotes,
@@ -152,6 +168,10 @@ fn build_live(chan_args: &[&String]) -> App {
         },
         store,
         fb,
+        mode: InputMode::Normal,
+        input: String::new(),
+        status: None,
+        out: Some(out),
     }
 }
 
@@ -180,30 +200,10 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         let wait = tick.saturating_sub(last.elapsed());
         if event::poll(wait)? {
             if let Event::Key(k) = event::read()? {
-                if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                    let order = sorted_order(&app.channels);
-                    match k.code {
-                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            return Ok(())
-                        }
-                        KeyCode::Char('j') => app.scroll = app.scroll.saturating_add(1),
-                        KeyCode::Char('k') => app.scroll = app.scroll.saturating_sub(1),
-                        KeyCode::Char(' ') => app.paused = !app.paused,
-                        KeyCode::Tab => {
-                            let pos = order.iter().position(|&i| i == app.focus).unwrap_or(0);
-                            app.focus = order[(pos + 1) % order.len()];
-                            app.scroll = 0;
-                        }
-                        KeyCode::Char(c @ '1'..='9') => {
-                            let idx = c as usize - '1' as usize;
-                            if idx < order.len() {
-                                app.focus = order[idx];
-                                app.scroll = 0;
-                            }
-                        }
-                        _ => {}
-                    }
+                if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && handle_key(&mut app, k) == Flow::Quit
+                {
+                    return Ok(());
                 }
             }
         }
@@ -217,10 +217,96 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     }
 }
 
+#[derive(PartialEq)]
+enum Flow {
+    Continue,
+    Quit,
+}
+
+/// dispatch a keypress by mode. Normal = hjkl navigation; Insert = type a line.
+fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
+    if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
+        return Flow::Quit;
+    }
+    match app.mode {
+        InputMode::Insert => match k.code {
+            KeyCode::Esc => app.mode = InputMode::Normal,
+            KeyCode::Enter => send_focused(app),
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            KeyCode::Char(c) => app.input.push(c),
+            _ => {}
+        },
+        InputMode::Normal => {
+            let order = sorted_order(&app.channels);
+            let pos = order.iter().position(|&i| i == app.focus).unwrap_or(0);
+            match k.code {
+                KeyCode::Char('q') => return Flow::Quit,
+                // h/l move focus between columns (left/right), j/k scroll.
+                KeyCode::Char('h') => {
+                    if pos > 0 {
+                        app.focus = order[pos - 1];
+                        app.scroll = 0;
+                    }
+                }
+                KeyCode::Char('l') => {
+                    if pos + 1 < order.len() {
+                        app.focus = order[pos + 1];
+                        app.scroll = 0;
+                    }
+                }
+                KeyCode::Char('j') => app.scroll = app.scroll.saturating_sub(1), // toward newest
+                KeyCode::Char('k') => app.scroll = app.scroll.saturating_add(1), // toward older
+                KeyCode::Char('g') => app.scroll = usize::MAX / 2,               // jump to oldest loaded
+                KeyCode::Char('G') => app.scroll = 0,                            // jump to newest
+                KeyCode::Char('i') | KeyCode::Char('a') => {
+                    app.mode = InputMode::Insert;
+                    app.status = None;
+                }
+                KeyCode::Char(' ') => app.paused = !app.paused,
+                KeyCode::Esc => app.status = None,
+                _ => {}
+            }
+        }
+    }
+    Flow::Continue
+}
+
+/// send the current input line to the focused channel (kick only; twitch has no
+/// send path). clears the input on a successful enqueue.
+fn send_focused(app: &mut App) {
+    let text = app.input.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    let (platform, name) = {
+        let c = &app.channels[app.focus];
+        (c.platform, c.name.clone())
+    };
+    match platform {
+        Platform::Twitch => {
+            app.status = Some("twitch is read-only — no send path".into());
+        }
+        Platform::Kick => match &app.out {
+            Some(out) => {
+                let _ = out.send(net::Outbound::Chat {
+                    platform: Platform::Kick,
+                    channel: name.clone(),
+                    text,
+                });
+                app.input.clear();
+                app.status = Some(format!("sent → {name}"));
+            }
+            None => app.status = Some("not connected".into()),
+        },
+    }
+}
+
 /// pull new data into the channel buffers for this tick, and keep the emote
 /// image cache warm for what's on screen.
 fn advance(app: &mut App) {
-    let App { channels, emotes, feed, store, fb, .. } = app;
+    let App { channels, emotes, feed, store, fb, status, .. } = app;
     match feed {
         Feed::Mock(driver) => driver.tick(channels),
         Feed::Live { rx, start, connected } => {
@@ -239,6 +325,14 @@ fn advance(app: &mut App) {
                     }
                     ChatEvent::Connected => *connected = true,
                     ChatEvent::Disconnected => *connected = false,
+                    ChatEvent::Auth(ok) => {
+                        *status = Some(if ok { "authenticated".into() } else { "auth failed — check HEATSYNC_TOKEN".into() });
+                    }
+                    ChatEvent::SendResult { ok, error } => {
+                        if !ok {
+                            *status = Some(format!("send failed: {}", error.unwrap_or_default()));
+                        }
+                    }
                 }
             }
             for ch in channels.iter_mut() {
@@ -465,6 +559,25 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
+    // Insert mode → the message composer for the focused channel.
+    if app.mode == InputMode::Insert {
+        let ch = &app.channels[app.focus];
+        let readonly = ch.platform == Platform::Twitch;
+        let prompt = format!(" {}·{} ", ch.name, ch.platform.tag());
+        let mut spans = vec![
+            Span::styled(prompt, Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
+            Span::styled(" ❯ ", Style::default().fg(BRAND)),
+        ];
+        if readonly {
+            spans.push(Span::styled("twitch is read-only — esc", Style::default().fg(Color::Indexed(214))));
+        } else {
+            spans.push(Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))));
+            spans.push(Span::styled("\u{2588}", Style::default().fg(BRAND))); // cursor
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+
     let (dot, dot_color, state) = match &app.feed {
         Feed::Mock(_) => ("\u{25cb} ", Color::Indexed(244), "mock".to_string()),
         Feed::Live { connected: true, .. } => ("\u{25cf} ", Color::Indexed(46), "live".to_string()),
@@ -472,17 +585,20 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     };
     let mut spans = vec![
         Span::styled(" heatsync ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
-        Span::styled("  q ", Style::default().fg(BRAND)),
-        Span::raw("quit  "),
-        Span::styled("j/k ", Style::default().fg(BRAND)),
+        Span::styled("  hl ", Style::default().fg(BRAND)),
+        Span::raw("chan  "),
+        Span::styled("jk ", Style::default().fg(BRAND)),
         Span::raw("scroll  "),
-        Span::styled("1-9 ", Style::default().fg(BRAND)),
-        Span::raw("focus  "),
-        Span::styled("tab ", Style::default().fg(BRAND)),
-        Span::raw("cycle  "),
+        Span::styled("i ", Style::default().fg(BRAND)),
+        Span::raw("say  "),
+        Span::styled("q ", Style::default().fg(BRAND)),
+        Span::raw("quit  "),
     ];
     if app.paused {
         spans.push(Span::styled("PAUSED  ", Style::default().fg(Color::Indexed(214)).add_modifier(Modifier::BOLD)));
+    }
+    if let Some(s) = &app.status {
+        spans.push(Span::styled(format!("{s}  "), Style::default().fg(Color::Indexed(214))));
     }
     spans.push(Span::styled(dot, Style::default().fg(dot_color)));
     spans.push(Span::styled(format!("{state} · {n} ch"), Style::default().fg(Color::Indexed(244))));
