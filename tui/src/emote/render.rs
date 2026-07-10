@@ -67,16 +67,24 @@ impl EmoteStore {
     /// steals our keypresses → a hang. env-gating sidesteps that entirely: any
     /// terminal we can't positively identify as graphics-capable gets text mode.
     pub fn new() -> Option<EmoteStore> {
-        // only probe terminals we can positively identify as graphics-capable
-        // (see graphics_capable_env). crucially this excludes tmux: inside a
-        // multiplexer the stdio capability query often gets no clean response, and
-        // ratatui-image's reader thread then lingers on stdin and STEALS our
-        // keypresses — a dead keyboard. so tmux → text tier; for sixel emotes,
-        // run the client directly in a graphics terminal (e.g. foot), not tmux.
-        if !graphics_capable_env() {
-            return None;
-        }
-        let picker = Picker::from_query_stdio().ok()?;
+        // build a Picker for the terminal's inline-graphics protocol. inside tmux
+        // we must NOT run the stdio capability query: its reader thread lingers on
+        // stdin and steals keypresses (dead keyboard). instead we learn the OUTER
+        // terminal from tmux and the cell pixel size from an ioctl — both stdin-
+        // free — and force the matching protocol. from_fontsize still reads the
+        // env-detected is_tmux, so output is wrapped in tmux passthrough and
+        // reaches the outer terminal intact.
+        let picker = if std::env::var_os("TMUX").is_some() {
+            let proto = tmux_outer_protocol()?;
+            let mut p = Picker::from_fontsize(cell_pixels()?);
+            p.set_protocol_type(proto);
+            p
+        } else {
+            if !graphics_capable_env() {
+                return None;
+            }
+            Picker::from_query_stdio().ok()?
+        };
         let proto = picker.protocol_type();
         // a terminal that only offers halfblocks renders emotes as blocky mush;
         // clean text names read better, so fall back to text in that case.
@@ -151,6 +159,43 @@ impl EmoteStore {
         self.budget_left.set(left - 1);
         let idx = frame_index(frames, now);
         Some(&frames[idx].proto)
+    }
+}
+
+/// cell size in pixels via TIOCGWINSZ (crossterm reads the tty geometry, never
+/// stdin). None when the terminal reports no pixel dimensions to divide by.
+fn cell_pixels() -> Option<(u16, u16)> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    if ws.width == 0 || ws.height == 0 || ws.columns == 0 || ws.rows == 0 {
+        return None;
+    }
+    Some((ws.width / ws.columns, ws.height / ws.rows))
+}
+
+/// inside tmux, ask tmux for the attached client's terminal (the OUTER emulator,
+/// which tmux masks behind TERM=tmux-256color) and map it to a forced graphics
+/// protocol: kitty for kitty/ghostty, sixel for foot/wezterm/mlterm/contour.
+/// None → the outer terminal isn't a known graphics-capable one → text tier.
+/// this is how we get inline emotes in tmux without a stdin-stealing query.
+fn tmux_outer_protocol() -> Option<ProtocolType> {
+    let out = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#{client_termname}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let term = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+    if term.contains("kitty") || term.contains("ghostty") {
+        Some(ProtocolType::Kitty)
+    } else if term.starts_with("foot")
+        || term.contains("wezterm")
+        || term.contains("mlterm")
+        || term.contains("contour")
+    {
+        Some(ProtocolType::Sixel)
+    } else {
+        None
     }
 }
 
