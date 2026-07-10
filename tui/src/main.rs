@@ -279,7 +279,12 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     // nothing and only the changed emote cells cost anything. text-only / static
     // views stay lazy (redraw only on the tick or a keypress).
     let tick = Duration::from_millis(200);
-    let anim_frame = Duration::from_millis(50);
+    // animation redraw cadence is protocol-tuned: fast + flicker-free on kitty/
+    // iterm2, gentle + tear-free on sixel. text/console tiers never spin fast.
+    let anim_frame = app
+        .store
+        .as_ref()
+        .map_or(Duration::from_millis(100), EmoteStore::anim_interval);
     let mut last = Instant::now();
 
     loop {

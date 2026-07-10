@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use image::DynamicImage;
 use ratatui::layout::Rect;
@@ -103,6 +103,17 @@ impl EmoteStore {
             start: Instant::now(),
             budget_left: Cell::new(DRAW_BUDGET),
         })
+    }
+
+    /// redraw cadence for smooth animation, tuned to the protocol. kitty and
+    /// iterm2 replace an image in place (flicker-free), so they can run fast.
+    /// sixel repaints pixel bands and TEARS if pushed — foot, Windows Terminal,
+    /// xterm all share this — so it gets a gentle, stable cadence instead.
+    pub fn anim_interval(&self) -> Duration {
+        match self.proto {
+            ProtocolType::Kitty | ProtocolType::Iterm2 => Duration::from_millis(40), // ~25fps
+            ProtocolType::Sixel | ProtocolType::Halfblocks => Duration::from_millis(100), // ~10fps, tear-free
+        }
     }
 
     /// a short label for the detected graphics protocol (startup tier readout).
@@ -200,13 +211,11 @@ fn tmux_outer_protocol() -> Option<ProtocolType> {
         return None;
     }
     let term = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
-    if term.contains("kitty") || term.contains("ghostty") {
+    // prefer kitty (flicker-free, in-place image updates) wherever the outer
+    // terminal supports it; sixel only where that's the terminal's best option.
+    if term.contains("kitty") || term.contains("ghostty") || term.contains("wezterm") {
         Some(ProtocolType::Kitty)
-    } else if term.starts_with("foot")
-        || term.contains("wezterm")
-        || term.contains("mlterm")
-        || term.contains("contour")
-    {
+    } else if term.starts_with("foot") || term.contains("mlterm") || term.contains("contour") {
         Some(ProtocolType::Sixel)
     } else {
         None
