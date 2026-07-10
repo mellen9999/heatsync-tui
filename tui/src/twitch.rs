@@ -3,6 +3,7 @@
 //! independent of HeatSync's relay (which only ingests twitch read-only). one
 //! persistent connection on a background thread; reconnects; PING/PONG keepalive.
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -51,11 +52,26 @@ fn session(user: &str, oauth: &str, rx: &Receiver<Send>) -> End {
     if let Some(sock) = tcp_of(&mut ws) {
         let _ = sock.set_read_timeout(Some(READ_TIMEOUT));
     }
-    // authenticate (lowercase nick; PASS carries the oauth: prefix).
-    let hello = format!("PASS oauth:{oauth}\r\nNICK {}\r\n", user.to_lowercase());
-    if ws.send(WsMsg::Text(hello.into())).is_err() {
+    // authenticate (lowercase nick; PASS carries the oauth: prefix). twitch's
+    // ws-irc endpoint wants ONE irc command per frame — a combined
+    // "PASS…\r\nNICK…\r\n" frame gets the connection dropped before auth, so
+    // PASS and NICK must go as separate frames.
+    if ws
+        .send(WsMsg::Text(format!("PASS oauth:{oauth}\r\n").into()))
+        .is_err()
+    {
         return End::Dropped;
     }
+    if ws
+        .send(WsMsg::Text(format!("NICK {}\r\n", user.to_lowercase()).into()))
+        .is_err()
+    {
+        return End::Dropped;
+    }
+
+    // twitch silently drops PRIVMSG to a channel you haven't JOINed, so join each
+    // channel once (per connection) the first time we post to it.
+    let mut joined: HashSet<String> = HashSet::new();
 
     loop {
         match ws.read() {
@@ -79,7 +95,13 @@ fn session(user: &str, oauth: &str, rx: &Receiver<Send>) -> End {
         loop {
             match rx.try_recv() {
                 Ok((channel, text)) => {
-                    let line = format!("PRIVMSG #{} :{}\r\n", channel.to_lowercase(), text);
+                    let chan = channel.to_lowercase();
+                    if joined.insert(chan.clone())
+                        && ws.send(WsMsg::Text(format!("JOIN #{chan}\r\n").into())).is_err()
+                    {
+                        return End::Dropped;
+                    }
+                    let line = format!("PRIVMSG #{chan} :{text}\r\n");
                     if ws.send(WsMsg::Text(line.into())).is_err() {
                         return End::Dropped;
                     }
