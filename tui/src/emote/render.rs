@@ -138,15 +138,28 @@ impl EmoteStore {
         }
     }
 
-    /// drain finished loads into the cache. called on the data tick.
-    pub fn pump(&mut self) {
+    /// drain finished loads into the cache. called on the data tick. returns true
+    /// if ≥1 emote finished loading (the caller forces a full re-emit — see below).
+    pub fn pump(&mut self) -> bool {
+        let mut loaded = false;
         while let Ok(d) = self.done.try_recv() {
             let entry = match d.frames {
                 Some(f) if !f.is_empty() => Entry::Ready(f),
                 _ => Entry::Failed,
             };
             self.cache.insert(d.url, entry);
+            loaded = true;
         }
+        loaded
+    }
+
+    /// sixel/halfblocks emit a freshly-loaded static image once, and foot/tmux can
+    /// drop that single incremental write — ratatui's diff then never re-sends it
+    /// (the cell is unchanged), so the emote stays blank until an unrelated redraw.
+    /// on those tiers we force ONE full re-emit when an emote lands. kitty/iterm2
+    /// update images in place and don't need it.
+    pub fn needs_load_repaint(&self) -> bool {
+        matches!(self.proto, ProtocolType::Sixel | ProtocolType::Halfblocks)
     }
 
     /// reset the per-frame draw budget. called once before each draw (decoupled

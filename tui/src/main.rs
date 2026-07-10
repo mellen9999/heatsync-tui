@@ -287,6 +287,14 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         .as_ref()
         .map_or(Duration::from_millis(100), EmoteStore::anim_interval);
     let mut last = Instant::now();
+    // sixel/halfblocks: a freshly-loaded static emote is emitted once and foot/
+    // tmux can drop that single write. when one lands we force ONE full re-emit
+    // next frame via swap_buffers() (resets the diff target so every cell redraws
+    // — same effect as a tab switch, but WITHOUT the screen-clear escape that
+    // orphans sixels through tmux). debounced so a load storm can't thrash it.
+    let mut pending_repaint = false;
+    let mut last_repaint = Instant::now();
+    let repaint_debounce = Duration::from_millis(300);
 
     loop {
         drain_emotes(&mut app);
@@ -295,6 +303,13 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             store.reset_budget();
         }
         terminal.draw(|f| ui(f, &app))?;
+        if pending_repaint && last_repaint.elapsed() >= repaint_debounce {
+            // discard the diff baseline so the NEXT draw re-sends every cell,
+            // landing the sixel foot dropped — no clear, no flash.
+            terminal.swap_buffers();
+            last_repaint = Instant::now();
+            pending_repaint = false;
+        }
         // console tier: paint emote pixels onto the reserved cells now that the
         // text has flushed. terminal tiers draw inline during the frame above.
         if let Some(fb) = &app.fb {
@@ -315,8 +330,8 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         }
 
         if last.elapsed() >= tick {
-            if !app.paused {
-                advance(&mut app);
+            if !app.paused && advance(&mut app) {
+                pending_repaint |= app.store.as_ref().is_some_and(EmoteStore::needs_load_repaint);
             }
             last = Instant::now();
         }
@@ -583,7 +598,7 @@ fn send_focused(app: &mut App) {
 
 /// pull new data into the channel buffers for this tick, and keep the emote
 /// image cache warm for what's on screen.
-fn advance(app: &mut App) {
+fn advance(app: &mut App) -> bool {
     let App { channels, emotes, feed, store, fb, status, .. } = app;
     match feed {
         Feed::Mock(driver) => driver.tick(channels),
@@ -641,10 +656,13 @@ fn advance(app: &mut App) {
     };
     if let Some(store) = store {
         want_urls(&mut |u| store.request(u));
-        store.pump();
+        store.pump()
     } else if let Some(fb) = fb {
         want_urls(&mut |u| fb.request(u));
         fb.pump();
+        false
+    } else {
+        false
     }
 }
 
