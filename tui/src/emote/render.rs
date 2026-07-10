@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use image::DynamicImage;
 use ratatui::layout::Rect;
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::Resize;
 
@@ -48,6 +48,7 @@ struct Done {
 }
 
 pub struct EmoteStore {
+    proto: ProtocolType, // the detected inline-graphics protocol (for the tier readout)
     cache: HashMap<String, Entry>,
     jobs: Sender<Job>,
     done: Receiver<Done>,
@@ -66,21 +67,49 @@ impl EmoteStore {
     /// steals our keypresses → a hang. env-gating sidesteps that entirely: any
     /// terminal we can't positively identify as graphics-capable gets text mode.
     pub fn new() -> Option<EmoteStore> {
-        if !graphics_capable_env() {
+        // opt-in: inside tmux, ratatui-image's auto-detect can't confirm the outer
+        // terminal's sixel support and falls back to lossy halfblocks. when the
+        // user sets HEATSYNC_EMOTE_SIXEL=1 (their tmux + terminal do sixel), probe
+        // anyway and force sixel — from_query_stdio still sets is_tmux, so the
+        // output is wrapped in tmux passthrough. gated because forcing sixel on a
+        // non-sixel terminal would dump escape garbage.
+        let force_sixel = std::env::var_os("TMUX").is_some()
+            && std::env::var_os("HEATSYNC_EMOTE_SIXEL").is_some();
+        if !graphics_capable_env() && !force_sixel {
             return None;
         }
-        let picker = Picker::from_query_stdio().ok()?;
+        let mut picker = Picker::from_query_stdio().ok()?;
+        if force_sixel {
+            picker.set_protocol_type(ProtocolType::Sixel);
+        }
+        let proto = picker.protocol_type();
+        // a terminal that only offers halfblocks renders emotes as blocky mush;
+        // clean text names read better, so fall back to text in that case.
+        if proto == ProtocolType::Halfblocks {
+            return None;
+        }
         let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Done>();
         // one loader thread: fetch + decode + encode with a cloned picker.
         thread::spawn(move || loader(picker, jobs_rx, done_tx));
         Some(EmoteStore {
+            proto,
             cache: HashMap::new(),
             jobs: jobs_tx,
             done: done_rx,
             start: Instant::now(),
             budget_left: Cell::new(DRAW_BUDGET),
         })
+    }
+
+    /// a short label for the detected graphics protocol (startup tier readout).
+    pub fn tier_label(&self) -> &'static str {
+        match self.proto {
+            ProtocolType::Sixel => "sixel",
+            ProtocolType::Kitty => "kitty",
+            ProtocolType::Iterm2 => "iterm2",
+            ProtocolType::Halfblocks => "halfblocks",
+        }
     }
 
     /// ensure an emote is being loaded (idempotent). called during the tick.

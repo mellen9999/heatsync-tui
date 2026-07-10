@@ -174,6 +174,12 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
     } else {
         None
     };
+    let tier = match (&store, &fb) {
+        (Some(s), _) => s.tier_label(),
+        (None, Some(_)) => "framebuffer",
+        _ => "text (no terminal graphics)",
+    };
+    eprintln!("heatsync: emotes = {tier}");
     // channels open immediately with empty emote sets; each set is fetched on a
     // background thread and merged in via emote_rx once it lands (no UI stall).
     let (emote_tx, emote_rx) = std::sync::mpsc::channel();

@@ -142,6 +142,16 @@ mod linux {
 
     impl Inner {
         pub fn open(cols: u16, rows: u16) -> Option<Inner> {
+            // framebuffer tier is ONLY for the bare kernel console (TERM=linux).
+            // under a wayland/x compositor /dev/fb0 may still exist but is not the
+            // displayed surface, so blits vanish into an uncomposited buffer and
+            // emotes render as blank reserved cells — fall back to text there.
+            if std::env::var("TERM").ok().as_deref() != Some("linux")
+                || std::env::var_os("WAYLAND_DISPLAY").is_some()
+                || std::env::var_os("DISPLAY").is_some()
+            {
+                return None;
+            }
             let fb = Framebuffer::new("/dev/fb0").ok()?;
             let v = &fb.var_screen_info;
             let f = &fb.fix_screen_info;
