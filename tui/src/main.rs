@@ -273,11 +273,21 @@ fn parse_sub(tok: &str) -> Sub {
 }
 
 fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+    // data cadence: pull chat + decay heat every `tick`. draw cadence: while an
+    // animated emote is on the store, redraw every `anim_frame` (~20fps) so the
+    // animation is smooth — ratatui diffs the buffer, so an idle frame re-emits
+    // nothing and only the changed emote cells cost anything. text-only / static
+    // views stay lazy (redraw only on the tick or a keypress).
     let tick = Duration::from_millis(200);
+    let anim_frame = Duration::from_millis(50);
     let mut last = Instant::now();
 
     loop {
         drain_emotes(&mut app);
+        // per-frame emote draw budget (decoupled from the data-tick pump).
+        if let Some(store) = &app.store {
+            store.reset_budget();
+        }
         terminal.draw(|f| ui(f, &app))?;
         // console tier: paint emote pixels onto the reserved cells now that the
         // text has flushed. terminal tiers draw inline during the frame above.
@@ -285,7 +295,9 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             fb.blit();
         }
 
-        let wait = tick.saturating_sub(last.elapsed());
+        let tick_left = tick.saturating_sub(last.elapsed());
+        let animating = app.store.as_ref().is_some_and(EmoteStore::any_animated);
+        let wait = if animating { anim_frame.min(tick_left) } else { tick_left };
         if event::poll(wait)? {
             if let Event::Key(k) = event::read()? {
                 if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat)

@@ -127,7 +127,7 @@ impl EmoteStore {
         }
     }
 
-    /// drain finished loads into the cache, and reset the per-frame draw budget.
+    /// drain finished loads into the cache. called on the data tick.
     pub fn pump(&mut self) {
         while let Ok(d) = self.done.try_recv() {
             let entry = match d.frames {
@@ -136,7 +136,21 @@ impl EmoteStore {
             };
             self.cache.insert(d.url, entry);
         }
+    }
+
+    /// reset the per-frame draw budget. called once before each draw (decoupled
+    /// from pump so the animation can redraw faster than the data tick).
+    pub fn reset_budget(&self) {
         self.budget_left.set(DRAW_BUDGET);
+    }
+
+    /// is any loaded emote animated (>1 frame)? drives the redraw cadence — we
+    /// only spin the fast animation clock while there's something to animate,
+    /// staying lazy (event-driven) on text-only / static views.
+    pub fn any_animated(&self) -> bool {
+        self.cache
+            .values()
+            .any(|e| matches!(e, Entry::Ready(f) if f.len() > 1))
     }
 
     /// has this emote finished loading + encoding?
