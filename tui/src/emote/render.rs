@@ -282,20 +282,39 @@ fn frame_index(frames: &[FrameProto], now_ms: u64) -> usize {
 
 fn loader(picker: Picker, jobs: Receiver<Job>, done: Sender<Done>) {
     let size = Rect::new(0, 0, EMOTE_W, EMOTE_H);
+    // sixel drops the alpha channel (to_rgb8) so a transparent pixel falls back to
+    // its raw rgb — often a colored fringe or box. flatten onto black first so
+    // emotes sit cleanly on a dark terminal. kitty/iterm2 keep true transparency.
+    let flatten = picker.protocol_type() == ProtocolType::Sixel;
     for job in jobs {
-        let frames = build(&picker, size, &job.url);
+        let frames = build(&picker, size, &job.url, flatten);
         if done.send(Done { url: job.url, frames }).is_err() {
             return; // store dropped → app closed
         }
     }
 }
 
+/// alpha-composite an rgba frame onto black (premultiply), making it opaque so
+/// sixel renders no transparent fringe and each animation frame fully overwrites.
+fn flatten_onto_black(img: &mut image::RgbaImage) {
+    for px in img.pixels_mut() {
+        let a = px[3] as u16;
+        px[0] = (px[0] as u16 * a / 255) as u8;
+        px[1] = (px[1] as u16 * a / 255) as u8;
+        px[2] = (px[2] as u16 * a / 255) as u8;
+        px[3] = 255;
+    }
+}
+
 /// fetch → decode → encode every frame to a protocol. any failure → None.
-fn build(picker: &Picker, size: Rect, url: &str) -> Option<Vec<FrameProto>> {
+fn build(picker: &Picker, size: Rect, url: &str, flatten: bool) -> Option<Vec<FrameProto>> {
     let bytes = http::image_bytes(url)?;
     let decoded = decode::decode(&bytes).ok()?;
     let mut out = Vec::with_capacity(decoded.frames.len());
-    for f in decoded.frames {
+    for mut f in decoded.frames {
+        if flatten {
+            flatten_onto_black(&mut f.img);
+        }
         let img = DynamicImage::ImageRgba8(f.img);
         let proto = picker.new_protocol(img, size, Resize::Fit(None)).ok()?;
         out.push(FrameProto { proto, delay_ms: f.delay_ms });

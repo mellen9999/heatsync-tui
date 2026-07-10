@@ -180,6 +180,12 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
         _ => "text (no terminal graphics)",
     };
     eprintln!("heatsync: emotes = {tier}");
+    if store.is_none() && fb.is_none() {
+        eprintln!(
+            "  → for image emotes, run in a graphics terminal: foot (linux), \
+             windows terminal (win), wezterm (any) — else names show as text"
+        );
+    }
     // channels open immediately with empty emote sets; each set is fetched on a
     // background thread and merged in via emote_rx once it lands (no UI stall).
     let (emote_tx, emote_rx) = std::sync::mpsc::channel();
