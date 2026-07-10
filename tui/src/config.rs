@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use heatsync_core::Platform;
+
 /// where the channel tab bar lives. left/right are vertical (tabs stacked).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TabPos {
@@ -50,6 +52,33 @@ impl TabPos {
 
 pub struct Config {
     pub tab_pos: TabPos,
+    /// open channel tabs, in order — restored on next launch (unless CLI args
+    /// override). empty = fall back to the built-in demo set.
+    pub channels: Vec<(Platform, String)>,
+}
+
+/// serialize a channel as `twitch:name` / `kick:name` for the config line.
+fn chan_str(p: Platform, name: &str) -> String {
+    let pfx = match p {
+        Platform::Twitch => "twitch",
+        Platform::Kick => "kick",
+    };
+    format!("{pfx}:{name}")
+}
+
+/// parse one `twitch:name` / `kick:name` / `name` token (bare = twitch).
+fn parse_chan(s: &str) -> Option<(Platform, String)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(r) = s.strip_prefix("kick:") {
+        Some((Platform::Kick, r.trim().to_string()))
+    } else if let Some(r) = s.strip_prefix("twitch:") {
+        Some((Platform::Twitch, r.trim().to_string()))
+    } else {
+        Some((Platform::Twitch, s.to_string()))
+    }
 }
 
 /// the user's own twitch credentials for direct-to-platform sending (chatterino
@@ -124,15 +153,21 @@ pub fn save_kick_token(token: &str) {
 }
 
 pub fn load() -> Config {
-    let mut cfg = Config { tab_pos: TabPos::Top };
+    let mut cfg = Config { tab_pos: TabPos::Top, channels: Vec::new() };
     if let Some(p) = path() {
         if let Ok(text) = fs::read_to_string(&p) {
             for line in text.lines() {
                 if let Some((k, v)) = line.split_once('=') {
-                    if k.trim() == "tab_pos" {
-                        if let Some(tp) = TabPos::parse(v) {
-                            cfg.tab_pos = tp;
+                    match k.trim() {
+                        "tab_pos" => {
+                            if let Some(tp) = TabPos::parse(v) {
+                                cfg.tab_pos = tp;
+                            }
                         }
+                        "channels" => {
+                            cfg.channels = v.split(',').filter_map(parse_chan).collect();
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -170,6 +205,16 @@ pub fn save(cfg: &Config) {
         if let Some(dir) = p.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let _ = fs::write(&p, format!("tab_pos={}\n", cfg.tab_pos.as_str()));
+        let mut out = format!("tab_pos={}\n", cfg.tab_pos.as_str());
+        if !cfg.channels.is_empty() {
+            let joined = cfg
+                .channels
+                .iter()
+                .map(|(p, n)| chan_str(*p, n))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!("channels={joined}\n"));
+        }
+        let _ = fs::write(&p, out);
     }
 }

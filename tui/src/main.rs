@@ -13,7 +13,7 @@ mod net;
 mod twitch;
 
 use std::io;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use config::TabPos;
@@ -71,6 +71,10 @@ struct App {
     kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>,     // direct kick sender
     tab_pos: TabPos,
     manage_cursor: usize, // cursor in the Manage view
+    // emote sets are fetched off-thread (a blocking HTTP call would freeze the
+    // UI); results arrive here keyed by (platform, name) and merge in.
+    emote_tx: Sender<(Platform, String, EmoteSet)>,
+    emote_rx: Receiver<(Platform, String, EmoteSet)>,
 }
 
 /// which emote backend a channel column should draw with this frame.
@@ -106,9 +110,10 @@ fn main() -> io::Result<()> {
 
     let mock_mode = args.iter().any(|a| a == "--mock");
     let chan_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-    let tab_pos = config::load().tab_pos;
+    let cfg = config::load();
 
     let app = if mock_mode {
+        let (emote_tx, emote_rx) = std::sync::mpsc::channel();
         App {
             channels: mock::channels(),
             emotes: (0..mock::channels().len()).map(|_| EmoteSet::new()).collect(),
@@ -124,11 +129,13 @@ fn main() -> io::Result<()> {
             out: None,
             twitch_tx: None,
             kick_tx: None,
-            tab_pos,
+            tab_pos: cfg.tab_pos,
             manage_cursor: 0,
+            emote_tx,
+            emote_rx,
         }
     } else {
-        build_live(&chan_args, tab_pos)
+        build_live(&chan_args, cfg.tab_pos, cfg.channels)
     };
 
     // must probe the terminal for graphics BEFORE raw mode / alt screen.
@@ -140,16 +147,19 @@ fn main() -> io::Result<()> {
 
 /// parse channel args (`name`, `twitch:name`, `kick:name`), fetch emote sets,
 /// and start the live feed. prints a one-line loading note before raw mode.
-fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
-    let subs: Vec<Sub> = if chan_args.is_empty() {
+fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
+    // precedence: explicit CLI args → persisted tabs → built-in demo set.
+    let subs: Vec<Sub> = if !chan_args.is_empty() {
+        chan_args.iter().map(|a| parse_sub(a)).collect()
+    } else if !saved.is_empty() {
+        saved
+    } else {
         vec![
             (Platform::Twitch, "xqc".into()),
             (Platform::Twitch, "forsen".into()),
             (Platform::Twitch, "zackrawrr".into()),
             (Platform::Kick, "trainwreckstv".into()),
         ]
-    } else {
-        chan_args.iter().map(|a| parse_sub(a)).collect()
     };
 
     eprintln!("heatsync: fetching emotes + connecting to {} channels…", subs.len());
@@ -164,11 +174,15 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
     } else {
         None
     };
+    // channels open immediately with empty emote sets; each set is fetched on a
+    // background thread and merged in via emote_rx once it lands (no UI stall).
+    let (emote_tx, emote_rx) = std::sync::mpsc::channel();
     let mut channels = Vec::new();
     let mut emotes = Vec::new();
     for (platform, name) in &subs {
         channels.push(Channel::new(name, *platform, 200));
-        emotes.push(http::emote_set(name, *platform).unwrap_or_default());
+        emotes.push(EmoteSet::new());
+        spawn_emote_fetch(&emote_tx, *platform, name.clone());
     }
 
     let token = std::env::var("HEATSYNC_TOKEN").ok().filter(|t| !t.is_empty());
@@ -201,7 +215,45 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos) -> App {
         kick_tx,
         tab_pos,
         manage_cursor: 0,
+        emote_tx,
+        emote_rx,
     }
+}
+
+/// fetch a channel's emote set on a detached thread and hand it back over `tx`.
+/// keeps the blocking HTTP call off the UI thread so joins never freeze.
+fn spawn_emote_fetch(tx: &Sender<(Platform, String, EmoteSet)>, platform: Platform, name: String) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let set = http::emote_set(&name, platform).unwrap_or_default();
+        let _ = tx.send((platform, name, set));
+    });
+}
+
+/// merge any emote sets that finished fetching into their channel columns.
+fn drain_emotes(app: &mut App) {
+    while let Ok((platform, name, set)) = app.emote_rx.try_recv() {
+        if let Some(i) = app
+            .channels
+            .iter()
+            .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
+        {
+            app.emotes[i] = set;
+        }
+    }
+}
+
+/// persist the current tab set + bar position (live mode only — mock is ephemeral).
+fn save_state(app: &App) {
+    if !matches!(app.feed, Feed::Live { .. }) {
+        return;
+    }
+    let channels = app
+        .channels
+        .iter()
+        .map(|c| (c.platform, c.name.clone()))
+        .collect();
+    config::save(&config::Config { tab_pos: app.tab_pos, channels });
 }
 
 fn parse_sub(tok: &str) -> Sub {
@@ -219,6 +271,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     let mut last = Instant::now();
 
     loop {
+        drain_emotes(&mut app);
         terminal.draw(|f| ui(f, &app))?;
         // console tier: paint emote pixels onto the reserved cells now that the
         // text has flushed. terminal tiers draw inline during the frame above.
@@ -345,7 +398,7 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                 }
                 KeyCode::Char('T') => {
                     app.tab_pos = app.tab_pos.next();
-                    config::save(&config::Config { tab_pos: app.tab_pos });
+                    save_state(app);
                 }
                 KeyCode::Char(' ') => app.paused = !app.paused,
                 KeyCode::Esc => app.status = None,
@@ -370,8 +423,8 @@ fn prev_tab(app: &mut App) {
     }
 }
 
-/// open a new channel tab from the Join input (`name` or `kick:name`). fetches
-/// its emote set inline (~1s) and subscribes over the live WS.
+/// open a new channel tab from the Join input (`name` or `kick:name`). subscribes
+/// over the live WS immediately; the emote set loads off-thread (never blocks).
 fn join_channel(app: &mut App) {
     let tok = app.input.trim().to_string();
     app.mode = InputMode::Normal;
@@ -392,9 +445,11 @@ fn join_channel(app: &mut App) {
         let _ = out.send(net::Outbound::Join { platform, channel: name.clone() });
     }
     app.channels.push(Channel::new(&name, platform, 200));
-    app.emotes.push(http::emote_set(&name, platform).unwrap_or_default());
+    app.emotes.push(EmoteSet::new()); // populated async — see spawn_emote_fetch
+    spawn_emote_fetch(&app.emote_tx, platform, name);
     app.focus = app.channels.len() - 1;
     app.scroll = 0;
+    save_state(app);
 }
 
 /// leave the channel under the Manage cursor.
@@ -415,6 +470,7 @@ fn manage_delete(app: &mut App) {
     let last = app.channels.len().saturating_sub(1);
     app.manage_cursor = i.min(last);
     app.focus = app.focus.min(last);
+    save_state(app);
 }
 
 /// reorder the channel under the cursor by `delta` (-1 up, +1 down), keeping the
@@ -438,6 +494,7 @@ fn manage_move(app: &mut App, delta: isize) {
         app.focus = i;
     }
     app.manage_cursor = j;
+    save_state(app);
 }
 
 /// leave the active channel tab.
@@ -456,6 +513,7 @@ fn close_channel(app: &mut App) {
     app.emotes.remove(app.focus);
     app.focus = app.focus.min(app.channels.len().saturating_sub(1));
     app.scroll = 0;
+    save_state(app);
 }
 
 /// send the current input line to the focused channel (kick only; twitch has no
