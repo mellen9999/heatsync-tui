@@ -935,14 +935,19 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // Insert mode → the message composer for the focused channel.
     if app.mode == InputMode::Insert && !app.channels.is_empty() {
         let ch = &app.channels[app.focus];
-        let readonly = ch.platform == Platform::Twitch;
+        // read-only only when there's genuinely no send path for this platform:
+        // twitch needs the user's own token; kick can also relay via the ws.
+        let readonly = match ch.platform {
+            Platform::Twitch => app.twitch_tx.is_none(),
+            Platform::Kick => app.kick_tx.is_none() && app.out.is_none(),
+        };
         let prompt = format!(" {}·{} ", ch.name, ch.platform.tag());
         let mut spans = vec![
             Span::styled(prompt, Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
             Span::styled(" ❯ ", Style::default().fg(BRAND)),
         ];
         if readonly {
-            spans.push(Span::styled("twitch is read-only — esc", Style::default().fg(Color::Indexed(214))));
+            spans.push(Span::styled("read-only — no send token · esc", Style::default().fg(Color::Indexed(214))));
         } else {
             spans.push(Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))));
             spans.push(Span::styled("\u{2588}", Style::default().fg(BRAND))); // cursor
