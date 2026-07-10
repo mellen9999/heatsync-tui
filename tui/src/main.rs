@@ -148,18 +148,13 @@ fn main() -> io::Result<()> {
 /// parse channel args (`name`, `twitch:name`, `kick:name`), fetch emote sets,
 /// and start the live feed. prints a one-line loading note before raw mode.
 fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
-    // precedence: explicit CLI args → persisted tabs → built-in demo set.
+    // precedence: explicit CLI args → persisted tabs → empty (a clean "press o to
+    // join" state; no hardcoded demo channels). first run starts blank; whatever
+    // you open persists, so the next launch restores it.
     let subs: Vec<Sub> = if !chan_args.is_empty() {
         chan_args.iter().map(|a| parse_sub(a)).collect()
-    } else if !saved.is_empty() {
-        saved
     } else {
-        vec![
-            (Platform::Twitch, "xqc".into()),
-            (Platform::Twitch, "forsen".into()),
-            (Platform::Twitch, "zackrawrr".into()),
-            (Platform::Kick, "trainwreckstv".into()),
-        ]
+        saved
     };
 
     eprintln!("heatsync: fetching emotes + connecting to {} channels…", subs.len());
@@ -549,7 +544,7 @@ fn close_channel(app: &mut App) {
 /// send path). clears the input on a successful enqueue.
 fn send_focused(app: &mut App) {
     let text = app.input.trim().to_string();
-    if text.is_empty() {
+    if text.is_empty() || app.channels.is_empty() {
         return;
     }
     let (platform, name) = {
