@@ -40,10 +40,10 @@ enum Entry {
 }
 
 struct Job {
-    url: String,
+    key: String, // one url, or base+overlay urls joined by '\n' (a stack)
 }
 struct Done {
-    url: String,
+    key: String,
     frames: Option<Vec<FrameProto>>,
 }
 
@@ -126,15 +126,16 @@ impl EmoteStore {
         }
     }
 
-    /// ensure an emote is being loaded (idempotent). called during the tick.
-    pub fn request(&mut self, url: &str) {
-        if self.cache.contains_key(url) {
+    /// ensure an emote (or overlay stack) is being loaded (idempotent). `key` is a
+    /// single url or base+overlay urls joined by '\n'. called during the tick.
+    pub fn request(&mut self, key: &str) {
+        if self.cache.contains_key(key) {
             return;
         }
-        self.cache.insert(url.to_string(), Entry::Loading);
+        self.cache.insert(key.to_string(), Entry::Loading);
         // if the loader thread died the send fails — mark failed, fall to text.
-        if self.jobs.send(Job { url: url.to_string() }).is_err() {
-            self.cache.insert(url.to_string(), Entry::Failed);
+        if self.jobs.send(Job { key: key.to_string() }).is_err() {
+            self.cache.insert(key.to_string(), Entry::Failed);
         }
     }
 
@@ -147,7 +148,7 @@ impl EmoteStore {
                 Some(f) if !f.is_empty() => Entry::Ready(f),
                 _ => Entry::Failed,
             };
-            self.cache.insert(d.url, entry);
+            self.cache.insert(d.key, entry);
             loaded = true;
         }
         loaded
@@ -177,20 +178,20 @@ impl EmoteStore {
             .any(|e| matches!(e, Entry::Ready(f) if f.len() > 1))
     }
 
-    /// has this emote finished loading + encoding?
-    pub fn is_ready(&self, url: &str) -> bool {
-        matches!(self.cache.get(url), Some(Entry::Ready(_)))
+    /// has this emote/stack finished loading + encoding?
+    pub fn is_ready(&self, key: &str) -> bool {
+        matches!(self.cache.get(key), Some(Entry::Ready(_)))
     }
 
-    /// the protocol for this emote's current animation frame, if ready and the
-    /// draw budget isn't spent. consumes one budget unit (visible-only cost).
-    pub fn frame(&self, url: &str) -> Option<&Protocol> {
+    /// the protocol for this emote/stack's current animation frame, if ready and
+    /// the draw budget isn't spent. consumes one budget unit (visible-only cost).
+    pub fn frame(&self, key: &str) -> Option<&Protocol> {
         let left = self.budget_left.get();
         if left == 0 {
             return None;
         }
         let now = self.start.elapsed().as_millis() as u64;
-        let frames = match self.cache.get(url) {
+        let frames = match self.cache.get(key) {
             Some(Entry::Ready(f)) => f,
             _ => return None,
         };
@@ -300,8 +301,8 @@ fn loader(picker: Picker, jobs: Receiver<Job>, done: Sender<Done>) {
     // emotes sit cleanly on a dark terminal. kitty/iterm2 keep true transparency.
     let flatten = picker.protocol_type() == ProtocolType::Sixel;
     for job in jobs {
-        let frames = build(&picker, size, &job.url, flatten);
-        if done.send(Done { url: job.url, frames }).is_err() {
+        let frames = build(&picker, size, &job.key, flatten);
+        if done.send(Done { key: job.key, frames }).is_err() {
             return; // store dropped → app closed
         }
     }
@@ -319,22 +320,141 @@ fn flatten_onto_black(img: &mut image::RgbaImage) {
     }
 }
 
-/// fetch → decode → encode every frame to a protocol. any failure → None.
-fn build(picker: &Picker, size: Rect, url: &str, flatten: bool) -> Option<Vec<FrameProto>> {
-    let bytes = http::image_bytes(url)?;
-    let decoded = decode::decode(&bytes).ok()?;
-    let mut out = Vec::with_capacity(decoded.frames.len());
-    for mut f in decoded.frames {
-        if flatten {
-            flatten_onto_black(&mut f.img);
+/// alpha-composite `over` onto `base` in place (standard src-over). both must be
+/// the same dimensions. used to stack zero-width (overlay) emotes on their base.
+fn alpha_over(base: &mut image::RgbaImage, over: &image::RgbaImage) {
+    for (b, o) in base.pixels_mut().zip(over.pixels()) {
+        let oa = o[3] as u16;
+        let ia = 255 - oa;
+        for c in 0..3 {
+            b[c] = ((o[c] as u16 * oa + b[c] as u16 * ia) / 255) as u8;
         }
-        let img = DynamicImage::ImageRgba8(f.img);
-        let proto = picker.new_protocol(img, size, Resize::Fit(None)).ok()?;
-        out.push(FrameProto { proto, delay_ms: f.delay_ms });
+        b[3] = (oa + b[3] as u16 * ia / 255) as u8;
+    }
+}
+
+/// which frame of a decoded layer is showing at `t_ms` (cumulative-delay window,
+/// looping) — lets overlay layers be sampled against the driver's timeline.
+fn sample_frame(frames: &[decode::Frame], t_ms: u64) -> usize {
+    if frames.len() <= 1 {
+        return 0;
+    }
+    let total: u64 = frames.iter().map(|f| f.delay_ms.max(20) as u64).sum();
+    if total == 0 {
+        return 0;
+    }
+    let mut t = t_ms % total;
+    for (i, f) in frames.iter().enumerate() {
+        let d = f.delay_ms.max(20) as u64;
+        if t < d {
+            return i;
+        }
+        t -= d;
+    }
+    0
+}
+
+/// fetch + decode + composite a stack into RGBA frames (base at the bottom,
+/// overlays on top), driven by the longest-animating layer. `key` is one or more
+/// image urls joined by '\n'. no encoding — shared by build() and the render-test
+/// verification harness. any fetch/decode failure → None.
+pub fn composite_frames(key: &str) -> Option<Vec<(image::RgbaImage, u32)>> {
+    let mut layers: Vec<decode::Decoded> = Vec::new();
+    for url in key.split('\n') {
+        let bytes = http::image_bytes(url)?;
+        layers.push(decode::decode(&bytes).ok()?);
+    }
+    // canvas = base (first layer) native size; overlays resize onto it.
+    let (tw, th) = layers[0].frames.first()?.img.dimensions();
+    let single = layers.len() == 1;
+    let driver = layers.iter().max_by_key(|l| l.frames.len()).expect("≥1 layer");
+    let mut out = Vec::with_capacity(driver.frames.len());
+    let mut t = 0u64;
+    for df in &driver.frames {
+        let canvas = if single {
+            layers[0].frames[sample_frame(&layers[0].frames, t)].img.clone()
+        } else {
+            let mut c = image::RgbaImage::new(tw, th);
+            for layer in &layers {
+                let f = &layer.frames[sample_frame(&layer.frames, t)];
+                if f.img.dimensions() == (tw, th) {
+                    alpha_over(&mut c, &f.img);
+                } else {
+                    let r = image::imageops::resize(&f.img, tw, th, image::imageops::FilterType::Triangle);
+                    alpha_over(&mut c, &r);
+                }
+            }
+            c
+        };
+        out.push((canvas, df.delay_ms));
+        t += df.delay_ms.max(20) as u64;
     }
     if out.is_empty() {
         None
     } else {
         Some(out)
+    }
+}
+
+/// composite a stack (see [`composite_frames`]) and encode every frame to the
+/// terminal's inline-graphics protocol. any failure → None.
+fn build(picker: &Picker, size: Rect, key: &str, flatten: bool) -> Option<Vec<FrameProto>> {
+    let frames = composite_frames(key)?;
+    let mut out = Vec::with_capacity(frames.len());
+    for (mut canvas, delay_ms) in frames {
+        if flatten {
+            flatten_onto_black(&mut canvas);
+        }
+        let proto = picker
+            .new_protocol(DynamicImage::ImageRgba8(canvas), size, Resize::Fit(None))
+            .ok()?;
+        out.push(FrameProto { proto, delay_ms });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn alpha_over_opaque_replaces() {
+        let mut base = RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255])); // red
+        let over = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 255, 255])); // opaque blue
+        alpha_over(&mut base, &over);
+        assert_eq!(base.get_pixel(0, 0), &Rgba([0, 0, 255, 255])); // fully covered → blue
+    }
+
+    #[test]
+    fn alpha_over_transparent_keeps_base() {
+        let mut base = RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255])); // red
+        let over = RgbaImage::from_pixel(2, 2, Rgba([0, 0, 255, 0])); // transparent blue
+        alpha_over(&mut base, &over);
+        assert_eq!(base.get_pixel(0, 0), &Rgba([255, 0, 0, 255])); // untouched → red
+    }
+
+    #[test]
+    fn alpha_over_half_blends() {
+        let mut base = RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])); // black
+        let over = RgbaImage::from_pixel(1, 1, Rgba([255, 255, 255, 128])); // ~50% white
+        alpha_over(&mut base, &over);
+        let p = base.get_pixel(0, 0);
+        assert!((120..=136).contains(&p[0]), "blended ~half: {}", p[0]);
+        assert_eq!(p[3], 255); // base was opaque → stays opaque
+    }
+
+    #[test]
+    fn sample_frame_walks_timeline() {
+        let f = |ms: u32| decode::Frame { img: RgbaImage::new(1, 1), delay_ms: ms };
+        let frames = vec![f(100), f(100), f(100)];
+        assert_eq!(sample_frame(&frames, 0), 0);
+        assert_eq!(sample_frame(&frames, 150), 1);
+        assert_eq!(sample_frame(&frames, 250), 2);
+        assert_eq!(sample_frame(&frames, 300), 0); // loops
     }
 }

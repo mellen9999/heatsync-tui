@@ -167,3 +167,61 @@ fn short_ts(ts: &str) -> &str {
         .map(|t| &t[..t.len().min(8)])
         .unwrap_or(ts)
 }
+
+/// `heatsync render-test <base-url> [overlay-url…]` — VERIFICATION harness (not a
+/// user command). composites a stack via the real pipeline and dumps the result:
+/// the composited RGBA frame(s) as PNG, and the actual sixel bytes the terminal
+/// would receive. decode those (sixel2png) to prove rendering end-to-end without
+/// needing to eyeball a live terminal. run with `env -u TMUX` for raw (unwrapped)
+/// sixel.
+pub fn render_test(args: &[String]) -> std::io::Result<()> {
+    use ratatui::layout::Rect;
+    use ratatui_image::picker::{Picker, ProtocolType};
+    use ratatui_image::protocol::Protocol;
+    use ratatui_image::Resize;
+
+    if args.is_empty() {
+        eprintln!("usage: heatsync render-test <base-url> [overlay-url …]");
+        return Ok(());
+    }
+    let key = args.join("\n");
+    let Some(frames) = crate::emote::render::composite_frames(&key) else {
+        eprintln!("render-test: composite failed (fetch/decode)");
+        return Ok(());
+    };
+    let (w, h) = (frames[0].0.width(), frames[0].0.height());
+    eprintln!(
+        "render-test: {} layer(s) → {} composited frame(s), {w}x{h}px",
+        args.len(),
+        frames.len()
+    );
+    let idxs = if frames.len() > 1 {
+        vec![0usize, frames.len() / 2]
+    } else {
+        vec![0usize]
+    };
+    for i in &idxs {
+        let p = format!("/tmp/emote_composite_{i}.png");
+        if frames[*i].0.save(&p).is_ok() {
+            eprintln!("  composite frame {i} → {p}");
+        }
+    }
+    // encode frame 0 to sixel via the real path; dump raw bytes for sixel2png.
+    let mut picker = Picker::from_fontsize((10, 18));
+    picker.set_protocol_type(ProtocolType::Sixel);
+    let img = image::DynamicImage::ImageRgba8(frames[0].0.clone());
+    match picker.new_protocol(img, Rect::new(0, 0, 8, 6), Resize::Fit(None)) {
+        Ok(Protocol::Sixel(s)) => {
+            std::fs::write("/tmp/emote.six", &s.data)?;
+            let wrapped = s.data.contains("tmux;");
+            eprintln!(
+                "  sixel bytes → /tmp/emote.six ({} bytes){}",
+                s.data.len(),
+                if wrapped { " [tmux-wrapped — rerun with `env -u TMUX`]" } else { "" }
+            );
+        }
+        Ok(_) => eprintln!("  (encoded to a non-sixel protocol)"),
+        Err(e) => eprintln!("  sixel encode failed: {e}"),
+    }
+    Ok(())
+}

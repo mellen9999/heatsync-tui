@@ -103,6 +103,7 @@ fn main() -> io::Result<()> {
         Some("search") => return cli::search(&args[1..]),
         Some("hot") | Some("top") => return cli::hot(&args[1..]),
         Some("probe") => return cli::probe(&args[1..]),
+        Some("render-test") => return cli::render_test(&args[1..]),
         Some("login") if args.get(1).map(String::as_str) == Some("kick") => return kick::login(),
         Some("login") => return cli::login(),
         _ => {}
@@ -644,13 +645,7 @@ fn advance(app: &mut App) -> bool {
             }
             let start = ch.messages.len().saturating_sub(60);
             for m in ch.messages.iter().skip(start) {
-                for tok in tokenize(&m.text, set) {
-                    if let Token::Emote(name) = tok {
-                        if let Some(e) = set.get(&name) {
-                            f(&e.url);
-                        }
-                    }
-                }
+                each_stack(&m.text, set, |key| f(key));
             }
         }
     };
@@ -799,11 +794,11 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
             let x = body.x + p.col;
             match mode {
                 EmoteMode::Term(store) => {
-                    if let Some(proto) = store.frame(&p.url) {
+                    if let Some(proto) = store.frame(&p.key) {
                         f.render_widget(Image::new(proto), Rect { x, y, width: EMOTE_W, height: h as u16 });
                     }
                 }
-                EmoteMode::Fb(fb) => fb.push(x, y, &p.url),
+                EmoteMode::Fb(fb) => fb.push(x, y, &p.key),
                 EmoteMode::Text => {}
             }
         }
@@ -863,12 +858,40 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// does this message contain at least one loaded (ready-to-draw) emote?
+/// walk a message's emote STACKS in order. a stack is a base emote plus any
+/// immediately-following zero-width (overlay) emotes; its key is the layer urls
+/// joined by '\n'. text breaks a stack. shared by layout, prefetch, and height.
+fn each_stack(text: &str, set: &EmoteSet, mut f: impl FnMut(&str)) {
+    let mut urls: Vec<String> = Vec::new();
+    let flush = |urls: &mut Vec<String>, f: &mut dyn FnMut(&str)| {
+        if !urls.is_empty() {
+            f(&urls.join("\n"));
+            urls.clear();
+        }
+    };
+    for tok in tokenize(text, set) {
+        match tok {
+            Token::Emote(name) => {
+                if let Some(e) = set.get(&name) {
+                    if e.zero_width && !urls.is_empty() {
+                        urls.push(e.url.clone()); // overlay onto the current base
+                    } else {
+                        flush(&mut urls, &mut f);
+                        urls.push(e.url.clone()); // new base
+                    }
+                }
+            }
+            Token::Text(_) => flush(&mut urls, &mut f),
+        }
+    }
+    flush(&mut urls, &mut f);
+}
+
+/// does this message contain at least one loaded (ready-to-draw) emote stack?
 fn has_ready_emote(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
-    tokenize(&m.text, set).into_iter().any(|t| match t {
-        Token::Emote(name) => set.get(&name).map_or(false, |e| mode.ready(&e.url)),
-        Token::Text(_) => false,
-    })
+    let mut any = false;
+    each_stack(&m.text, set, |key| any |= mode.ready(key));
+    any
 }
 
 /// truncate a label to `w` display columns (approximate; ASCII-dominant labels).
@@ -881,15 +904,16 @@ fn fit(s: String, w: u16) -> String {
     }
 }
 
-/// a reserved emote slot: column offset within the channel body + its url.
+/// a reserved emote slot: column offset within the channel body + its stack key.
 struct Place {
     col: u16,
-    url: String,
+    key: String,
 }
 
-/// lay a message onto one row: the text line (with blank cells where ready
-/// emotes go) plus the reserved emote slots. an emote that isn't loaded yet (or
-/// in text mode) falls back to its name in brand color.
+/// lay a message onto one row: the text line (with blank cells where ready emote
+/// stacks go) plus the reserved emote slots. a base emote absorbs any following
+/// zero-width (overlay) emotes into one stack. an unloaded/text-mode emote falls
+/// back to its name in brand color.
 fn layout_message(m: &Message, set: &EmoteSet, mode: EmoteMode, maxw: u16) -> (Line<'static>, Vec<Place>) {
     let text_hue = Color::Indexed(heatsync_core::heat::color(m.heat));
     let user_color = m.color.as_deref().and_then(parse_hex).unwrap_or(Color::Indexed(244));
@@ -900,25 +924,42 @@ fn layout_message(m: &Message, set: &EmoteSet, mode: EmoteMode, maxw: u16) -> (L
     let mut col = UnicodeWidthStr::width(m.user.as_str()) as u16 + 2;
     let mut places = Vec::new();
 
-    for tok in tokenize(&m.text, set) {
+    let toks = tokenize(&m.text, set);
+    let mut i = 0;
+    while i < toks.len() {
         if col >= maxw {
             break;
         }
-        match tok {
+        match &toks[i] {
             Token::Text(t) => {
                 col += UnicodeWidthStr::width(t.as_str()) as u16;
-                spans.push(Span::styled(t, Style::default().fg(text_hue)));
+                spans.push(Span::styled(t.clone(), Style::default().fg(text_hue)));
+                i += 1;
             }
             Token::Emote(name) => {
-                let url = set.get(&name).map(|e| e.url.as_str());
-                let ready = col + EMOTE_W <= maxw && url.map_or(false, |u| mode.ready(u));
-                if let (true, Some(u)) = (ready, url) {
-                    places.push(Place { col, url: u.to_string() });
+                // gather the base emote + any trailing zero-width overlays.
+                let base_name = name.clone();
+                let mut urls: Vec<String> =
+                    set.get(name).map(|e| e.url.clone()).into_iter().collect();
+                i += 1;
+                while let Some(Token::Emote(n2)) = toks.get(i) {
+                    match set.get(n2) {
+                        Some(e2) if e2.zero_width => {
+                            urls.push(e2.url.clone());
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                let key = urls.join("\n");
+                let ready = col + EMOTE_W <= maxw && !urls.is_empty() && mode.ready(&key);
+                if ready {
+                    places.push(Place { col, key });
                     spans.push(Span::raw(" ".repeat(EMOTE_W as usize)));
                     col += EMOTE_W;
                 } else {
-                    col += UnicodeWidthStr::width(name.as_str()) as u16;
-                    spans.push(Span::styled(name, Style::default().fg(BRAND).add_modifier(Modifier::BOLD)));
+                    col += UnicodeWidthStr::width(base_name.as_str()) as u16;
+                    spans.push(Span::styled(base_name, Style::default().fg(BRAND).add_modifier(Modifier::BOLD)));
                 }
             }
         }
@@ -1028,4 +1069,45 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     spans.push(Span::styled(dot, Style::default().fg(dot_color)));
     spans.push(Span::styled(format!("{state} · {n} ch"), Style::default().fg(Color::Indexed(244))));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+    use heatsync_core::emote::Emote;
+
+    fn em(name: &str, zw: bool) -> Emote {
+        Emote {
+            name: name.into(),
+            url: format!("u/{name}"),
+            provider: "7tv".into(),
+            id: name.into(),
+            animated: false,
+            zero_width: zw,
+        }
+    }
+
+    #[test]
+    fn overlay_groups_onto_base() {
+        let set = EmoteSet::from_list([em("GAMBA", false), em("notL", true)]);
+        let mut keys = Vec::new();
+        each_stack("GAMBA notL", &set, |k| keys.push(k.to_string()));
+        assert_eq!(keys, vec!["u/GAMBA\nu/notL"]); // one stack, base + overlay
+    }
+
+    #[test]
+    fn text_breaks_stack() {
+        let set = EmoteSet::from_list([em("GAMBA", false), em("KEKW", false)]);
+        let mut keys = Vec::new();
+        each_stack("GAMBA lol KEKW", &set, |k| keys.push(k.to_string()));
+        assert_eq!(keys, vec!["u/GAMBA", "u/KEKW"]); // separate, text between
+    }
+
+    #[test]
+    fn multiple_overlays_stack() {
+        let set = EmoteSet::from_list([em("A", false), em("h1", true), em("h2", true)]);
+        let mut keys = Vec::new();
+        each_stack("A h1 h2", &set, |k| keys.push(k.to_string()));
+        assert_eq!(keys, vec!["u/A\nu/h1\nu/h2"]);
+    }
 }
