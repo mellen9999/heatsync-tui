@@ -67,21 +67,16 @@ impl EmoteStore {
     /// steals our keypresses → a hang. env-gating sidesteps that entirely: any
     /// terminal we can't positively identify as graphics-capable gets text mode.
     pub fn new() -> Option<EmoteStore> {
-        // opt-in: inside tmux, ratatui-image's auto-detect can't confirm the outer
-        // terminal's sixel support and falls back to lossy halfblocks. when the
-        // user sets HEATSYNC_EMOTE_SIXEL=1 (their tmux + terminal do sixel), probe
-        // anyway and force sixel — from_query_stdio still sets is_tmux, so the
-        // output is wrapped in tmux passthrough. gated because forcing sixel on a
-        // non-sixel terminal would dump escape garbage.
-        let force_sixel = std::env::var_os("TMUX").is_some()
-            && std::env::var_os("HEATSYNC_EMOTE_SIXEL").is_some();
-        if !graphics_capable_env() && !force_sixel {
+        // only probe terminals we can positively identify as graphics-capable
+        // (see graphics_capable_env). crucially this excludes tmux: inside a
+        // multiplexer the stdio capability query often gets no clean response, and
+        // ratatui-image's reader thread then lingers on stdin and STEALS our
+        // keypresses — a dead keyboard. so tmux → text tier; for sixel emotes,
+        // run the client directly in a graphics terminal (e.g. foot), not tmux.
+        if !graphics_capable_env() {
             return None;
         }
-        let mut picker = Picker::from_query_stdio().ok()?;
-        if force_sixel {
-            picker.set_protocol_type(ProtocolType::Sixel);
-        }
+        let picker = Picker::from_query_stdio().ok()?;
         let proto = picker.protocol_type();
         // a terminal that only offers halfblocks renders emotes as blocky mush;
         // clean text names read better, so fall back to text in that case.
