@@ -140,9 +140,18 @@ fn main() -> io::Result<()> {
     };
 
     // must probe the terminal for graphics BEFORE raw mode / alt screen.
+    let had_fb = app.fb.is_some();
     let mut terminal = ratatui::init();
     let res = run(&mut terminal, app);
     ratatui::restore();
+    if had_fb {
+        // the bare console has no alternate screen to pop back to, so the dead
+        // TUI text AND our framebuffer emote pixels would linger behind the
+        // shell prompt. a real clear repaints every cell (wiping both).
+        use std::io::Write;
+        print!("\x1b[2J\x1b[H");
+        let _ = io::stdout().flush();
+    }
     res
 }
 
@@ -318,7 +327,8 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         }
 
         let tick_left = tick.saturating_sub(last.elapsed());
-        let animating = app.store.as_ref().is_some_and(EmoteStore::any_animated);
+        let animating = app.store.as_ref().is_some_and(EmoteStore::any_animated)
+            || app.fb.as_ref().is_some_and(FbEmotes::any_animated);
         let wait = if animating { anim_frame.min(tick_left) } else { tick_left };
         if event::poll(wait)? {
             if let Event::Key(k) = event::read()? {
@@ -798,7 +808,22 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
                         f.render_widget(Image::new(proto), Rect { x, y, width: EMOTE_W, height: h as u16 });
                     }
                 }
-                EmoteMode::Fb(fb) => fb.push(x, y, &p.key),
+                EmoteMode::Fb(fb) => {
+                    // fill the reserved cells with NBSP — renders blank like a
+                    // space, but DIFFERS from the space that scrolls in behind
+                    // a departing emote. ratatui's diff then re-emits exactly
+                    // those cells and the console itself erases the stale
+                    // pixels before we blit. plain spaces diff as "unchanged",
+                    // the console never repaints them, and old emote pixels
+                    // smear across the screen during fast scroll.
+                    let pad = "\u{a0}".repeat(EMOTE_W as usize);
+                    let lines: Vec<Line> = (0..h).map(|_| Line::raw(pad.clone())).collect();
+                    f.render_widget(
+                        Paragraph::new(lines),
+                        Rect { x, y, width: EMOTE_W, height: h as u16 },
+                    );
+                    fb.push(x, y, &p.key);
+                }
                 EmoteMode::Text => {}
             }
         }
@@ -1069,6 +1094,28 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     spans.push(Span::styled(dot, Style::default().fg(dot_color)));
     spans.push(Span::styled(format!("{state} · {n} ch"), Style::default().fg(Color::Indexed(244))));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+#[cfg(test)]
+mod fb_reserve_tests {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    /// the framebuffer tier's stale-pixel defense: reserved emote cells hold
+    /// NBSP, so when an emote departs and ordinary spaces scroll in, ratatui's
+    /// diff re-emits those cells and the console erases the old pixels. if the
+    /// reservation were plain spaces the diff would be empty and pixels would
+    /// smear during fast scroll — this pins both halves of that contract.
+    #[test]
+    fn nbsp_reservation_diffs_against_space() {
+        let area = Rect::new(0, 0, 4, 1);
+        let reserved = Buffer::with_lines(["\u{a0}\u{a0}\u{a0} "]);
+        let scrolled = Buffer::filled(area, ratatui::buffer::Cell::EMPTY);
+        // emote leaves → every reserved cell re-emits (console erases pixels)
+        assert_eq!(reserved.diff(&scrolled).len(), 3);
+        // plain spaces would be invisible to the diff (the smear bug)
+        assert!(scrolled.diff(&scrolled).is_empty());
+    }
 }
 
 #[cfg(test)]

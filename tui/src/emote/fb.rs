@@ -63,6 +63,16 @@ impl FbEmotes {
         false
     }
 
+    /// is any loaded emote animated? (drives the fast redraw cadence)
+    pub fn any_animated(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            return self.inner.any_animated();
+        }
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
     /// queue an emote to be painted at a cell position (called during layout).
     pub fn push(&self, col: u16, row: u16, url: &str) {
         self.pending
@@ -93,10 +103,11 @@ mod linux {
     use image::RgbaImage;
 
     use super::{Placement, EMOTE_H, EMOTE_W};
-    use crate::emote::decode;
-    use crate::http;
+    use crate::emote::render::composite_frames;
 
-    const DRAW_BUDGET: usize = 64;
+    // fb blits are plain mmap writes (~3KB each) — far cheaper than terminal
+    // graphics escapes, so the cap only exists to bound a pathological frame.
+    const DRAW_BUDGET: usize = 256;
 
     struct FbFrame {
         rgba: RgbaImage, // pre-scaled to the emote's cell footprint in pixels
@@ -215,6 +226,13 @@ mod linux {
             matches!(self.cache.borrow().get(url), Some(Entry::Ready(_)))
         }
 
+        pub fn any_animated(&self) -> bool {
+            self.cache
+                .borrow()
+                .values()
+                .any(|e| matches!(e, Entry::Ready(f) if f.len() > 1))
+        }
+
         pub fn blit(&self, queued: &[Placement]) {
             let now = self.start.elapsed().as_millis() as u64;
             let cache = self.cache.borrow();
@@ -295,13 +313,14 @@ mod linux {
         }
     }
 
-    fn build(tw: u32, th: u32, url: &str) -> Option<Vec<FbFrame>> {
-        let bytes = http::image_bytes(url)?;
-        let decoded = decode::decode(&bytes).ok()?;
-        let mut out = Vec::with_capacity(decoded.frames.len());
-        for fr in decoded.frames {
-            let rgba = resize(&fr.img, tw.max(1), th.max(1), FilterType::Triangle);
-            out.push(FbFrame { rgba, delay_ms: fr.delay_ms });
+    fn build(tw: u32, th: u32, key: &str) -> Option<Vec<FbFrame>> {
+        // key is one url or a '\n'-joined overlay stack — composite_frames
+        // handles both (base at the bottom, zero-width overlays on top).
+        let frames = composite_frames(key)?;
+        let mut out = Vec::with_capacity(frames.len());
+        for (canvas, delay_ms) in frames {
+            let rgba = resize(&canvas, tw.max(1), th.max(1), FilterType::Triangle);
+            out.push(FbFrame { rgba, delay_ms });
         }
         if out.is_empty() {
             None
