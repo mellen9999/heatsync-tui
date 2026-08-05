@@ -75,6 +75,7 @@ struct App {
     kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>, // direct kick sender
     tab_pos: TabPos,
     manage_cursor: usize, // cursor in the Manage view
+    me: Option<String>,   // own username (lowercase) — drives @mention tinting
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the
     // UI); results arrive here keyed by (platform, name) and merge in.
     emote_tx: Sender<(Platform, String, EmoteSet)>,
@@ -138,6 +139,7 @@ fn main() -> io::Result<()> {
             kick_tx: None,
             tab_pos: cfg.tab_pos,
             manage_cursor: 0,
+            me: None,
             emote_tx,
             emote_rx,
         }
@@ -220,6 +222,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
     // direct-to-platform sending if the user supplied their own platform tokens.
     let auth = config::load_auth();
     let kick_tx = auth.kick_token.clone().map(kick::spawn);
+    let me = auth.twitch_user.as_deref().map(str::to_lowercase);
     let twitch_tx = match (auth.twitch_user, auth.twitch_oauth) {
         (Some(u), Some(o)) => Some(twitch::spawn(u, o)),
         _ => None,
@@ -245,6 +248,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
         kick_tx,
         tab_pos,
         manage_cursor: 0,
+        me,
         emote_tx,
         emote_rx,
     }
@@ -1155,39 +1159,67 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode, mask: Opti
         return;
     }
 
-    let cap = body.height as usize;
-    // plan visible messages newest-first, honouring per-message height + scroll.
-    let mut plan: Vec<(&Message, usize)> = Vec::new();
+    let scrolled = app.scroll > 0;
+    // when scrolled up, the bottom row becomes the "newer messages" bar.
+    let cap = (body.height as usize).saturating_sub(scrolled as usize);
+    let me = app.me.as_deref();
+    // plan visible messages newest-first: full wrapped layout per message,
+    // heights are the sum of its row heights. bottom-anchored.
+    let mut plan: Vec<Vec<RowL>> = Vec::new();
     let mut used = 0usize;
     for m in ch.messages.iter().rev().skip(app.scroll) {
-        let h = if wants_emote_rows(m, set, mode) {
-            EMOTE_H as usize
-        } else {
-            1
-        };
-        if used + h > cap {
+        let rows = layout_message(m, set, mode, body.width, me);
+        let mh: usize = rows.iter().map(|r| r.h as usize).sum();
+        if used + mh > cap {
             break;
         }
-        used += h;
-        plan.push((m, h));
+        used += mh;
+        plan.push(rows);
     }
     plan.reverse();
 
     let mut y = body.y + (cap - used) as u16; // bottom-anchor
-    for (m, h) in plan {
-        let text_row = y + (h as u16 - 1);
-        let (line, places) = layout_message(m, set, mode, body.width);
+    for rows in plan {
+        for row in rows {
+            let text_row = y + (row.h - 1);
+            f.render_widget(
+                Paragraph::new(row.line),
+                Rect {
+                    x: body.x,
+                    y: text_row,
+                    width: body.width,
+                    height: 1,
+                },
+            );
+            draw_places(f, body.x, y, row.h, &row.places, mode, mask);
+            y += row.h;
+        }
+    }
+
+    if scrolled {
+        let bar = Line::from(vec![
+            Span::styled(
+                format!(" ↓ {} newer ", app.scroll),
+                Style::default()
+                    .fg(Color::Indexed(214))
+                    .bg(Color::Indexed(235)),
+            ),
+            Span::styled(
+                "· G latest",
+                Style::default()
+                    .fg(Color::Indexed(244))
+                    .bg(Color::Indexed(235)),
+            ),
+        ]);
         f.render_widget(
-            Paragraph::new(line),
+            Paragraph::new(bar).style(Style::default().bg(Color::Indexed(235))),
             Rect {
                 x: body.x,
-                y: text_row,
+                y: body.y + body.height - 1,
                 width: body.width,
                 height: 1,
             },
         );
-        draw_places(f, body.x, y, h as u16, &places, mode, mask);
-        y += h as u16;
     }
 }
 
@@ -1321,15 +1353,21 @@ fn draw_dropdown(f: &mut Frame, area: Rect, app: &App) {
 fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode, mask: Option<Rect>) {
     let set = &app.emotes[app.focus];
     let lead = vec![Span::styled(" ❯ ", Style::default().fg(BRAND))];
-    let (line, places) = layout_segments(
+    // the strip is one visual row — take the first wrapped row (long drafts
+    // clip here; the chat row wraps for real once sent).
+    let mut rows = wrap_layout(
         &app.composer.text,
         set,
         mode,
         area.width,
-        lead,
-        3,
-        Color::Indexed(250),
+        LineCtx {
+            lead,
+            lead_col: 3,
+            hue: Color::Indexed(250),
+            tint: None,
+        },
     );
+    let RowL { line, places, .. } = rows.remove(0);
     let text_row = area.y + area.height.saturating_sub(1);
     f.render_widget(
         Paragraph::new(line),
@@ -1491,19 +1529,6 @@ fn each_stack(text: &str, set: &EmoteSet, mut f: impl FnMut(&str)) {
     }
 }
 
-/// does this message get EMOTE_H rows? on graphics tiers any KNOWN stack
-/// reserves the space immediately — waiting for readiness made rows jump from
-/// 1 to 2 exactly when the image landed, which reads as chat "jerking" while
-/// people type. stable heights = pristine scroll. text tier stays 1 row.
-fn wants_emote_rows(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
-    if matches!(mode, EmoteMode::Text) {
-        return false;
-    }
-    let mut any = false;
-    each_stack(&m.text, set, |_| any = true);
-    any
-}
-
 /// truncate a label to `w` display columns (approximate; ASCII-dominant labels).
 fn fit(s: String, w: u16) -> String {
     let w = w as usize;
@@ -1522,47 +1547,194 @@ struct Place {
     key: String,
 }
 
-/// lay message text after some lead spans: text spans (with blank cells where
-/// ready emote stacks go) plus the reserved emote slots. core's segment parser
-/// owns stacking + effects. an unloaded/text-mode emote falls back to its name
-/// in brand color. shared by chat rows and the composer's wysiwyg preview.
-fn layout_segments(
-    text: &str,
-    set: &EmoteSet,
-    mode: EmoteMode,
+/// one laid-out visual row of a message: spans, height (EMOTE_H when a stack
+/// sits on it on a graphics tier), and its emote placements.
+struct RowL {
+    line: Line<'static>,
+    h: u16,
+    places: Vec<Place>,
+}
+
+/// the wrap accumulator: content fills left-to-right, breaks at `maxw` with a
+/// 2-cell hanging indent, hard-breaks words wider than a row, and reserves
+/// EMOTE_H the moment a KNOWN stack lands on a row (stable heights — rows never
+/// jump when the image finishes loading). `tint` paints mention rows edge-to-edge.
+struct Wrap {
+    rows: Vec<RowL>,
+    spans: Vec<Span<'static>>,
+    places: Vec<Place>,
+    col: u16,
+    row_start: u16,
+    h: u16,
     maxw: u16,
-    mut spans: Vec<Span<'static>>,
-    mut col: u16,
-    text_hue: Color,
-) -> (Line<'static>, Vec<Place>) {
-    let mut places = Vec::new();
-    for seg in segments(text, set) {
-        if col >= maxw {
-            break;
+    indent: u16,
+    tint: Option<Color>,
+}
+
+impl Wrap {
+    fn new(lead: Vec<Span<'static>>, lead_col: u16, maxw: u16, tint: Option<Color>) -> Wrap {
+        let maxw = maxw.max(4);
+        Wrap {
+            rows: Vec::new(),
+            spans: lead,
+            places: Vec::new(),
+            col: lead_col,
+            row_start: lead_col,
+            h: 1,
+            maxw,
+            indent: 2.min(maxw / 4),
+            tint,
         }
+    }
+
+    fn at_start(&self) -> bool {
+        self.col <= self.row_start
+    }
+
+    fn fits(&self, w: u16) -> bool {
+        self.col + w <= self.maxw
+    }
+
+    fn flush_row(&mut self) {
+        let mut spans = std::mem::take(&mut self.spans);
+        if let Some(bg) = self.tint {
+            for s in &mut spans {
+                s.style = s.style.bg(bg);
+            }
+            let pad = self.maxw.saturating_sub(self.col);
+            if pad > 0 {
+                spans.push(Span::styled(
+                    " ".repeat(pad as usize),
+                    Style::default().bg(bg),
+                ));
+            }
+        }
+        self.rows.push(RowL {
+            line: Line::from(spans),
+            h: self.h,
+            places: std::mem::take(&mut self.places),
+        });
+        self.h = 1;
+    }
+
+    fn newline(&mut self) {
+        self.flush_row();
+        if self.indent > 0 {
+            self.spans.push(Span::raw(" ".repeat(self.indent as usize)));
+        }
+        self.col = self.indent;
+        self.row_start = self.indent;
+    }
+
+    fn push_span(&mut self, s: impl Into<String>, style: Style) {
+        let s: String = s.into();
+        self.col += UnicodeWidthStr::width(s.as_str()) as u16;
+        self.spans.push(Span::styled(s, style));
+    }
+
+    /// a word: wraps to the next row when it doesn't fit, hard-breaks when it
+    /// is wider than a whole row (copypasta with no spaces can't overflow).
+    fn push_word(&mut self, word: &str, style: Style) {
+        let mut rest = word;
+        loop {
+            let avail = self.maxw.saturating_sub(self.col);
+            let ww = UnicodeWidthStr::width(rest) as u16;
+            if ww <= avail {
+                self.push_span(rest, style);
+                return;
+            }
+            if !self.at_start() {
+                self.newline();
+                continue;
+            }
+            // at row start and still too wide → split at the row edge
+            let mut used = 0u16;
+            let mut cut = rest.len();
+            for (i, c) in rest.char_indices() {
+                let cw = UnicodeWidthStr::width(c.to_string().as_str()) as u16;
+                if used + cw > avail {
+                    cut = i;
+                    break;
+                }
+                used += cw;
+            }
+            if cut == 0 {
+                return; // a zero-width row — bail rather than loop forever
+            }
+            let (head, tail) = rest.split_at(cut);
+            self.push_span(head, style);
+            self.newline();
+            rest = tail;
+        }
+    }
+
+    fn finish(mut self) -> Vec<RowL> {
+        self.flush_row();
+        self.rows
+    }
+}
+
+/// per-line layout context: the lead spans (username chrome), where content
+/// starts, the text color, and an optional full-row mention tint.
+struct LineCtx {
+    lead: Vec<Span<'static>>,
+    lead_col: u16,
+    hue: Color,
+    tint: Option<Color>,
+}
+
+/// lay message text after some lead spans into wrapped rows. core's segment
+/// parser owns stacking + effects; an unloaded/text-mode emote falls back to
+/// its name in brand color. shared by chat rows and the wysiwyg preview.
+fn wrap_layout(text: &str, set: &EmoteSet, mode: EmoteMode, maxw: u16, ctx: LineCtx) -> Vec<RowL> {
+    let mut wl = Wrap::new(ctx.lead, ctx.lead_col, maxw, ctx.tint);
+    let txt = Style::default().fg(ctx.hue);
+    let name_style = Style::default().fg(BRAND).add_modifier(Modifier::BOLD);
+    let graphics = !matches!(mode, EmoteMode::Text);
+    for seg in segments(text, set) {
         match seg {
             Segment::Text(t) => {
-                col += UnicodeWidthStr::width(t.as_str()) as u16;
-                spans.push(Span::styled(t, Style::default().fg(text_hue)));
+                for (i, word) in t.split(' ').enumerate() {
+                    if i > 0 && !wl.at_start() {
+                        if !wl.fits(1 + UnicodeWidthStr::width(word) as u16) {
+                            wl.newline();
+                        } else {
+                            wl.push_span(" ", txt);
+                        }
+                    }
+                    wl.push_word(word, txt);
+                }
             }
             Segment::Stack(s) => {
                 let key = s.key();
                 let w = key_width(&key);
-                if col + w <= maxw && mode.ready(&key) {
-                    places.push(Place { col, w, key });
-                    spans.push(Span::raw(" ".repeat(w as usize)));
-                    col += w;
-                } else {
-                    col += UnicodeWidthStr::width(s.base.as_str()) as u16;
-                    spans.push(Span::styled(
-                        s.base,
-                        Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
-                    ));
+                if graphics {
+                    if !wl.fits(w) && !wl.at_start() {
+                        wl.newline();
+                    }
+                    if wl.fits(w) {
+                        // known stack → the row is emote-height NOW, ready or
+                        // not (stable heights). unready draws the name inside
+                        // the reserved block; the image takes over seamlessly.
+                        wl.h = EMOTE_H;
+                        if mode.ready(&key) {
+                            wl.places.push(Place {
+                                col: wl.col,
+                                w,
+                                key,
+                            });
+                            wl.push_span(" ".repeat(w as usize), Style::default());
+                        } else {
+                            wl.push_word(&s.base, name_style);
+                        }
+                        continue;
+                    }
                 }
+                wl.push_word(&s.base, name_style);
             }
         }
     }
-    (Line::from(spans), places)
+    wl.finish()
 }
 
 /// one chat row: `user: message` with emote slots.
@@ -1571,7 +1743,8 @@ fn layout_message(
     set: &EmoteSet,
     mode: EmoteMode,
     maxw: u16,
-) -> (Line<'static>, Vec<Place>) {
+    me: Option<&str>,
+) -> Vec<RowL> {
     let text_hue = Color::Indexed(heatsync_core::heat::color(m.heat));
     let user_color = m
         .color
@@ -1583,7 +1756,25 @@ fn layout_message(
         Span::styled(": ", Style::default().fg(Color::Indexed(238))),
     ];
     let col = UnicodeWidthStr::width(m.user.as_str()) as u16 + 2;
-    layout_segments(&m.text, set, mode, maxw, spans, col, text_hue)
+    // mention tint: the whole row block goes dark red when the message @'s you.
+    let tint = me
+        .filter(|me| {
+            let hay = m.text.to_lowercase();
+            hay.contains(&format!("@{me}"))
+        })
+        .map(|_| Color::Indexed(52));
+    wrap_layout(
+        &m.text,
+        set,
+        mode,
+        maxw,
+        LineCtx {
+            lead: spans,
+            lead_col: col,
+            hue: text_hue,
+            tint,
+        },
+    )
 }
 
 /// `#rrggbb` → nearest-ish terminal color (truecolor if the term supports it).
@@ -1752,6 +1943,127 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         Style::default().fg(Color::Indexed(244)),
     ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+    use heatsync_core::emote::Emote;
+
+    fn set_of(names: &[&str]) -> EmoteSet {
+        EmoteSet::from_list(names.iter().map(|n| Emote {
+            name: (*n).into(),
+            url: format!("u/{n}"),
+            provider: "7tv".into(),
+            id: (*n).into(),
+            animated: false,
+            zero_width: false,
+        }))
+    }
+
+    fn widths(rows: &[RowL]) -> Vec<usize> {
+        rows.iter()
+            .map(|r| {
+                r.line
+                    .spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum()
+            })
+            .collect()
+    }
+
+    fn lay(text: &str, maxw: u16) -> Vec<RowL> {
+        wrap_layout(
+            text,
+            &set_of(&[]),
+            EmoteMode::Text,
+            maxw,
+            LineCtx {
+                lead: vec![Span::raw("u: ")],
+                lead_col: 3,
+                hue: Color::Reset,
+                tint: None,
+            },
+        )
+    }
+
+    #[test]
+    fn wraps_at_width_with_hanging_indent() {
+        let rows = lay("one two three four five six seven", 12);
+        assert!(rows.len() > 1);
+        for w in widths(&rows) {
+            assert!(w <= 12, "row overflows: {w}");
+        }
+        // continuation rows start with the 2-cell indent
+        for r in &rows[1..] {
+            assert!(r.line.spans[0].content.starts_with("  "));
+        }
+    }
+
+    #[test]
+    fn hard_breaks_row_width_words() {
+        let long = "x".repeat(40);
+        let rows = lay(&long, 12);
+        assert!(rows.len() >= 4);
+        for w in widths(&rows) {
+            assert!(w <= 12);
+        }
+    }
+
+    #[test]
+    fn single_row_stays_single() {
+        let rows = lay("short msg", 40);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].h, 1);
+    }
+
+    #[test]
+    fn text_tier_emote_name_wraps_as_word() {
+        let set = set_of(&["KEKW"]);
+        let rows = wrap_layout(
+            "aaaa bbbb KEKW",
+            &set,
+            EmoteMode::Text,
+            10,
+            LineCtx {
+                lead: vec![],
+                lead_col: 0,
+                hue: Color::Reset,
+                tint: None,
+            },
+        );
+        assert!(rows.iter().all(|r| r.h == 1)); // text tier never grows rows
+        assert!(rows.len() >= 2);
+    }
+
+    #[test]
+    fn mention_tint_pads_row_to_full_width() {
+        let rows = wrap_layout(
+            "yo @me hi",
+            &set_of(&[]),
+            EmoteMode::Text,
+            20,
+            LineCtx {
+                lead: vec![],
+                lead_col: 0,
+                hue: Color::Reset,
+                tint: Some(Color::Indexed(52)),
+            },
+        );
+        let w: usize = rows[0]
+            .line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        assert_eq!(w, 20); // padded edge-to-edge
+        assert!(rows[0]
+            .line
+            .spans
+            .iter()
+            .all(|s| s.style.bg == Some(Color::Indexed(52))));
+    }
 }
 
 #[cfg(test)]
