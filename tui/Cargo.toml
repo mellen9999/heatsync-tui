@@ -1,0 +1,34 @@
+[package]
+name = "heatsync-tui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "heatsync"
+path = "src/main.rs"
+
+[dependencies]
+heatsync-core = { path = "../core" }
+ratatui = "0.29"
+crossterm = "0.28"
+# animated emote decode — pure-Rust, no libwebp/libgif C deps. lean feature set.
+image = { version = "0.25", default-features = false, features = ["gif", "webp", "png", "jpeg"] }
+# live relay (blocking WS thread) + http (emote sets, corpus, image bytes). both
+# rustls, no async runtime, no native-tls C dep — keeps the .exe clean.
+tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+ureq = { version = "2", default-features = false, features = ["tls", "json", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-width = "0.2"
+# kick oauth (PKCE): S256 challenge + random verifier. pure-rust, tiny.
+sha2 = "0.10"
+getrandom = "0.2"
+# terminal graphics protocols (sixel/halfblock/kitty are core — no chafa C lib,
+# no image-defaults codecs; we hand it already-decoded frames from `image`).
+ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
+
+# bare Linux console (TTY) pixel emotes — write straight to /dev/fb0, the same
+# mechanism notcurses' NCPIXEL_LINUXFB uses, but pure-Rust + linux-only so the
+# windows/mac .exe is unaffected.
+[target.'cfg(target_os = "linux")'.dependencies]
+framebuffer = "0.3"
