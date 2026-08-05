@@ -313,6 +313,12 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     // views stay lazy (redraw only on the tick or a keypress).
     let tick = Duration::from_millis(200);
     let mut last = Instant::now();
+    // smoothed cost of one draw. animations run at their authored rate, but never
+    // faster than the terminal can actually paint — if a draw starts costing real
+    // time (a slow pty, a screenful of sixels), the cadence stretches to match
+    // instead of queueing writes the terminal renders as tearing. self-tuning, so
+    // no protocol gets a hardcoded fps penalty.
+    let mut draw_cost = Duration::ZERO;
     loop {
         drain_emotes(&mut app);
         // snapshot the animation clock + reset the per-draw blit budget, so every
@@ -320,7 +326,11 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         if let Some(store) = &app.store {
             store.begin_frame();
         }
+        let drew_at = Instant::now();
         terminal.draw(|f| ui(f, &app))?;
+        // exponential moving average — one slow frame shouldn't throttle us, a
+        // sustained slow terminal should.
+        draw_cost = (draw_cost * 3 + drew_at.elapsed()) / 4;
         // console tier: paint emote pixels onto the reserved cells now that the
         // text has flushed. terminal tiers draw inline during the frame above.
         if let Some(fb) = &app.fb {
@@ -333,7 +343,9 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         // text-only or all-static view never wakes up early at all.
         let tick_left = tick.saturating_sub(last.elapsed());
         let wait = match emote_mode(&app).next_flip_in() {
-            Some(flip) => flip.min(tick_left),
+            // keep the pty at most ~half busy: never schedule the next frame
+            // sooner than twice what the last draws actually cost.
+            Some(flip) => flip.max(draw_cost * 2).min(tick_left),
             None => tick_left,
         };
         if event::poll(wait)? {

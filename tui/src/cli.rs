@@ -194,6 +194,17 @@ pub fn render_test(args: &[String]) -> std::io::Result<()> {
         args.len(),
         frames.len()
     );
+    if frames.len() > 1 {
+        let total: u32 = frames.iter().map(|f| f.1.max(20)).sum();
+        let fps = frames.len() as f64 * 1000.0 / total.max(1) as f64;
+        eprintln!(
+            "  authored: {:.0}ms loop at {fps:.1}fps (a 100ms redraw cadence would \
+             show {:.0} of these {} frames)",
+            total,
+            (total as f64 / 100.0).floor(),
+            frames.len()
+        );
+    }
     let idxs = if frames.len() > 1 {
         vec![0usize, frames.len() / 2]
     } else {
