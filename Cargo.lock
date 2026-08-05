@@ -388,6 +388,7 @@ dependencies = [
 name = "heatsync-tui"
 version = "0.1.0"
 dependencies = [
+ "color_quant",
  "crossterm",
  "framebuffer",
  "getrandom",

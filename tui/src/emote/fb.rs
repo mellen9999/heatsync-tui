@@ -10,8 +10,6 @@
 
 use std::cell::RefCell;
 
-use super::render::{EMOTE_H, EMOTE_W};
-
 /// a queued emote to blit this frame at an (absolute) cell position.
 pub struct Placement {
     pub col: u16,
@@ -53,24 +51,26 @@ impl FbEmotes {
         self.inner.pump();
     }
 
-    /// is this emote decoded + scaled and ready to blit?
-    pub fn is_ready(&self, _url: &str) -> bool {
+    /// this emote's width in cells once it's decoded + scaled, else None. width
+    /// is per-emote (its real aspect), so nothing is stretched to fit.
+    pub fn cells(&self, _url: &str) -> Option<u16> {
         #[cfg(target_os = "linux")]
         {
-            return self.inner.is_ready(_url);
+            return self.inner.cells(_url);
         }
         #[cfg(not(target_os = "linux"))]
-        false
+        None
     }
 
-    /// is any loaded emote animated? (drives the fast redraw cadence)
-    pub fn any_animated(&self) -> bool {
+    /// how long until the soonest-flipping loaded emote changes frame — the event
+    /// loop sleeps exactly this long so animations run at their authored fps.
+    pub fn next_flip_in(&self) -> Option<std::time::Duration> {
         #[cfg(target_os = "linux")]
         {
-            return self.inner.any_animated();
+            return self.inner.next_flip_in();
         }
         #[cfg(not(target_os = "linux"))]
-        false
+        None
     }
 
     /// queue an emote to be painted at a cell position (called during layout).
@@ -96,14 +96,15 @@ mod linux {
     use std::collections::HashMap;
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use framebuffer::Framebuffer;
-    use image::imageops::{resize, FilterType};
     use image::RgbaImage;
 
-    use super::{Placement, EMOTE_H, EMOTE_W};
-    use crate::emote::render::composite_frames;
+    use super::Placement;
+    use crate::emote::render::{
+        composite_frames, fit_center, subsample, width_cells, EMOTE_H, MAX_FRAMES, MIN_DELAY_MS,
+    };
 
     // fb blits are plain mmap writes (~3KB each) — far cheaper than terminal
     // graphics escapes, so the cap only exists to bound a pathological frame.
@@ -113,9 +114,16 @@ mod linux {
         rgba: RgbaImage, // pre-scaled to the emote's cell footprint in pixels
         delay_ms: u32,
     }
+    /// a built emote: frames already at their exact cell-block pixel size, plus
+    /// the footprint the layout needs to reserve.
+    struct Anim {
+        frames: Vec<FbFrame>,
+        w_cells: u16,
+        total_ms: u64,
+    }
     enum Entry {
         Loading,
-        Ready(Vec<FbFrame>),
+        Ready(Anim),
         Failed,
     }
     struct Job {
@@ -123,7 +131,7 @@ mod linux {
     }
     struct Done {
         url: String,
-        frames: Option<Vec<FbFrame>>,
+        anim: Option<Anim>,
     }
 
     /// packed pixel-format description read from the framebuffer once.
@@ -185,8 +193,8 @@ mod linux {
             let cell_h = (v.yres / rows as u32).max(1);
             let (jt, jr) = mpsc::channel::<Job>();
             let (dt, dr) = mpsc::channel::<Done>();
-            let (tw, th) = (cell_w * EMOTE_W as u32, cell_h * EMOTE_H as u32);
-            thread::spawn(move || loader(tw, th, jr, dt));
+            let (cw, ch) = (cell_w as u16, cell_h as u16);
+            thread::spawn(move || loader(cw, ch, jr, dt));
             Some(Inner {
                 fb: std::cell::RefCell::new(fb),
                 fmt,
@@ -213,8 +221,8 @@ mod linux {
 
         pub fn pump(&mut self) {
             while let Ok(d) = self.done.try_recv() {
-                let e = match d.frames {
-                    Some(f) if !f.is_empty() => Entry::Ready(f),
+                let e = match d.anim {
+                    Some(a) if !a.frames.is_empty() => Entry::Ready(a),
                     _ => Entry::Failed,
                 };
                 self.cache.borrow_mut().insert(d.url, e);
@@ -222,15 +230,27 @@ mod linux {
             self.budget.set(DRAW_BUDGET);
         }
 
-        pub fn is_ready(&self, url: &str) -> bool {
-            matches!(self.cache.borrow().get(url), Some(Entry::Ready(_)))
+        /// width in cells once built, else None (which is also the "not ready
+        /// yet, show the emote's name instead" signal).
+        pub fn cells(&self, url: &str) -> Option<u16> {
+            match self.cache.borrow().get(url) {
+                Some(Entry::Ready(a)) => Some(a.w_cells),
+                _ => None,
+            }
         }
 
-        pub fn any_animated(&self) -> bool {
-            self.cache
-                .borrow()
-                .values()
-                .any(|e| matches!(e, Entry::Ready(f) if f.len() > 1))
+        /// ms until the soonest-flipping loaded emote changes frame.
+        pub fn next_flip_in(&self) -> Option<Duration> {
+            let now = self.start.elapsed().as_millis() as u64;
+            let mut soonest = u64::MAX;
+            for e in self.cache.borrow().values() {
+                if let Entry::Ready(a) = e {
+                    if a.frames.len() > 1 {
+                        soonest = soonest.min(frame_at(&a.frames, now, a.total_ms).1);
+                    }
+                }
+            }
+            (soonest != u64::MAX).then(|| Duration::from_millis(soonest.max(1)))
         }
 
         pub fn blit(&self, queued: &[Placement]) {
@@ -241,13 +261,13 @@ mod linux {
                 if self.budget.get() == 0 {
                     break;
                 }
-                let frames = match cache.get(&p.url) {
-                    Some(Entry::Ready(f)) => f,
+                let a = match cache.get(&p.url) {
+                    Some(Entry::Ready(a)) => a,
                     _ => continue,
                 };
                 self.budget.set(self.budget.get() - 1);
-                let idx = frame_index(frames, now);
-                self.paint(&mut fb, &frames[idx].rgba, p.col, p.row);
+                let idx = frame_at(&a.frames, now, a.total_ms).0;
+                self.paint(&mut fb, &a.frames[idx].rgba, p.col, p.row);
             }
         }
 
@@ -285,47 +305,56 @@ mod linux {
         c(r, f.r) | c(g, f.g) | c(b, f.b)
     }
 
-    fn frame_index(frames: &[FbFrame], now_ms: u64) -> usize {
-        if frames.len() <= 1 {
-            return 0;
+    /// the frame showing at `now_ms` and how many ms until it flips.
+    fn frame_at(frames: &[FbFrame], now_ms: u64, total_ms: u64) -> (usize, u64) {
+        if frames.len() <= 1 || total_ms == 0 {
+            return (0, u64::MAX);
         }
-        let total: u64 = frames.iter().map(|f| f.delay_ms.max(20) as u64).sum();
-        if total == 0 {
-            return 0;
-        }
-        let mut t = now_ms % total;
+        let mut t = now_ms % total_ms;
         for (i, f) in frames.iter().enumerate() {
-            let d = f.delay_ms.max(20) as u64;
+            let d = f.delay_ms.max(MIN_DELAY_MS) as u64;
             if t < d {
-                return i;
+                return (i, d - t);
             }
             t -= d;
         }
-        0
+        (0, 1)
     }
 
-    fn loader(tw: u32, th: u32, jobs: Receiver<Job>, done: Sender<Done>) {
+    fn loader(cw: u16, ch: u16, jobs: Receiver<Job>, done: Sender<Done>) {
         for job in jobs {
-            let frames = build(tw, th, &job.url);
-            if done.send(Done { url: job.url, frames }).is_err() {
+            let anim = build(cw, ch, &job.url);
+            if done.send(Done { url: job.url, anim }).is_err() {
                 return;
             }
         }
     }
 
-    fn build(tw: u32, th: u32, key: &str) -> Option<Vec<FbFrame>> {
+    fn build(cw: u16, ch: u16, key: &str) -> Option<Anim> {
+        let block_h = EMOTE_H as u32 * ch.max(1) as u32;
         // key is one url or a '\n'-joined overlay stack — composite_frames
         // handles both (base at the bottom, zero-width overlays on top).
-        let frames = composite_frames(key)?;
+        let frames = subsample(composite_frames(key, block_h)?, MAX_FRAMES);
+        let (sw, sh) = frames[0].0.dimensions();
+        if sw == 0 || sh == 0 {
+            return None;
+        }
+        // width from the emote's REAL aspect — the old code stretched every emote
+        // onto a fixed 3x2 block, so square emotes came out squashed and wide ones
+        // came out mangled.
+        let w_cells = width_cells(sw as f32 / sh as f32, cw, ch);
+        let (tw, th) = (w_cells as u32 * cw.max(1) as u32, block_h);
         let mut out = Vec::with_capacity(frames.len());
+        let mut total_ms = 0u64;
         for (canvas, delay_ms) in frames {
-            let rgba = resize(&canvas, tw.max(1), th.max(1), FilterType::Triangle);
-            out.push(FbFrame { rgba, delay_ms });
+            let delay_ms = delay_ms.max(MIN_DELAY_MS);
+            total_ms += delay_ms as u64;
+            out.push(FbFrame { rgba: fit_center(&canvas, tw, th), delay_ms });
         }
         if out.is_empty() {
             None
         } else {
-            Some(out)
+            Some(Anim { frames: out, w_cells, total_ms })
         }
     }
 }

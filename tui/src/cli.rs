@@ -187,7 +187,7 @@ pub fn render_test(args: &[String]) -> std::io::Result<()> {
         return Ok(());
     }
     let key = args.join("\n");
-    let Some(frames) = crate::emote::render::composite_frames(&key) else {
+    let Some(frames) = crate::emote::render::composite_frames(&key, 32) else {
         eprintln!("render-test: composite failed (fetch/decode)");
         return Ok(());
     };

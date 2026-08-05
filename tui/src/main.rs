@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use config::TabPos;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use emote::fb::FbEmotes;
-use emote::render::{EmoteStore, EMOTE_H, EMOTE_W};
+use emote::render::{EmoteStore, EMOTE_H};
 use heatsync_core::emote::{tokenize, EmoteSet, Token};
 use heatsync_core::heat::Tier;
 use heatsync_core::{mock, Channel, Message, Platform};
@@ -86,12 +86,24 @@ enum EmoteMode<'a> {
 }
 
 impl EmoteMode<'_> {
-    /// is this emote loaded + ready to draw? (drives reserve-cells vs show-name)
-    fn ready(&self, url: &str) -> bool {
+    /// this emote's width in cells once it's loaded, else None. width is
+    /// per-emote (derived from its real aspect and the terminal's cell aspect),
+    /// so a square emote reads square and a wide one isn't crushed. `None`
+    /// doubles as "not ready" — the layout falls back to the emote's name.
+    fn cells(&self, url: &str) -> Option<u16> {
         match self {
-            EmoteMode::Term(s) => s.is_ready(url),
-            EmoteMode::Fb(f) => f.is_ready(url),
-            EmoteMode::Text => false,
+            EmoteMode::Term(s) => s.cells(url),
+            EmoteMode::Fb(f) => f.cells(url),
+            EmoteMode::Text => None,
+        }
+    }
+
+    /// how long until any loaded emote flips to its next frame.
+    fn next_flip_in(&self) -> Option<Duration> {
+        match self {
+            EmoteMode::Term(s) => s.next_flip_in(),
+            EmoteMode::Fb(f) => f.next_flip_in(),
+            EmoteMode::Text => None,
         }
     }
 }
@@ -290,12 +302,6 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     // nothing and only the changed emote cells cost anything. text-only / static
     // views stay lazy (redraw only on the tick or a keypress).
     let tick = Duration::from_millis(200);
-    // animation redraw cadence is protocol-tuned: fast + flicker-free on kitty/
-    // iterm2, gentle + tear-free on sixel. text/console tiers never spin fast.
-    let anim_frame = app
-        .store
-        .as_ref()
-        .map_or(Duration::from_millis(100), EmoteStore::anim_interval);
     let mut last = Instant::now();
     // sixel/halfblocks: a freshly-loaded static emote is emitted once and foot/
     // tmux can drop that single write. when one lands we force ONE full re-emit
@@ -308,9 +314,10 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
 
     loop {
         drain_emotes(&mut app);
-        // per-frame emote draw budget (decoupled from the data-tick pump).
+        // snapshot the animation clock + reset the per-draw blit budget, so every
+        // emote in this frame is sampled at the same instant.
         if let Some(store) = &app.store {
-            store.reset_budget();
+            store.begin_frame();
         }
         terminal.draw(|f| ui(f, &app))?;
         if pending_repaint && last_repaint.elapsed() >= repaint_debounce {
@@ -326,10 +333,15 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             fb.blit();
         }
 
+        // sleep until whichever comes first: the data tick, or the exact instant
+        // the soonest emote flips to its next frame. that's what makes animations
+        // play at their authored fps instead of a fixed cadence — and it means a
+        // text-only or all-static view never wakes up early at all.
         let tick_left = tick.saturating_sub(last.elapsed());
-        let animating = app.store.as_ref().is_some_and(EmoteStore::any_animated)
-            || app.fb.as_ref().is_some_and(FbEmotes::any_animated);
-        let wait = if animating { anim_frame.min(tick_left) } else { tick_left };
+        let wait = match emote_mode(&app).next_flip_in() {
+            Some(flip) => flip.min(tick_left),
+            None => tick_left,
+        };
         if event::poll(wait)? {
             if let Event::Key(k) = event::read()? {
                 if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat)
@@ -805,7 +817,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
             match mode {
                 EmoteMode::Term(store) => {
                     if let Some(proto) = store.frame(&p.key) {
-                        f.render_widget(Image::new(proto), Rect { x, y, width: EMOTE_W, height: h as u16 });
+                        f.render_widget(Image::new(proto), Rect { x, y, width: p.w, height: h as u16 });
                     }
                 }
                 EmoteMode::Fb(fb) => {
@@ -816,11 +828,11 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
                     // pixels before we blit. plain spaces diff as "unchanged",
                     // the console never repaints them, and old emote pixels
                     // smear across the screen during fast scroll.
-                    let pad = "\u{a0}".repeat(EMOTE_W as usize);
+                    let pad = "\u{a0}".repeat(p.w as usize);
                     let lines: Vec<Line> = (0..h).map(|_| Line::raw(pad.clone())).collect();
                     f.render_widget(
                         Paragraph::new(lines),
-                        Rect { x, y, width: EMOTE_W, height: h as u16 },
+                        Rect { x, y, width: p.w, height: h as u16 },
                     );
                     fb.push(x, y, &p.key);
                 }
@@ -915,7 +927,7 @@ fn each_stack(text: &str, set: &EmoteSet, mut f: impl FnMut(&str)) {
 /// does this message contain at least one loaded (ready-to-draw) emote stack?
 fn has_ready_emote(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
     let mut any = false;
-    each_stack(&m.text, set, |key| any |= mode.ready(key));
+    each_stack(&m.text, set, |key| any |= mode.cells(key).is_some());
     any
 }
 
@@ -932,6 +944,9 @@ fn fit(s: String, w: u16) -> String {
 /// a reserved emote slot: column offset within the channel body + its stack key.
 struct Place {
     col: u16,
+    /// this emote's own width in cells — square emotes and wide emotes get
+    /// different footprints instead of one fixed block.
+    w: u16,
     key: String,
 }
 
@@ -977,11 +992,13 @@ fn layout_message(m: &Message, set: &EmoteSet, mode: EmoteMode, maxw: u16) -> (L
                     }
                 }
                 let key = urls.join("\n");
-                let ready = col + EMOTE_W <= maxw && !urls.is_empty() && mode.ready(&key);
-                if ready {
-                    places.push(Place { col, key });
-                    spans.push(Span::raw(" ".repeat(EMOTE_W as usize)));
-                    col += EMOTE_W;
+                // width comes from the emote itself once it's built; an emote
+                // that wouldn't fit the remaining row falls back to its name.
+                let w = mode.cells(&key).filter(|w| col + w <= maxw);
+                if let Some(w) = w.filter(|_| !urls.is_empty()) {
+                    places.push(Place { col, w, key });
+                    spans.push(Span::raw(" ".repeat(w as usize)));
+                    col += w;
                 } else {
                     col += UnicodeWidthStr::width(base_name.as_str()) as u16;
                     spans.push(Span::styled(base_name, Style::default().fg(BRAND).add_modifier(Modifier::BOLD)));

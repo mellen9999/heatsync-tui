@@ -13,6 +13,10 @@ ratatui = "0.29"
 crossterm = "0.28"
 # animated emote decode — pure-Rust, no libwebp/libgif C deps. lean feature set.
 image = { version = "0.25", default-features = false, features = ["gif", "webp", "png", "jpeg"] }
+# one shared palette per animated emote. without it every sixel frame is dithered
+# independently and static regions shimmer between frames — that IS the flashing.
+# already in the tree via image's gif codec; pure-Rust, no transitive deps.
+color_quant = "1.1"
 # live relay (blocking WS thread) + http (emote sets, corpus, image bytes). both
 # rustls, no async runtime, no native-tls C dep — keeps the .exe clean.
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
