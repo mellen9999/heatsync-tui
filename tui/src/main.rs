@@ -125,6 +125,7 @@ fn main() -> io::Result<()> {
         Some("search") => return cli::search(&args[1..]),
         Some("hot") | Some("top") => return cli::hot(&args[1..]),
         Some("probe") => return cli::probe(&args[1..]),
+        Some("diag") => return cli::diag(&args[1..]),
         Some("render-test") => return cli::render_test(&args[1..]),
         Some("login") if args.get(1).map(String::as_str) == Some("kick") => return kick::login(),
         Some("login") => return cli::login(),
@@ -991,7 +992,7 @@ fn layout_message(m: &Message, set: &EmoteSet, mode: EmoteMode, maxw: u16) -> (L
     let user_color = m.color.as_deref().and_then(parse_hex).unwrap_or(Color::Indexed(244));
     let mut spans = vec![
         Span::styled(m.user.clone(), Style::default().fg(user_color)),
-        Span::styled(": ", Style::default().fg(Color::Indexed(238))),
+        Span::styled(": ", Style::default().fg(Color::Indexed(244))),
     ];
     let mut col = UnicodeWidthStr::width(m.user.as_str()) as u16 + 2;
     let mut places = Vec::new();
@@ -1099,7 +1100,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             Span::styled(" ❯ ", Style::default().fg(BRAND)),
             Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))),
             Span::styled("\u{2588}", Style::default().fg(BRAND)),
-            Span::styled("   name or kick:name", Style::default().fg(Color::Indexed(240))),
+            Span::styled("   name or kick:name", Style::default().fg(Color::Indexed(244))),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;

@@ -53,8 +53,12 @@ impl Tier {
     /// hot #ffaf00=214 erupting #ffff00=226 mythic #ffffff=231
     pub fn xterm(self) -> u8 {
         match self {
-            Tier::Zero => 238,
-            Tier::Cold => 240,
+            // never below 244: the cold tiers are body text, and xterm 236-240 is
+            // dark grey — legible in a truecolor emulator, but the kernel console
+            // has 16 colors and folds them onto black, so every cold message went
+            // invisible on a tty. dim must still be readable.
+            Tier::Zero => 245,
+            Tier::Cold => 250,
             Tier::Spark => 202,
             Tier::Warm => 208,
             Tier::Hot => 214,

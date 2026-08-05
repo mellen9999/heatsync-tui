@@ -420,3 +420,115 @@ fn encode_all(picker: &ratatui_image::picker::Picker, canvases: &[image::RgbaIma
         .collect()
 }
 
+
+/// `heatsync diag` — console/graphics diagnostic. no network, no TUI. prints
+/// every input the emote-tier decision depends on, says which tier it would
+/// pick and WHY the others were rejected, then (on a usable console) paints a
+/// test rectangle straight to /dev/fb0 so scanout can be confirmed by eye.
+pub fn diag(_args: &[String]) -> std::io::Result<()> {
+    let env = |k: &str| std::env::var(k).unwrap_or_else(|_| "<unset>".into());
+    println!("TERM={}  TMUX={}  WAYLAND_DISPLAY={}  DISPLAY={}",
+        env("TERM"),
+        if std::env::var_os("TMUX").is_some() { "set" } else { "<unset>" },
+        env("WAYLAND_DISPLAY"), env("DISPLAY"));
+
+    let (cols, rows) = match crossterm::terminal::size() {
+        Ok((c, r)) => {
+            println!("crossterm size = {c}x{r} cells");
+            (c, r)
+        }
+        Err(e) => {
+            println!("crossterm size = ERR {e}");
+            (0, 0)
+        }
+    };
+
+    // glyph coverage: the kernel console font is 256/512 glyphs, so any of these
+    // that show as blank/garbage explain missing UI chrome.
+    println!("glyphs (blank = font can't map it): '\u{276f}' '\u{2588}' '\u{25cf}' '\u{25cb}' '\u{2500}' '\u{2502}' '\u{250c}'");
+
+    println!("--- tier decision ---");
+    let mut reasons: Vec<String> = Vec::new();
+    if std::env::var_os("TMUX").is_some() {
+        let client = std::process::Command::new("tmux")
+            .args(["display", "-p", "#{client_termname}"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        println!("tmux client_termname = {client:?}");
+        if client != "linux" {
+            reasons.push(format!("tmux client is {client:?}, not a kernel console"));
+        }
+    } else {
+        if std::env::var("TERM").ok().as_deref() != Some("linux") {
+            reasons.push("TERM != linux and not in tmux".into());
+        }
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            reasons.push("WAYLAND_DISPLAY set (fb0 is not the scanned-out surface)".into());
+        }
+        if std::env::var_os("DISPLAY").is_some() {
+            reasons.push("DISPLAY set (fb0 is not the scanned-out surface)".into());
+        }
+    }
+    if cols == 0 || rows == 0 {
+        reasons.push("terminal size reported 0 — fb tier needs a real cell grid".into());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        match framebuffer::Framebuffer::new("/dev/fb0") {
+            Err(e) => reasons.push(format!("/dev/fb0 open failed: {e:?}")),
+            Ok(fb) => {
+                let v = fb.var_screen_info.clone();
+                let f = fb.fix_screen_info.clone();
+                println!("fb0: {}x{} bpp={} line_length={} smem_len={} xoff={} yoff={}",
+                    v.xres, v.yres, v.bits_per_pixel, f.line_length, f.smem_len, v.xoffset, v.yoffset);
+                println!("fb0 bitfields: r=({},{}) g=({},{}) b=({},{})",
+                    v.red.offset, v.red.length, v.green.offset, v.green.length,
+                    v.blue.offset, v.blue.length);
+                println!("fb0 mmap len = {} bytes", fb.frame.len());
+                if cols > 0 && rows > 0 {
+                    println!("cell = {}x{} px", (v.xres / cols as u32).max(1), (v.yres / rows as u32).max(1));
+                }
+                if reasons.is_empty() {
+                    paint_test(fb, v.xres, v.yres, f.line_length, (v.bits_per_pixel / 8).max(1));
+                }
+            }
+        }
+    }
+
+    if reasons.is_empty() {
+        println!("=> framebuffer tier ACTIVE");
+    } else {
+        println!("=> framebuffer tier REJECTED:");
+        for r in &reasons {
+            println!("   - {r}");
+        }
+        println!("   (falls back to the terminal-graphics tier, else text)");
+    }
+    Ok(())
+}
+
+/// paint an orange 200x100 block at (100,100) straight to the framebuffer and
+/// hold it, so "did anything reach the screen" is answered by looking.
+#[cfg(target_os = "linux")]
+fn paint_test(mut fb: framebuffer::Framebuffer, xres: u32, yres: u32, line_len: u32, bpp: u32) {
+    let (w, h) = (200u32.min(xres), 100u32.min(yres));
+    let buf = &mut fb.frame;
+    for y in 100..(100 + h) {
+        for x in 100..(100 + w) {
+            let off = (y as usize) * line_len as usize + (x as usize) * bpp as usize;
+            if off + bpp as usize > buf.len() {
+                continue;
+            }
+            // heatsync orange #ff8700, written little-endian for xrgb8888.
+            for (i, b) in [0x00u8, 0x87, 0xff, 0x00].iter().take(bpp as usize).enumerate() {
+                buf[off + i] = *b;
+            }
+        }
+    }
+    println!("painted an ORANGE block at px(100,100) size 200x100 — holding 5s");
+    std::thread::sleep(std::time::Duration::from_secs(5));
+}

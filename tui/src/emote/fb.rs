@@ -159,6 +159,12 @@ mod linux {
     }
 
     pub struct Inner {
+        host: Host,
+        /// the pane's top-left in console cells. under tmux a pane can move or
+        /// resize at any time, so it's re-read on a short TTL rather than cached
+        /// for the process lifetime.
+        origin: std::cell::Cell<(u16, u16)>,
+        origin_at: std::cell::Cell<Instant>,
         fb: std::cell::RefCell<Framebuffer>,
         fmt: Format,
         cell_w: u32,
@@ -173,16 +179,14 @@ mod linux {
 
     impl Inner {
         pub fn open(cols: u16, rows: u16) -> Option<Inner> {
-            // framebuffer tier is ONLY for the bare kernel console (TERM=linux).
-            // under a wayland/x compositor /dev/fb0 may still exist but is not the
-            // displayed surface, so blits vanish into an uncomposited buffer and
-            // emotes render as blank reserved cells — fall back to text there.
-            if std::env::var("TERM").ok().as_deref() != Some("linux")
-                || std::env::var_os("WAYLAND_DISPLAY").is_some()
-                || std::env::var_os("DISPLAY").is_some()
-            {
-                return None;
-            }
+            // the framebuffer tier needs the kernel console to be what's actually
+            // on screen. two ways that's true — bare console, or tmux whose client
+            // is attached from one. inside tmux we must NOT trust WAYLAND_DISPLAY /
+            // DISPLAY: those are inherited from the tmux server's environment at
+            // session-create time and say nothing about where the client is now.
+            // `client_termname` is the authoritative answer, so it alone gates the
+            // tmux path.
+            let host = Host::detect()?;
             let fb = Framebuffer::new("/dev/fb0").ok()?;
             let v = &fb.var_screen_info;
             let f = &fb.fix_screen_info;
@@ -200,14 +204,24 @@ mod linux {
                 g: (v.green.offset, v.green.length),
                 b: (v.blue.offset, v.blue.length),
             };
-            // cell size in pixels ≈ the console font cell.
-            let cell_w = (v.xres / cols as u32).max(1);
-            let cell_h = (v.yres / rows as u32).max(1);
+            // cell size in pixels ≈ the console font cell. it must be derived
+            // from the WHOLE console grid, never the pane: inside a split, pane
+            // cols/rows are a fraction of the screen and would inflate the cell.
+            let (grid_cols, grid_rows) = host.grid().unwrap_or((cols, rows));
+            if grid_cols == 0 || grid_rows == 0 {
+                return None;
+            }
+            let cell_w = (v.xres / grid_cols as u32).max(1);
+            let cell_h = (v.yres / grid_rows as u32).max(1);
             let (jt, jr) = mpsc::channel::<Job>();
             let (dt, dr) = mpsc::channel::<Done>();
             let (cw, ch) = (cell_w as u16, cell_h as u16);
             thread::spawn(move || loader(cw, ch, jr, dt));
+            let origin0 = host.origin().unwrap_or((0, 0));
             Some(Inner {
+                host,
+                origin: std::cell::Cell::new(origin0),
+                origin_at: std::cell::Cell::new(Instant::now()),
                 fb: std::cell::RefCell::new(fb),
                 fmt,
                 cell_w,
@@ -247,6 +261,18 @@ mod linux {
             self.square_w
         }
 
+        /// re-read the pane origin at most 4x/sec. a `tmux display -p` fork is
+        /// ~2ms — fine at this rate, far too much per 20fps animation frame.
+        fn refresh_origin(&self) {
+            if self.origin_at.get().elapsed() < Duration::from_millis(250) {
+                return;
+            }
+            self.origin_at.set(Instant::now());
+            if let Some(o) = self.host.origin() {
+                self.origin.set(o);
+            }
+        }
+
         /// width in cells once built, else None (which is also the "not ready
         /// yet, show the emote's name instead" signal).
         pub fn cells(&self, url: &str) -> Option<u16> {
@@ -271,6 +297,7 @@ mod linux {
         }
 
         pub fn blit(&self, queued: &[Placement]) {
+            self.refresh_origin();
             let now = self.start.elapsed().as_millis() as u64;
             let cache = self.cache.borrow();
             let mut fb = self.fb.borrow_mut();
@@ -291,8 +318,9 @@ mod linux {
         /// paint one emote region: opaque pixels drawn, transparent → black so
         /// the reserved cells stay clean (no ghosting) every frame.
         fn paint(&self, fb: &mut Framebuffer, img: &RgbaImage, col: u16, row: u16) {
-            let x0 = col as usize * self.cell_w as usize;
-            let y0 = row as usize * self.cell_h as usize;
+            let (ocol, orow) = self.origin.get();
+            let x0 = (col as usize + ocol as usize) * self.cell_w as usize;
+            let y0 = (row as usize + orow as usize) * self.cell_h as usize;
             let buf = &mut fb.frame;
             for (px, py, pixel) in img.enumerate_pixels() {
                 let x = x0 + px as usize;
@@ -313,6 +341,67 @@ mod linux {
                 }
             }
         }
+    }
+
+    /// where the console grid we're drawing into lives: the bare kernel console,
+    /// or a tmux pane on top of one.
+    enum Host {
+        Console,
+        Tmux { pane: String },
+    }
+
+    impl Host {
+        fn detect() -> Option<Host> {
+            let term = std::env::var("TERM").unwrap_or_default();
+            if std::env::var_os("TMUX").is_some() {
+                // only when the ATTACHED CLIENT is a kernel console. a tmux
+                // session also reachable from foot/ssh answers something else,
+                // and blitting then would paint over whatever VT is up.
+                return match tmux(&["display", "-p", "#{client_termname}"])?.trim() {
+                    "linux" => Some(Host::Tmux {
+                        pane: std::env::var("TMUX_PANE").unwrap_or_default(),
+                    }),
+                    _ => None,
+                };
+            }
+            // bare console: no multiplexer, and no compositor holding the scanout.
+            if term == "linux"
+                && std::env::var_os("WAYLAND_DISPLAY").is_none()
+                && std::env::var_os("DISPLAY").is_none()
+            {
+                return Some(Host::Console);
+            }
+            None
+        }
+
+        /// the whole console's cell grid (not the pane's).
+        fn grid(&self) -> Option<(u16, u16)> {
+            match self {
+                Host::Console => crossterm::terminal::size().ok(),
+                Host::Tmux { .. } => {
+                    let out = tmux(&["display", "-p", "#{client_width} #{client_height}"])?;
+                    let mut it = out.split_whitespace();
+                    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+                }
+            }
+        }
+
+        /// the pane's top-left corner in console cells.
+        fn origin(&self) -> Option<(u16, u16)> {
+            match self {
+                Host::Console => Some((0, 0)),
+                Host::Tmux { pane } => {
+                    let out = tmux(&["display", "-p", "-t", pane, "#{pane_left} #{pane_top}"])?;
+                    let mut it = out.split_whitespace();
+                    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+                }
+            }
+        }
+    }
+
+    fn tmux(args: &[&str]) -> Option<String> {
+        let out = std::process::Command::new("tmux").args(args).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     /// pack an 8-bit rgb triple into the framebuffer's native pixel per its
