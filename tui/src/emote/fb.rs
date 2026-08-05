@@ -62,6 +62,17 @@ impl FbEmotes {
         None
     }
 
+    /// footprint of a not-yet-loaded emote, reserved up front so the chat does
+    /// not reflow when images land.
+    pub fn square_cells(&self) -> u16 {
+        #[cfg(target_os = "linux")]
+        {
+            return self.inner.square_cells();
+        }
+        #[cfg(not(target_os = "linux"))]
+        1
+    }
+
     /// how long until the soonest-flipping loaded emote changes frame — the event
     /// loop sleeps exactly this long so animations run at their authored fps.
     pub fn next_flip_in(&self) -> Option<std::time::Duration> {
@@ -157,6 +168,7 @@ mod linux {
         done: Receiver<Done>,
         start: Instant,
         budget: std::cell::Cell<usize>,
+        square_w: u16,
     }
 
     impl Inner {
@@ -205,6 +217,7 @@ mod linux {
                 done: dr,
                 start: Instant::now(),
                 budget: std::cell::Cell::new(DRAW_BUDGET),
+                square_w: width_cells(1.0, cw, ch),
             })
         }
 
@@ -228,6 +241,10 @@ mod linux {
                 self.cache.borrow_mut().insert(d.url, e);
             }
             self.budget.set(DRAW_BUDGET);
+        }
+
+        pub fn square_cells(&self) -> u16 {
+            self.square_w
         }
 
         /// width in cells once built, else None (which is also the "not ready

@@ -98,6 +98,16 @@ impl EmoteMode<'_> {
         }
     }
 
+    /// the footprint a not-yet-loaded emote is laid out at. `None` in text mode,
+    /// where emote names are just words on the line.
+    fn square_cells(&self) -> Option<u16> {
+        match self {
+            EmoteMode::Term(s) => Some(s.square_cells()),
+            EmoteMode::Fb(f) => Some(f.square_cells()),
+            EmoteMode::Text => None,
+        }
+    }
+
     /// how long until any loaded emote flips to its next frame.
     fn next_flip_in(&self) -> Option<Duration> {
         match self {
@@ -303,15 +313,6 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     // views stay lazy (redraw only on the tick or a keypress).
     let tick = Duration::from_millis(200);
     let mut last = Instant::now();
-    // sixel/halfblocks: a freshly-loaded static emote is emitted once and foot/
-    // tmux can drop that single write. when one lands we force ONE full re-emit
-    // next frame via swap_buffers() (resets the diff target so every cell redraws
-    // — same effect as a tab switch, but WITHOUT the screen-clear escape that
-    // orphans sixels through tmux). debounced so a load storm can't thrash it.
-    let mut pending_repaint = false;
-    let mut last_repaint = Instant::now();
-    let repaint_debounce = Duration::from_millis(300);
-
     loop {
         drain_emotes(&mut app);
         // snapshot the animation clock + reset the per-draw blit budget, so every
@@ -320,13 +321,6 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             store.begin_frame();
         }
         terminal.draw(|f| ui(f, &app))?;
-        if pending_repaint && last_repaint.elapsed() >= repaint_debounce {
-            // discard the diff baseline so the NEXT draw re-sends every cell,
-            // landing the sixel foot dropped — no clear, no flash.
-            terminal.swap_buffers();
-            last_repaint = Instant::now();
-            pending_repaint = false;
-        }
         // console tier: paint emote pixels onto the reserved cells now that the
         // text has flushed. terminal tiers draw inline during the frame above.
         if let Some(fb) = &app.fb {
@@ -353,8 +347,8 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         }
 
         if last.elapsed() >= tick {
-            if !app.paused && advance(&mut app) {
-                pending_repaint |= app.store.as_ref().is_some_and(EmoteStore::needs_load_repaint);
+            if !app.paused {
+                advance(&mut app);
             }
             last = Instant::now();
         }
@@ -795,7 +789,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let mut plan: Vec<(&Message, usize)> = Vec::new();
     let mut used = 0usize;
     for m in ch.messages.iter().rev().skip(app.scroll) {
-        let h = if has_ready_emote(m, set, mode) { EMOTE_H as usize } else { 1 };
+        let h = if has_emote(m, set, mode) { EMOTE_H as usize } else { 1 };
         if used + h > cap {
             break;
         }
@@ -925,9 +919,17 @@ fn each_stack(text: &str, set: &EmoteSet, mut f: impl FnMut(&str)) {
 }
 
 /// does this message contain at least one loaded (ready-to-draw) emote stack?
-fn has_ready_emote(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
+/// does this message contain an emote we will draw as an image? true as soon as
+/// the NAME resolves in the set — before the image has finished loading — so the
+/// row is already EMOTE_H tall when the picture arrives. reserving the space up
+/// front is what stops the whole chat from re-laying-out (and every sixel below
+/// from being re-emitted) each time an emote lands.
+fn has_emote(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
+    if mode.square_cells().is_none() {
+        return false; // text tier: emote names are just words
+    }
     let mut any = false;
-    each_stack(&m.text, set, |key| any |= mode.cells(key).is_some());
+    each_stack(&m.text, set, |_| any = true);
     any
 }
 
@@ -939,6 +941,24 @@ fn fit(s: String, w: u16) -> String {
     } else {
         s.chars().take(w.saturating_sub(1)).collect()
     }
+}
+
+/// clip or pad `s` to EXACTLY `w` display columns. the emote placeholder has to
+/// occupy the same footprint the image will, or the line shifts when it loads.
+fn fit_exact(s: &str, w: u16) -> String {
+    let w = w as usize;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthStr::width(c.to_string().as_str());
+        if used + cw > w {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.extend(std::iter::repeat_n(' ', w - used));
+    out
 }
 
 /// a reserved emote slot: column offset within the channel body + its stack key.
@@ -992,12 +1012,27 @@ fn layout_message(m: &Message, set: &EmoteSet, mode: EmoteMode, maxw: u16) -> (L
                     }
                 }
                 let key = urls.join("\n");
-                // width comes from the emote itself once it's built; an emote
-                // that wouldn't fit the remaining row falls back to its name.
-                let w = mode.cells(&key).filter(|w| col + w <= maxw);
-                if let Some(w) = w.filter(|_| !urls.is_empty()) {
-                    places.push(Place { col, w, key });
-                    spans.push(Span::raw(" ".repeat(w as usize)));
+                // an emote that has finished loading knows its own width; one
+                // still loading is laid out at the provisional square footprint,
+                // so the line does not shift when its image arrives.
+                let w = match mode.cells(&key) {
+                    Some(w) => Some((w, true)),
+                    None => mode.square_cells().map(|w| (w, false)),
+                }
+                .filter(|(w, _)| col + w <= maxw && !urls.is_empty());
+                if let Some((w, ready)) = w {
+                    if ready {
+                        places.push(Place { col, w, key });
+                        spans.push(Span::raw(" ".repeat(w as usize)));
+                    } else {
+                        // still loading: hold the exact same footprint and show
+                        // as much of the name as fits, so the image swaps in
+                        // place instead of shoving the line around.
+                        spans.push(Span::styled(
+                            fit_exact(&base_name, w),
+                            Style::default().fg(BRAND),
+                        ));
+                    }
                     col += w;
                 } else {
                     col += UnicodeWidthStr::width(base_name.as_str()) as u16;
@@ -1111,6 +1146,40 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     spans.push(Span::styled(dot, Style::default().fg(dot_color)));
     spans.push(Span::styled(format!("{state} · {n} ch"), Style::default().fg(Color::Indexed(244))));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::fit_exact;
+    use unicode_width::UnicodeWidthStr;
+
+    /// the loading placeholder MUST occupy exactly the cells the image will, or
+    /// the line shifts under the reader the moment the emote arrives.
+    #[test]
+    fn placeholder_matches_the_reserved_footprint_exactly() {
+        for (name, w) in [("pokiDance", 4u16), ("Cat", 4), ("x", 2), ("", 3)] {
+            let out = fit_exact(name, w);
+            assert_eq!(
+                UnicodeWidthStr::width(out.as_str()),
+                w as usize,
+                "{name:?} at width {w} → {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn placeholder_never_splits_a_wide_glyph() {
+        // a 2-column glyph must not be half-emitted into a 1-column slot.
+        let out = fit_exact("\u{1f525}ok", 1);
+        assert_eq!(UnicodeWidthStr::width(out.as_str()), 1);
+        assert_eq!(out, " "); // dropped the wide char, padded instead
+    }
+
+    #[test]
+    fn placeholder_keeps_what_fits() {
+        assert_eq!(fit_exact("pokiDance", 4), "poki");
+        assert_eq!(fit_exact("Cat", 5), "Cat  ");
+    }
 }
 
 #[cfg(test)]

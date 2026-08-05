@@ -94,6 +94,9 @@ struct Built {
 
 pub struct EmoteStore {
     proto: ProtocolType, // the detected inline-graphics protocol (for the tier readout)
+    /// footprint of a 1:1 emote in cells. the layout reserves this BEFORE an
+    /// emote finishes loading, so nothing reflows when the image lands.
+    square_w: u16,
     cache: HashMap<String, Entry>,
     jobs: Sender<Job>,
     done: Receiver<Done>,
@@ -141,12 +144,15 @@ impl EmoteStore {
         if proto == ProtocolType::Halfblocks {
             return None;
         }
+        let (cw, ch) = picker.font_size();
+        let square_w = width_cells(1.0, cw, ch);
         let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Done>();
         // one loader thread: fetch + decode + scale + encode with a cloned picker.
         thread::spawn(move || loader(picker, jobs_rx, done_tx));
         Some(EmoteStore {
             proto,
+            square_w,
             cache: HashMap::new(),
             jobs: jobs_tx,
             done: done_rx,
@@ -156,6 +162,13 @@ impl EmoteStore {
             lru: Cell::new(0),
             live_frames: 0,
         })
+    }
+
+    /// the footprint a not-yet-loaded emote is laid out at: square, since most
+    /// emotes are. reserving space up front is what stops the chat from jumping
+    /// (and every sixel below from being re-emitted) as images arrive.
+    pub fn square_cells(&self) -> u16 {
+        self.square_w
     }
 
     /// a short label for the detected graphics protocol (startup tier readout).
@@ -234,15 +247,6 @@ impl EmoteStore {
                 self.live_frames -= a.frames.len();
             }
         }
-    }
-
-    /// sixel/halfblocks emit a freshly-loaded static image once, and foot/tmux can
-    /// drop that single incremental write — ratatui's diff then never re-sends it
-    /// (the cell is unchanged), so the emote stays blank until an unrelated redraw.
-    /// on those tiers we force ONE full re-emit when an emote lands. kitty/iterm2
-    /// update images in place and don't need it.
-    pub fn needs_load_repaint(&self) -> bool {
-        matches!(self.proto, ProtocolType::Sixel | ProtocolType::Halfblocks)
     }
 
     /// start a draw: snapshot the animation clock and reset the blit budget. every
@@ -441,7 +445,7 @@ pub(crate) fn fit_center(src: &RgbaImage, tw: u32, th: u32) -> RgbaImage {
 
 /// alpha-composite an rgba frame onto black (premultiply), making it opaque so
 /// sixel renders no transparent fringe and each animation frame fully overwrites.
-fn flatten_onto_black(img: &mut RgbaImage) {
+pub(crate) fn flatten_onto_black(img: &mut RgbaImage) {
     for px in img.pixels_mut() {
         let a = px[3] as u16;
         px[0] = (px[0] as u16 * a / 255) as u8;
@@ -460,7 +464,7 @@ fn flatten_onto_black(img: &mut RgbaImage) {
 /// all frames against one palette up front leaves the encoder with ≤256 exact
 /// colors and ~zero diffusion error, so unchanged pixels encode identically and
 /// only real motion changes on screen.
-fn stabilize_palette(frames: &mut [RgbaImage]) {
+pub(crate) fn stabilize_palette(frames: &mut [RgbaImage]) {
     if frames.len() < 2 {
         return;
     }
