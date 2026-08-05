@@ -84,7 +84,9 @@ pub fn search(args: &[String]) -> std::io::Result<()> {
 
 /// `heatsync hot [hours]` — hottest posts, with real heat scores.
 pub fn hot(args: &[String]) -> std::io::Result<()> {
-    let hours: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(6);
+    // Default 720h bounds the server-side scan only — the heat floor (12h
+    // decay) decides what's hot, so a narrow default would just hide live heat.
+    let hours: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(720);
     match http::hot(25, hours) {
         Some(page) if !page.messages.is_empty() => {
             for m in &page.messages {
