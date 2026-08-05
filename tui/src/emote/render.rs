@@ -180,23 +180,28 @@ impl EmoteStore {
         }
     }
 
-    /// drain finished loads into the cache. called on the data tick. returns true
-    /// if ≥1 emote finished loading (the caller forces a full re-emit — see below).
+    /// drain finished loads into the cache. called on the data tick. returns
+    /// true when a STATIC emote finished loading — the caller forces a full
+    /// re-emit for those (see needs_load_repaint). animated emotes redraw on
+    /// the animation clock anyway, so counting them here just caused repaint
+    /// storms (every full re-emit re-sends every sixel on screen = flashing).
     pub fn pump(&mut self) -> bool {
         self.tick.set(self.tick.get() + 1);
-        let mut loaded = false;
+        let mut loaded_static = false;
         while let Ok(d) = self.done.try_recv() {
             let entry = match d.frames {
-                Some(f) if !f.is_empty() => Entry::Ready(f),
+                Some(f) if !f.is_empty() => {
+                    loaded_static |= f.len() == 1;
+                    Entry::Ready(f)
+                }
                 _ => Entry::Failed,
             };
             let slot = Slot::new(entry);
             slot.used.set(self.tick.get());
             self.cache.insert(d.key, slot);
-            loaded = true;
         }
         self.evict();
-        loaded
+        loaded_static
     }
 
     /// LRU eviction past CACHE_CAP. never evicts in-flight loads (their Done
@@ -227,6 +232,18 @@ impl EmoteStore {
     /// update images in place and don't need it.
     pub fn needs_load_repaint(&self) -> bool {
         matches!(self.proto, ProtocolType::Sixel | ProtocolType::Halfblocks)
+    }
+
+    /// should the frame be wrapped in DEC 2026 synchronized updates? always a
+    /// win on kitty/iterm2 and on bare sixel terminals — but sixel THROUGH
+    /// tmux goes via passthrough (outside tmux's screen model) while the sync
+    /// markers ride the normal stream, so tmux can flush text and pixels at
+    /// different moments and the emote visibly blinks. skip sync there.
+    pub fn sync_updates_ok(&self) -> bool {
+        match self.proto {
+            ProtocolType::Kitty | ProtocolType::Iterm2 => true,
+            ProtocolType::Sixel | ProtocolType::Halfblocks => std::env::var_os("TMUX").is_none(),
+        }
     }
 
     /// reset the per-frame draw budget. called once before each draw (decoupled

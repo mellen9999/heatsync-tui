@@ -331,7 +331,10 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     // orphans sixels through tmux). debounced so a load storm can't thrash it.
     let mut pending_repaint = false;
     let mut last_repaint = Instant::now();
-    let repaint_debounce = Duration::from_millis(300);
+    // long enough that a load storm (cold cache) coalesces into few re-emits —
+    // every full re-emit re-sends every sixel on screen, which reads as flash.
+    let repaint_debounce = Duration::from_millis(800);
+    let sync_ok = app.store.as_ref().is_none_or(EmoteStore::sync_updates_ok);
 
     loop {
         drain_emotes(&mut app);
@@ -350,7 +353,9 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         {
             use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
             use crossterm::ExecutableCommand;
-            let _ = io::stdout().execute(BeginSynchronizedUpdate);
+            if sync_ok {
+                let _ = io::stdout().execute(BeginSynchronizedUpdate);
+            }
             terminal.draw(|f| ui(f, &app))?;
             if pending_repaint && last_repaint.elapsed() >= repaint_debounce {
                 // discard the diff baseline so the NEXT draw re-sends every cell,
@@ -364,7 +369,9 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             if let Some(fb) = &app.fb {
                 fb.blit();
             }
-            let _ = io::stdout().execute(EndSynchronizedUpdate);
+            if sync_ok {
+                let _ = io::stdout().execute(EndSynchronizedUpdate);
+            }
         }
 
         let tick_left = tick.saturating_sub(last.elapsed());
