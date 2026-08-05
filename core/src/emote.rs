@@ -59,6 +59,11 @@ impl EmoteSet {
         self.map.keys().map(String::as_str)
     }
 
+    /// all emotes (unordered) — completion needs name + provider for badges.
+    pub fn iter(&self) -> impl Iterator<Item = &Emote> {
+        self.map.values()
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }

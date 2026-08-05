@@ -22,10 +22,30 @@ normal mode:
 | `m` | manage channels (reorder / leave) |
 | `x` close · `T` move tab bar · `space` pause · `q` quit | |
 
-composing (`i`) is a real line editor: arrows/`home`/`end` move, `ctrl-w` kills
-the last word, `ctrl-u` kills to start, `ctrl-a`/`ctrl-e` jump. `tab` completes
-emote names and `@user` mentions from recent chatters (`shift-tab` cycles back).
-join (`o`) tab-completes channels you've opened before.
+### the composer is a real vim line editor
+
+`i` opens it in insert mode; `esc` drops to a normal mode ON the line —
+motions (`h l 0 ^ $ w b e ge f t F T ; ,`), operators (`d c y` + motion,
+`dd cc yy D C Y`), counts (`3w`, `d2w`), `x X s r ~ p P`, visual mode
+(`v V`, `o` swaps ends), undo/redo (`u` / `ctrl-r`), and `.` repeats the last
+change — inserted text included. `esc` again leaves the composer. insert mode
+keeps the emacs keys too (`ctrl-w/u/a/e`). the footer chip shows
+insert/normal/visual.
+
+### completion is a dropdown
+
+`tab` opens a popup above the composer — fuzzy-ranked (prefix > word-boundary >
+substring > subsequence), live-narrowing as you type, provider badge per row
+(`7tv bttv ffz emoji user chan`). `tab`/`↓` and `shift-tab`/`↑` move, `enter`
+accepts, `esc` closes. `@` completes recent chatters as mentions; join (`o`)
+completes channels you've opened before. the popup overlays chat — the layout
+never shifts.
+
+### emoji
+
+`:joy:` becomes 😂 the moment you close the colon (full gemoji shortcode set).
+`:par` pops the dropdown with matching emoji AND emotes after two chars —
+accepting an emote swaps the `:query` for the emote name.
 
 while your message contains emotes, a live preview strip shows it exactly as it
 will render — images, overlay stacks, and modifiers included.
@@ -73,7 +93,11 @@ graphics. the client auto-detects and picks the best protocol; nothing to set.
 | bare linux console | linux | pixels straight to /dev/fb0 |
 | anything else | — | emote names as text (still fully usable) |
 
-sixel terminals animate at a steady ~10fps (tear-free); the kitty protocol
+the pipeline is tuned for pristine pixels: 2x cdn assets, Lanczos3 resampling
+to the exact cell footprint, DEC 2026 synchronized updates (tear-free while
+chat scrolls), stable row heights (no reflow jump when an image lands), a
+bounded lru of encoded frames, and a 64MB disk cache so relaunches are
+instant. sixel terminals animate at a steady ~10fps; the kitty protocol
 (kitty/ghostty/wezterm) runs smoother and never flickers. running inside
 **tmux** works: the client asks tmux for the outer terminal and wraps graphics
 in passthrough — no keyboard-stealing capability query.

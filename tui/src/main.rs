@@ -5,6 +5,7 @@
 
 #[allow(dead_code)]
 mod cli;
+mod composer;
 mod config;
 mod emote;
 mod http;
@@ -16,6 +17,9 @@ use std::io;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use composer::{
+    colon_query, emoji_pool, Badge, Candidate, Composer, LineMode, Outcome, Trigger, VKey,
+};
 use config::TabPos;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use emote::fb::FbEmotes;
@@ -27,7 +31,7 @@ use net::{ChatEvent, Sub};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use ratatui_image::Image;
 use unicode_width::UnicodeWidthStr;
@@ -52,146 +56,6 @@ enum InputMode {
     Insert,
     Join,
     Manage,
-}
-
-/// the line editor behind Insert/Join — cursor-addressed, completion-aware.
-/// `cur` is a byte index, always on a char boundary.
-#[derive(Default)]
-struct Composer {
-    text: String,
-    cur: usize,
-    comp: Option<Completion>,
-}
-
-/// an active tab-completion cycle over the word at `start..end`.
-struct Completion {
-    items: Vec<String>,
-    idx: usize,
-    start: usize,
-    end: usize,
-}
-
-impl Composer {
-    fn clear(&mut self) {
-        self.text.clear();
-        self.cur = 0;
-        self.comp = None;
-    }
-
-    /// take the trimmed line and reset (Enter).
-    fn take(&mut self) -> String {
-        let t = self.text.trim().to_string();
-        self.clear();
-        t
-    }
-
-    fn insert(&mut self, c: char) {
-        self.text.insert(self.cur, c);
-        self.cur += c.len_utf8();
-        self.comp = None;
-    }
-
-    fn backspace(&mut self) {
-        if let Some(c) = self.text[..self.cur].chars().next_back() {
-            self.cur -= c.len_utf8();
-            self.text.remove(self.cur);
-        }
-        self.comp = None;
-    }
-
-    fn delete(&mut self) {
-        if self.cur < self.text.len() {
-            self.text.remove(self.cur);
-        }
-        self.comp = None;
-    }
-
-    fn left(&mut self) {
-        if let Some(c) = self.text[..self.cur].chars().next_back() {
-            self.cur -= c.len_utf8();
-        }
-        self.comp = None;
-    }
-
-    fn right(&mut self) {
-        if let Some(c) = self.text[self.cur..].chars().next() {
-            self.cur += c.len_utf8();
-        }
-        self.comp = None;
-    }
-
-    fn home(&mut self) {
-        self.cur = 0;
-        self.comp = None;
-    }
-
-    fn end(&mut self) {
-        self.cur = self.text.len();
-        self.comp = None;
-    }
-
-    /// ctrl-w — delete the word (and trailing spaces) before the cursor.
-    fn kill_word(&mut self) {
-        let head = &self.text[..self.cur];
-        let trimmed = head.trim_end();
-        let cut = trimmed
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        self.text.replace_range(cut..self.cur, "");
-        self.cur = cut;
-        self.comp = None;
-    }
-
-    /// ctrl-u — delete everything before the cursor.
-    fn kill_to_start(&mut self) {
-        self.text.replace_range(..self.cur, "");
-        self.cur = 0;
-        self.comp = None;
-    }
-
-    /// the word the cursor sits at the end of: (byte start, the word so far).
-    fn word_at_cursor(&self) -> (usize, &str) {
-        let head = &self.text[..self.cur];
-        let start = head.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
-        (start, &head[start..])
-    }
-
-    /// tab / shift-tab: start or cycle a completion. `candidates` is only
-    /// consulted when starting a fresh cycle.
-    fn complete(&mut self, back: bool, candidates: impl FnOnce(&str) -> Vec<String>) {
-        match &mut self.comp {
-            Some(c) => {
-                c.idx = if back {
-                    (c.idx + c.items.len() - 1) % c.items.len()
-                } else {
-                    (c.idx + 1) % c.items.len()
-                };
-            }
-            None => {
-                let (start, word) = self.word_at_cursor();
-                if word.is_empty() {
-                    return;
-                }
-                let items = candidates(word);
-                if items.is_empty() {
-                    return;
-                }
-                self.comp = Some(Completion {
-                    items,
-                    idx: 0,
-                    start,
-                    end: self.cur,
-                });
-            }
-        }
-        // apply the selected item over the current word/previous pick.
-        let c = self.comp.as_mut().expect("set above");
-        let pick = c.items[c.idx].clone();
-        self.text.replace_range(c.start..c.end, &pick);
-        c.end = c.start + pick.len();
-        self.cur = c.end;
-    }
 }
 
 struct App {
@@ -336,6 +200,8 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
              windows terminal (win), wezterm (any) — else names show as text"
         );
     }
+    // bound the on-disk image cache (best-effort, off the startup path).
+    std::thread::spawn(http::sweep_cache);
     // channels open immediately with empty emote sets; each set is fetched on a
     // background thread and merged in via emote_rx once it lands (no UI stall).
     let (emote_tx, emote_rx) = std::sync::mpsc::channel();
@@ -462,18 +328,28 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         if let Some(store) = &app.store {
             store.reset_budget();
         }
-        terminal.draw(|f| ui(f, &app))?;
-        if pending_repaint && last_repaint.elapsed() >= repaint_debounce {
-            // discard the diff baseline so the NEXT draw re-sends every cell,
-            // landing the sixel foot dropped — no clear, no flash.
-            terminal.swap_buffers();
-            last_repaint = Instant::now();
-            pending_repaint = false;
-        }
-        // console tier: paint emote pixels onto the reserved cells now that the
-        // text has flushed. terminal tiers draw inline during the frame above.
-        if let Some(fb) = &app.fb {
-            fb.blit();
+        // DEC 2026 synchronized update: the whole frame — text diff, image
+        // escapes, fb blit — lands atomically on terminals that support it
+        // (foot, kitty, wezterm, WT), killing scroll tear. unknown-mode-safe
+        // everywhere else. ratatui never emits this itself.
+        {
+            use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+            use crossterm::ExecutableCommand;
+            let _ = io::stdout().execute(BeginSynchronizedUpdate);
+            terminal.draw(|f| ui(f, &app))?;
+            if pending_repaint && last_repaint.elapsed() >= repaint_debounce {
+                // discard the diff baseline so the NEXT draw re-sends every cell,
+                // landing the sixel foot dropped — no clear, no flash.
+                terminal.swap_buffers();
+                last_repaint = Instant::now();
+                pending_repaint = false;
+            }
+            // console tier: paint emote pixels onto the reserved cells now that
+            // the text has flushed. terminal tiers draw inline in the frame above.
+            if let Some(fb) = &app.fb {
+                fb.blit();
+            }
+            let _ = io::stdout().execute(EndSynchronizedUpdate);
         }
 
         let tick_left = tick.saturating_sub(last.elapsed());
@@ -521,35 +397,41 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         return Flow::Quit;
     }
     match app.mode {
-        InputMode::Insert => match k.code {
-            KeyCode::Esc => app.mode = InputMode::Normal,
-            KeyCode::Enter => send_focused(app),
-            KeyCode::Tab => {
-                let items = insert_candidates(app);
-                app.composer
-                    .complete(false, |w| filter_candidates(items, w));
+        InputMode::Insert => match app.composer.mode {
+            LineMode::Insert => insert_mode_key(app, k),
+            _ => {
+                if let Some(v) = to_vkey(k) {
+                    match app.composer.vi_key(v) {
+                        Outcome::ExitComposer => app.mode = InputMode::Normal,
+                        Outcome::Send => send_focused(app),
+                        Outcome::Stay => {}
+                    }
+                }
             }
-            KeyCode::BackTab => {
-                let items = insert_candidates(app);
-                app.composer.complete(true, |w| filter_candidates(items, w));
-            }
-            _ => edit_key(&mut app.composer, k),
         },
         InputMode::Join => match k.code {
             KeyCode::Esc => {
-                app.mode = InputMode::Normal;
-                app.composer.clear();
+                if app.composer.comp.is_some() {
+                    app.composer.close_session();
+                } else {
+                    app.mode = InputMode::Normal;
+                    app.composer.clear();
+                }
             }
-            KeyCode::Enter => join_channel(app),
-            KeyCode::Tab => {
-                let items = join_candidates(app);
-                app.composer
-                    .complete(false, |w| filter_candidates(items, w));
+            KeyCode::Enter => {
+                if app.composer.comp.is_some() {
+                    app.composer.accept();
+                } else {
+                    join_channel(app);
+                }
             }
-            KeyCode::BackTab => {
-                let items = join_candidates(app);
-                app.composer.complete(true, |w| filter_candidates(items, w));
+            KeyCode::Tab | KeyCode::Down if app.composer.comp.is_some() => {
+                app.composer.session_next(false)
             }
+            KeyCode::BackTab | KeyCode::Up if app.composer.comp.is_some() => {
+                app.composer.session_next(true)
+            }
+            KeyCode::Tab => open_channel_session(app),
             _ => edit_key(&mut app.composer, k),
         },
         // rover-style channel manager: j/k move, enter open, a add, d leave,
@@ -610,6 +492,7 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                 KeyCode::Char('G') => app.scroll = 0,              // newest
                 KeyCode::Char('i') | KeyCode::Char('a') => {
                     app.mode = InputMode::Insert;
+                    app.composer.enter_insert();
                     app.status = None;
                 }
                 KeyCode::Char('o') => {
@@ -654,21 +537,90 @@ fn edit_key(c: &mut Composer, k: crossterm::event::KeyEvent) {
     }
 }
 
-/// completion pools — gathered up front so the composer borrow stays clean.
-#[derive(Default)]
-struct Pools {
-    emotes: Vec<String>,
-    users: Vec<String>,
+/// crossterm key → the vi layer's key vocabulary.
+fn to_vkey(k: crossterm::event::KeyEvent) -> Option<VKey> {
+    if k.modifiers.contains(KeyModifiers::CONTROL) {
+        return match k.code {
+            KeyCode::Char('r') => Some(VKey::CtrlR),
+            _ => None,
+        };
+    }
+    Some(match k.code {
+        KeyCode::Char(c) => VKey::Char(c),
+        KeyCode::Esc => VKey::Esc,
+        KeyCode::Enter => VKey::Enter,
+        KeyCode::Left => VKey::Left,
+        KeyCode::Right => VKey::Right,
+        KeyCode::Home => VKey::Home,
+        KeyCode::End => VKey::End,
+        _ => return None,
+    })
 }
 
-/// Insert-mode pools: the focused channel's emote names (+ the ffz effect
-/// words), and recent chatters (newest first, deduped).
-fn insert_candidates(app: &App) -> Pools {
-    if app.channels.is_empty() {
-        return Pools::default();
+/// Insert-mode (typing) key table: session navigation when the dropdown is
+/// open, else edit + the colon auto-open hook.
+fn insert_mode_key(app: &mut App, k: crossterm::event::KeyEvent) {
+    let open = app.composer.comp.is_some();
+    match k.code {
+        KeyCode::Esc if open => app.composer.close_session(),
+        KeyCode::Esc => app.composer.enter_normal(),
+        KeyCode::Enter if open => app.composer.accept(),
+        KeyCode::Enter => send_focused(app),
+        KeyCode::Tab | KeyCode::Down if open => app.composer.session_next(false),
+        KeyCode::BackTab | KeyCode::Up if open => app.composer.session_next(true),
+        KeyCode::Tab => open_insert_session(app),
+        _ => {
+            edit_key(&mut app.composer, k);
+            // colon auto-open: typing landed us inside `:xy…` with no session
+            if app.composer.comp.is_none() && matches!(k.code, KeyCode::Char(_)) {
+                if let Some((anchor, q)) = colon_query(&app.composer.text, app.composer.cur) {
+                    if q.chars().count() >= 2 {
+                        let pool = colon_pool(app);
+                        app.composer
+                            .open_session(Trigger::Colon, anchor, pool, false);
+                    }
+                }
+            }
+        }
     }
-    let mut emotes: Vec<String> = app.emotes[app.focus].names().map(str::to_string).collect();
-    emotes.extend(
+}
+
+/// recent chatters of the focused channel, newest first, deduped.
+fn chatter_pool(app: &App, mention: bool) -> Vec<Candidate> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in app.channels[app.focus].messages.iter().rev() {
+        if seen.insert(m.user.to_lowercase()) {
+            out.push(Candidate {
+                insert: if mention {
+                    format!("@{}", m.user)
+                } else {
+                    m.user.clone()
+                },
+                label: m.user.clone(),
+                matchkey: m.user.clone(),
+                badge: Badge::User,
+            });
+            if out.len() >= 200 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// word pool: focused channel's emotes (+ ffz effect words) + chatters.
+fn word_pool(app: &App) -> Vec<Candidate> {
+    let mut pool: Vec<Candidate> = app.emotes[app.focus]
+        .iter()
+        .map(|e| Candidate {
+            insert: e.name.clone(),
+            label: e.name.clone(),
+            matchkey: e.name.clone(),
+            badge: Badge::from_provider(&e.provider),
+        })
+        .collect();
+    pool.extend(
         [
             "ffzX",
             "ffzY",
@@ -677,26 +629,68 @@ fn insert_candidates(app: &App) -> Pools {
             "ffzRainbow",
             "ffzHyper",
         ]
-        .map(String::from),
+        .map(|w| Candidate::plain(w, Badge::Ffz)),
     );
-    let mut seen = std::collections::HashSet::new();
-    let mut users = Vec::new();
-    for m in app.channels[app.focus].messages.iter().rev() {
-        if seen.insert(m.user.to_lowercase()) {
-            users.push(m.user.clone());
-            if users.len() >= 200 {
-                break;
-            }
-        }
-    }
-    Pools { emotes, users }
+    pool.extend(chatter_pool(app, false));
+    pool
 }
 
-/// Join-mode pool: every channel token we know (open tabs + saved config),
-/// in joinable form (`name` / `kick:name`).
-fn join_candidates(app: &App) -> Pools {
+/// colon pool: emoji shortcodes + the channel's emotes (accepting an emote
+/// from a colon session strips the `:`).
+fn colon_pool(app: &App) -> Vec<Candidate> {
+    let mut pool: Vec<Candidate> = emoji_pool()
+        .iter()
+        .map(|(code, glyph)| Candidate {
+            insert: (*glyph).to_string(),
+            label: format!("{glyph} :{code}:"),
+            matchkey: code.clone(),
+            badge: Badge::Emoji,
+        })
+        .collect();
+    if !app.channels.is_empty() {
+        pool.extend(app.emotes[app.focus].iter().map(|e| Candidate {
+            insert: e.name.clone(),
+            label: e.name.clone(),
+            matchkey: e.name.clone(),
+            badge: Badge::from_provider(&e.provider),
+        }));
+    }
+    pool
+}
+
+/// Tab in Insert mode: pick trigger from the word's sigil and open.
+fn open_insert_session(app: &mut App) {
+    if app.channels.is_empty() {
+        return;
+    }
+    let (start, word) = {
+        let (s, w) = app.composer.word_at_cursor();
+        (s, w.to_string())
+    };
+    if word.is_empty() {
+        return;
+    }
+    let (trigger, pool) = if word.starts_with('@') {
+        (Trigger::Mention, chatter_pool(app, true))
+    } else if word.starts_with(':') {
+        (Trigger::Colon, colon_pool(app))
+    } else {
+        (Trigger::Word, word_pool(app))
+    };
+    app.composer.open_session(trigger, start, pool, true);
+}
+
+/// Tab in Join mode: every channel token we know (open tabs + saved config).
+fn open_channel_session(app: &mut App) {
+    let (start, word) = {
+        let (s, w) = app.composer.word_at_cursor();
+        (s, w.to_string())
+    };
+    if word.is_empty() {
+        return;
+    }
     let mut seen = std::collections::HashSet::new();
-    let mut emotes = Vec::new(); // reused slot — these are channel tokens
+    let mut pool = Vec::new();
     let saved = config::load().channels;
     let open = app.channels.iter().map(|c| (c.platform, c.name.clone()));
     for (platform, name) in open.chain(saved) {
@@ -705,56 +699,11 @@ fn join_candidates(app: &App) -> Pools {
             Platform::Kick => format!("kick:{name}"),
         };
         if seen.insert(tok.to_lowercase()) {
-            emotes.push(tok);
+            pool.push(Candidate::plain(tok, Badge::Chan));
         }
     }
-    Pools {
-        emotes,
-        users: Vec::new(),
-    }
-}
-
-/// rank pool entries against the word under the cursor. `@word` completes
-/// usernames (mention form); otherwise emotes rank prefix → substring, then
-/// chatters by prefix. everything case-insensitive, capped to keep cycling sane.
-fn filter_candidates(pools: Pools, word: &str) -> Vec<String> {
-    const CAP: usize = 60;
-    let mut out = Vec::new();
-    if let Some(rest) = word.strip_prefix('@') {
-        let rl = rest.to_lowercase();
-        out.extend(
-            pools
-                .users
-                .into_iter()
-                .filter(|u| u.to_lowercase().starts_with(&rl))
-                .map(|u| format!("@{u}")),
-        );
-        out.truncate(CAP);
-        return out;
-    }
-    let wl = word.to_lowercase();
-    let mut prefix: Vec<String> = Vec::new();
-    let mut sub: Vec<String> = Vec::new();
-    for e in pools.emotes {
-        let el = e.to_lowercase();
-        if el.starts_with(&wl) {
-            prefix.push(e);
-        } else if el.contains(&wl) {
-            sub.push(e);
-        }
-    }
-    prefix.sort_unstable_by_key(|a| a.to_lowercase());
-    sub.sort_unstable_by_key(|a| a.to_lowercase());
-    out.extend(prefix);
-    out.extend(sub);
-    out.extend(
-        pools
-            .users
-            .into_iter()
-            .filter(|u| u.to_lowercase().starts_with(&wl)),
-    );
-    out.truncate(CAP);
-    out
+    app.composer
+        .open_session(Trigger::Channel, start, pool, true);
 }
 
 fn next_tab(app: &mut App) {
@@ -1023,11 +972,9 @@ fn emote_mode(app: &App) -> EmoteMode<'_> {
 
 fn ui(f: &mut Frame, app: &App) {
     let mode = emote_mode(app);
-    // composer chrome above the footer: a completion bar while cycling, and a
-    // wysiwyg preview strip while the message contains emotes. both are 0-high
-    // (invisible) otherwise — the chat area gets every spare row back.
-    let editing = matches!(app.mode, InputMode::Insert | InputMode::Join);
-    let comp_h = (editing && app.composer.comp.is_some()) as u16;
+    // wysiwyg preview strip while the message contains emotes — 0-high else.
+    // the completion dropdown is an OVERLAY (never a carve): the chat layout
+    // is byte-identical whether it's open or not, so nothing ever jumps.
     let prev_h = if app.mode == InputMode::Insert
         && !app.channels.is_empty()
         && segments(&app.composer.text, &app.emotes[app.focus])
@@ -1038,18 +985,18 @@ fn ui(f: &mut Frame, app: &App) {
     } else {
         0
     };
-    let [main, comp_row, prev_row, footer] = Layout::vertical([
+    let [main, prev_row, footer] = Layout::vertical([
         Constraint::Min(0),
-        Constraint::Length(comp_h),
         Constraint::Length(prev_h),
         Constraint::Length(1),
     ])
     .areas(f.area());
-    if comp_h > 0 {
-        draw_completion(f, comp_row, app);
-    }
+    // the dropdown rect is computed up front: emote pixel placements that
+    // intersect it must be suppressed (images ignore ratatui's cell diff).
+    let popup = dropdown_rect(app, main, prev_row, footer);
+
     if prev_h > 0 {
-        draw_preview(f, prev_row, app, mode);
+        draw_preview(f, prev_row, app, mode, popup);
     }
 
     if app.mode == InputMode::Manage {
@@ -1071,6 +1018,9 @@ fn ui(f: &mut Frame, app: &App) {
             main,
         );
         draw_footer(f, footer, app, 0);
+        if let Some(p) = popup {
+            draw_dropdown(f, p, app);
+        }
         return;
     }
 
@@ -1097,8 +1047,54 @@ fn ui(f: &mut Frame, app: &App) {
     };
 
     draw_tabs(f, tabs, app);
-    draw_active(f, chat, app, mode);
+    draw_active(f, chat, app, mode, popup);
     draw_footer(f, footer, app, app.channels.len());
+    if let Some(p) = popup {
+        draw_dropdown(f, p, app);
+    }
+}
+
+/// where the completion dropdown goes: anchored at the query's screen column,
+/// growing upward from just above the preview strip / footer. None = closed.
+fn dropdown_rect(app: &App, main: Rect, prev_row: Rect, footer: Rect) -> Option<Rect> {
+    if !matches!(app.mode, InputMode::Insert | InputMode::Join) {
+        return None;
+    }
+    let s = app.composer.comp.as_ref()?;
+    if s.filtered.is_empty() {
+        return None;
+    }
+    let rows = s.filtered.len().min(8) as u16 + 1; // +1 counter row
+    let bottom = if prev_row.height > 0 {
+        prev_row.y
+    } else {
+        footer.y
+    };
+    let h = rows.min(bottom.saturating_sub(main.y));
+    if h == 0 {
+        return None;
+    }
+    let y = bottom - h;
+    // x = footer chrome width + rendered width of the text before the anchor
+    let prefix = footer_prefix_width(app);
+    let head_w = UnicodeWidthStr::width(&app.composer.text[..s.anchor]) as u16;
+    let label_w = s
+        .filtered
+        .iter()
+        .take(8)
+        .map(|&i| {
+            UnicodeWidthStr::width(s.pool[i].label.as_str()) + s.pool[i].badge.label().len() + 3
+        })
+        .max()
+        .unwrap_or(0) as u16;
+    let w = label_w.clamp(24, main.width.max(24));
+    let x = (prefix + head_w).min(main.width.saturating_sub(w));
+    Some(Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    })
 }
 
 /// the channel tab bar — horizontal row (top/bottom) or vertical list (left/right).
@@ -1147,7 +1143,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
 /// the active channel: a heat bar, then its chat. messages with a ready emote
 /// occupy EMOTE_H rows (text on the bottom row, emote painted across the block),
 /// so emotes render big without colliding with neighbouring lines. bottom-anchored.
-fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
+fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode, mask: Option<Rect>) {
     let ch = &app.channels[app.focus];
     let set = &app.emotes[app.focus];
     let [barrow, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
@@ -1164,7 +1160,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let mut plan: Vec<(&Message, usize)> = Vec::new();
     let mut used = 0usize;
     for m in ch.messages.iter().rev().skip(app.scroll) {
-        let h = if has_ready_emote(m, set, mode) {
+        let h = if wants_emote_rows(m, set, mode) {
             EMOTE_H as usize
         } else {
             1
@@ -1190,15 +1186,35 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
                 height: 1,
             },
         );
-        draw_places(f, body.x, y, h as u16, &places, mode);
+        draw_places(f, body.x, y, h as u16, &places, mode, mask);
         y += h as u16;
     }
 }
 
-/// paint the reserved emote slots of one laid-out row (whatever tier is active).
-fn draw_places(f: &mut Frame, x0: u16, y: u16, h: u16, places: &[Place], mode: EmoteMode) {
+/// paint the reserved emote slots of one laid-out row (whatever tier is
+/// active). `mask` = the dropdown rect: image pixels don't respect ratatui's
+/// cell diff, so any placement that would sit under the popup is suppressed
+/// (the row falls back to its text-name form for the popup's lifetime).
+fn draw_places(
+    f: &mut Frame,
+    x0: u16,
+    y: u16,
+    h: u16,
+    places: &[Place],
+    mode: EmoteMode,
+    mask: Option<Rect>,
+) {
     for p in places {
         let x = x0 + p.col;
+        let slot = Rect {
+            x,
+            y,
+            width: p.w,
+            height: h,
+        };
+        if mask.is_some_and(|m| m.intersects(slot)) {
+            continue;
+        }
         match mode {
             EmoteMode::Term(store) => {
                 if let Some(proto) = store.frame(&p.key) {
@@ -1239,50 +1255,70 @@ fn draw_places(f: &mut Frame, x0: u16, y: u16, h: u16, places: &[Place], mode: E
     }
 }
 
-/// the tab-completion bar: candidates in a row, the pick inverted. the window
-/// slides so the pick is always visible.
-fn draw_completion(f: &mut Frame, area: Rect, app: &App) {
-    let Some(c) = app.composer.comp.as_ref() else {
+/// the completion dropdown: an overlay popup growing upward from the composer.
+/// candidates top-to-bottom in rank order, pick inverted, counter row at the
+/// bottom edge. the window slides so the pick stays visible.
+fn draw_dropdown(f: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = app.composer.comp.as_ref() else {
         return;
     };
-    let w = area.width as usize;
-    let width_of = |s: &str| UnicodeWidthStr::width(s) + 2;
-    let mut first = 0;
-    while first < c.idx
-        && c.items[first..=c.idx]
-            .iter()
-            .map(|s| width_of(s))
-            .sum::<usize>()
-            + 1
-            > w
-    {
-        first += 1;
-    }
-    let mut spans = vec![Span::raw(" ")];
-    let mut used = 1usize;
-    for (i, item) in c.items.iter().enumerate().skip(first) {
-        let iw = width_of(item);
-        if used + iw > w {
-            break;
-        }
-        used += iw;
-        let style = if i == c.idx {
-            Style::default()
+    f.render_widget(Clear, area);
+    let visible = (area.height - 1) as usize;
+    let first = s
+        .sel
+        .saturating_sub(visible.saturating_sub(1))
+        .min(s.filtered.len().saturating_sub(visible));
+    let bg = Style::default().bg(Color::Indexed(235));
+    for (row, idx) in (first..s.filtered.len().min(first + visible)).enumerate() {
+        let c = &s.pool[s.filtered[idx]];
+        let sel = idx == s.sel;
+        let (label_st, badge_st) = if sel {
+            let st = Style::default()
                 .fg(Color::Black)
                 .bg(Color::White)
-                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::BOLD);
+            (st, st)
         } else {
-            Style::default().fg(Color::Indexed(246))
+            (bg.fg(Color::Indexed(250)), bg.fg(Color::Indexed(244)))
         };
-        spans.push(Span::styled(item.clone(), style));
-        spans.push(Span::raw("  "));
+        let lw = UnicodeWidthStr::width(c.label.as_str());
+        let badge = c.badge.label();
+        let pad = (area.width as usize).saturating_sub(lw + badge.len() + 3);
+        let line = Line::from(vec![
+            Span::styled(format!(" {}", c.label), label_st),
+            Span::styled(" ".repeat(pad + 1), if sel { label_st } else { bg }),
+            Span::styled(format!("{badge} "), badge_st),
+        ]);
+        f.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: area.x,
+                y: area.y + row as u16,
+                width: area.width,
+                height: 1,
+            },
+        );
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    // counter row hugs the composer
+    let counter = format!("{}/{} ", s.sel + 1, s.filtered.len());
+    let pad = (area.width as usize).saturating_sub(counter.len());
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ".repeat(pad), bg),
+            Span::styled(counter, bg.fg(Color::Indexed(244))),
+        ])),
+        Rect {
+            x: area.x,
+            y: area.y + area.height - 1,
+            width: area.width,
+            height: 1,
+        },
+    );
 }
 
 /// wysiwyg preview strip: the composed message exactly as it will land in chat —
 /// emote images, overlay stacks, effects, the lot.
-fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
+fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode, mask: Option<Rect>) {
     let set = &app.emotes[app.focus];
     let lead = vec![Span::styled(" ❯ ", Style::default().fg(BRAND))];
     let (line, places) = layout_segments(
@@ -1304,27 +1340,77 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
             height: 1,
         },
     );
-    draw_places(f, area.x, area.y, area.height, &places, mode);
+    draw_places(f, area.x, area.y, area.height, &places, mode, mask);
 }
 
-/// the composer text with a real cursor: text before, the char under the cursor
-/// inverted (a block when at the end), text after.
+/// the composer text with a real cursor. insert: brand block / inverted char.
+/// normal: white-inverted char under the cursor. visual: whole selection
+/// inverted, cursor end bolded.
 fn caret_spans(cmp: &Composer) -> Vec<Span<'static>> {
     let fg = Style::default().fg(Color::Indexed(231));
+    if let Some((a, b)) = cmp.selection() {
+        let sel = Style::default().fg(Color::Black).bg(Color::White);
+        return vec![
+            Span::styled(cmp.text[..a].to_string(), fg),
+            Span::styled(cmp.text[a..b].to_string(), sel),
+            Span::styled(cmp.text[b..].to_string(), fg),
+        ];
+    }
     let (head, rest) = cmp.text.split_at(cmp.cur);
     let mut v = vec![Span::styled(head.to_string(), fg)];
     let mut it = rest.chars();
+    let cursor_style = match cmp.mode {
+        LineMode::Normal => Style::default().fg(Color::Black).bg(Color::White),
+        _ => fg.add_modifier(Modifier::REVERSED),
+    };
     match it.next() {
         Some(c) => {
-            v.push(Span::styled(
-                c.to_string(),
-                fg.add_modifier(Modifier::REVERSED),
-            ));
+            v.push(Span::styled(c.to_string(), cursor_style));
             v.push(Span::styled(it.as_str().to_string(), fg));
         }
         None => v.push(Span::styled("\u{2588}", Style::default().fg(BRAND))),
     }
     v
+}
+
+/// display width of the footer chrome before the composer text starts — the
+/// dropdown anchors its x to this. must mirror draw_footer's span layout.
+fn footer_prefix_width(app: &App) -> u16 {
+    match app.mode {
+        InputMode::Join => (" join ".len() + " ❯ ".chars().count()) as u16,
+        _ => {
+            let ch = &app.channels[app.focus.min(app.channels.len().saturating_sub(1))];
+            let prompt = format!(" {}·{} ", ch.name, ch.platform.tag());
+            8 + UnicodeWidthStr::width(prompt.as_str()) as u16 + 3 // chip + prompt + " ❯ "
+        }
+    }
+}
+
+/// the composer mode chip shown in the footer.
+fn mode_chip(cmp: &Composer) -> Span<'static> {
+    match cmp.mode {
+        LineMode::Insert => Span::styled(
+            " insert ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(BRAND)
+                .add_modifier(Modifier::BOLD),
+        ),
+        LineMode::Normal => Span::styled(
+            " normal ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        LineMode::Visual { .. } => Span::styled(
+            " visual ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Indexed(226))
+                .add_modifier(Modifier::BOLD),
+        ),
+    }
 }
 
 /// rover-style channel manager: a single-pane list, cursor row highlighted, the
@@ -1405,10 +1491,16 @@ fn each_stack(text: &str, set: &EmoteSet, mut f: impl FnMut(&str)) {
     }
 }
 
-/// does this message contain at least one loaded (ready-to-draw) emote stack?
-fn has_ready_emote(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
+/// does this message get EMOTE_H rows? on graphics tiers any KNOWN stack
+/// reserves the space immediately — waiting for readiness made rows jump from
+/// 1 to 2 exactly when the image landed, which reads as chat "jerking" while
+/// people type. stable heights = pristine scroll. text tier stays 1 row.
+fn wants_emote_rows(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
+    if matches!(mode, EmoteMode::Text) {
+        return false;
+    }
     let mut any = false;
-    each_stack(&m.text, set, |key| any |= mode.ready(key));
+    each_stack(&m.text, set, |_| any = true);
     any
 }
 
@@ -1583,6 +1675,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         };
         let prompt = format!(" {}·{} ", ch.name, ch.platform.tag());
         let mut spans = vec![
+            mode_chip(&app.composer),
             Span::styled(
                 prompt,
                 Style::default()
@@ -1659,123 +1752,6 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         Style::default().fg(Color::Indexed(244)),
     ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-#[cfg(test)]
-mod composer_tests {
-    use super::*;
-
-    fn typed(s: &str) -> Composer {
-        let mut c = Composer::default();
-        for ch in s.chars() {
-            c.insert(ch);
-        }
-        c
-    }
-
-    #[test]
-    fn cursor_editing_is_utf8_safe() {
-        let mut c = typed("héllo");
-        c.left();
-        c.left();
-        c.left();
-        c.backspace(); // removes é
-        assert_eq!(c.text, "hllo");
-        c.insert('é');
-        assert_eq!(c.text, "héllo");
-        c.home();
-        c.delete();
-        assert_eq!(c.text, "éllo");
-        c.end();
-        assert_eq!(c.cur, c.text.len());
-    }
-
-    #[test]
-    fn kill_word_eats_word_and_spaces() {
-        let mut c = typed("send this msg  ");
-        c.kill_word();
-        assert_eq!(c.text, "send this ");
-        c.kill_word();
-        assert_eq!(c.text, "send ");
-    }
-
-    #[test]
-    fn kill_to_start_respects_cursor() {
-        let mut c = typed("abc def");
-        c.left();
-        c.left();
-        c.left();
-        c.kill_to_start();
-        assert_eq!(c.text, "def");
-        assert_eq!(c.cur, 0);
-    }
-
-    #[test]
-    fn completion_cycles_and_wraps() {
-        let mut c = typed("hi kek");
-        let items = || vec!["KEKW".to_string(), "KEKWait".to_string()];
-        c.complete(false, |w| {
-            assert_eq!(w, "kek");
-            items()
-        });
-        assert_eq!(c.text, "hi KEKW");
-        c.complete(false, |_| unreachable!("cycling reuses items"));
-        assert_eq!(c.text, "hi KEKWait");
-        c.complete(false, |_| unreachable!());
-        assert_eq!(c.text, "hi KEKW"); // wrapped
-        c.complete(true, |_| unreachable!());
-        assert_eq!(c.text, "hi KEKWait"); // backtab
-        c.insert('!');
-        assert!(c.comp.is_none(), "typing ends the cycle");
-        assert_eq!(c.text, "hi KEKWait!");
-    }
-
-    #[test]
-    fn completion_replaces_only_the_word() {
-        let mut c = typed("yo pog hype");
-        c.left();
-        c.left();
-        c.left();
-        c.left();
-        c.left(); // cursor after "pog"
-        c.complete(false, |w| {
-            assert_eq!(w, "pog");
-            vec!["POGGERS".into()]
-        });
-        assert_eq!(c.text, "yo POGGERS hype");
-    }
-
-    #[test]
-    fn empty_word_or_no_candidates_is_a_noop() {
-        let mut c = typed("x ");
-        c.complete(false, |_| vec!["nope".into()]);
-        assert_eq!(c.text, "x ");
-        let mut c = typed("zz");
-        c.complete(false, |_| Vec::new());
-        assert_eq!(c.text, "zz");
-        assert!(c.comp.is_none());
-    }
-
-    #[test]
-    fn at_prefix_completes_users() {
-        let pools = Pools {
-            emotes: vec!["Clap".into()],
-            users: vec!["Clara".into(), "bob".into()],
-        };
-        assert_eq!(filter_candidates(pools, "@cl"), vec!["@Clara"]);
-    }
-
-    #[test]
-    fn ranking_prefix_then_substring_then_users() {
-        let pools = Pools {
-            emotes: vec!["xKEKW".into(), "KEKW".into(), "KEKWait".into()],
-            users: vec!["kekuser".into()],
-        };
-        assert_eq!(
-            filter_candidates(pools, "kek"),
-            vec!["KEKW", "KEKWait", "xKEKW", "kekuser"]
-        );
-    }
 }
 
 #[cfg(test)]

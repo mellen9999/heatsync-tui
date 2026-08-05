@@ -3,6 +3,7 @@
 //! the tui + cli are thin faces over this.
 
 pub mod emote;
+pub mod fuzzy;
 pub mod heat;
 pub mod mock;
 pub mod proto;

@@ -8,6 +8,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,13 @@ pub const EMOTE_W: u16 = 3;
 pub const EMOTE_H: u16 = 2;
 /// cap graphics blits per frame — a raid of fresh emotes can't firehose the pty.
 const DRAW_BUDGET: usize = 64;
+/// parallel fetch+decode+encode workers — network dominates load latency.
+const LOADER_THREADS: usize = 3;
+/// LRU cap on cached stacks. bounds RAM and — critically on kitty — the
+/// terminal's image storage: the protocol never deletes transmitted images, so
+/// an unbounded cache would eventually hit the terminal's own LRU and evicted
+/// emotes would render blank forever. dropping OUR entry rebuilds+retransmits.
+const CACHE_CAP: usize = 512;
 
 struct FrameProto {
     proto: Protocol,
@@ -40,6 +48,21 @@ enum Entry {
     Failed,
 }
 
+/// a cache slot: the entry plus its last-touch tick (LRU eviction key).
+struct Slot {
+    entry: Entry,
+    used: Cell<u64>,
+}
+
+impl Slot {
+    fn new(entry: Entry) -> Slot {
+        Slot {
+            entry,
+            used: Cell::new(0),
+        }
+    }
+}
+
 struct Job {
     key: String, // one url, or base+overlay urls joined by '\n' (a stack)
 }
@@ -50,12 +73,13 @@ struct Done {
 
 pub struct EmoteStore {
     proto: ProtocolType, // the detected inline-graphics protocol (for the tier readout)
-    cache: HashMap<String, Entry>,
+    cache: HashMap<String, Slot>,
     jobs: Sender<Job>,
     done: Receiver<Done>,
     start: Instant,
     // interior-mutable so frame() can run inside ratatui's immutable draw pass.
     budget_left: Cell<usize>,
+    tick: Cell<u64>, // monotonic touch counter for LRU
 }
 
 impl EmoteStore {
@@ -94,8 +118,15 @@ impl EmoteStore {
         }
         let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Done>();
-        // one loader thread: fetch + decode + encode with a cloned picker.
-        thread::spawn(move || loader(picker, jobs_rx, done_tx));
+        // a small pool of loader threads sharing the job queue — fetch is the
+        // serial bottleneck; 2x assets doubled the bytes, the pool hides it.
+        let jobs_rx = Arc::new(Mutex::new(jobs_rx));
+        for _ in 0..LOADER_THREADS {
+            let rx = Arc::clone(&jobs_rx);
+            let tx = done_tx.clone();
+            let p = picker.clone();
+            thread::spawn(move || loader(p, rx, tx));
+        }
         Some(EmoteStore {
             proto,
             cache: HashMap::new(),
@@ -103,6 +134,7 @@ impl EmoteStore {
             done: done_rx,
             start: Instant::now(),
             budget_left: Cell::new(DRAW_BUDGET),
+            tick: Cell::new(0),
         })
     }
 
@@ -130,11 +162,13 @@ impl EmoteStore {
     /// ensure an emote (or overlay stack) is being loaded (idempotent). `key` is a
     /// single url or base+overlay urls joined by '\n'. called during the tick.
     pub fn request(&mut self, key: &str) {
-        if self.cache.contains_key(key) {
+        if let Some(slot) = self.cache.get(key) {
+            slot.used.set(self.tick.get()); // wanted on screen — keep it hot
             return;
         }
-        self.cache.insert(key.to_string(), Entry::Loading);
-        // if the loader thread died the send fails — mark failed, fall to text.
+        self.cache
+            .insert(key.to_string(), Slot::new(Entry::Loading));
+        // if the loader threads died the send fails — mark failed, fall to text.
         if self
             .jobs
             .send(Job {
@@ -142,23 +176,48 @@ impl EmoteStore {
             })
             .is_err()
         {
-            self.cache.insert(key.to_string(), Entry::Failed);
+            self.cache.insert(key.to_string(), Slot::new(Entry::Failed));
         }
     }
 
     /// drain finished loads into the cache. called on the data tick. returns true
     /// if ≥1 emote finished loading (the caller forces a full re-emit — see below).
     pub fn pump(&mut self) -> bool {
+        self.tick.set(self.tick.get() + 1);
         let mut loaded = false;
         while let Ok(d) = self.done.try_recv() {
             let entry = match d.frames {
                 Some(f) if !f.is_empty() => Entry::Ready(f),
                 _ => Entry::Failed,
             };
-            self.cache.insert(d.key, entry);
+            let slot = Slot::new(entry);
+            slot.used.set(self.tick.get());
+            self.cache.insert(d.key, slot);
             loaded = true;
         }
+        self.evict();
         loaded
+    }
+
+    /// LRU eviction past CACHE_CAP. never evicts in-flight loads (their Done
+    /// would resurrect a zombie entry). dropping a Ready entry frees RAM and,
+    /// on re-need, rebuilds + retransmits — see CACHE_CAP for why that matters
+    /// on kitty.
+    fn evict(&mut self) {
+        if self.cache.len() <= CACHE_CAP {
+            return;
+        }
+        let mut by_age: Vec<(u64, String)> = self
+            .cache
+            .iter()
+            .filter(|(_, s)| !matches!(s.entry, Entry::Loading))
+            .map(|(k, s)| (s.used.get(), k.clone()))
+            .collect();
+        by_age.sort_unstable();
+        let excess = self.cache.len().saturating_sub(CACHE_CAP);
+        for (_, k) in by_age.into_iter().take(excess) {
+            self.cache.remove(&k);
+        }
     }
 
     /// sixel/halfblocks emit a freshly-loaded static image once, and foot/tmux can
@@ -182,25 +241,27 @@ impl EmoteStore {
     pub fn any_animated(&self) -> bool {
         self.cache
             .values()
-            .any(|e| matches!(e, Entry::Ready(f) if f.len() > 1))
+            .any(|s| matches!(&s.entry, Entry::Ready(f) if f.len() > 1))
     }
 
     /// has this emote/stack finished loading + encoding?
     pub fn is_ready(&self, key: &str) -> bool {
-        matches!(self.cache.get(key), Some(Entry::Ready(_)))
+        matches!(self.cache.get(key).map(|s| &s.entry), Some(Entry::Ready(_)))
     }
 
     /// the protocol for this emote/stack's current animation frame, if ready and
-    /// the draw budget isn't spent. consumes one budget unit (visible-only cost).
+    /// the draw budget isn't spent. consumes one budget unit (visible-only cost)
+    /// and touches the slot for LRU.
     pub fn frame(&self, key: &str) -> Option<&Protocol> {
         let left = self.budget_left.get();
         if left == 0 {
             return None;
         }
         let now = self.start.elapsed().as_millis() as u64;
-        let frames = match self.cache.get(key) {
-            Some(Entry::Ready(f)) => f,
-            _ => return None,
+        let slot = self.cache.get(key)?;
+        slot.used.set(self.tick.get());
+        let Entry::Ready(frames) = &slot.entry else {
+            return None;
         };
         self.budget_left.set(left - 1);
         let idx = frame_index(frames, now);
@@ -301,12 +362,18 @@ fn frame_index(frames: &[FrameProto], now_ms: u64) -> usize {
     0
 }
 
-fn loader(picker: Picker, jobs: Receiver<Job>, done: Sender<Done>) {
+fn loader(picker: Picker, jobs: Arc<Mutex<Receiver<Job>>>, done: Sender<Done>) {
     // sixel drops the alpha channel (to_rgb8) so a transparent pixel falls back to
     // its raw rgb — often a colored fringe or box. flatten onto black first so
     // emotes sit cleanly on a dark terminal. kitty/iterm2 keep true transparency.
     let flatten = picker.protocol_type() == ProtocolType::Sixel;
-    for job in jobs {
+    loop {
+        // hold the lock only for the recv — fetch/decode/encode runs unlocked.
+        let job = match jobs.lock() {
+            Ok(rx) => rx.recv(),
+            Err(_) => return,
+        };
+        let Ok(job) = job else { return }; // store dropped → app closed
         let frames = build(&picker, &job.key, flatten);
         if done
             .send(Done {
@@ -315,7 +382,7 @@ fn loader(picker: Picker, jobs: Receiver<Job>, done: Sender<Done>) {
             })
             .is_err()
         {
-            return; // store dropped → app closed
+            return;
         }
     }
 }
@@ -515,12 +582,23 @@ fn shake(frames: &mut Vec<(image::RgbaImage, u32)>) {
 }
 
 /// composite a stack (see [`composite_frames`]) and encode every frame to the
-/// terminal's inline-graphics protocol. any failure → None.
+/// terminal's inline-graphics protocol. frames are pre-resized HERE to the
+/// exact pixel footprint with Lanczos3: ratatui-image's own resize defaults to
+/// Nearest and refuses to upscale — handing it an exact-size image bypasses
+/// its filter, its no-upscale rule, and its padding overlay entirely.
 fn build(picker: &Picker, key: &str, flatten: bool) -> Option<Vec<FrameProto>> {
-    let size = Rect::new(0, 0, key_width(key), EMOTE_H);
+    let cells_w = key_width(key);
+    let size = Rect::new(0, 0, cells_w, EMOTE_H);
+    let (fw, fh) = picker.font_size();
+    let (px_w, px_h) = (cells_w as u32 * fw as u32, EMOTE_H as u32 * fh as u32);
     let frames = composite_frames(key)?;
     let mut out = Vec::with_capacity(frames.len());
-    for (mut canvas, delay_ms) in frames {
+    for (canvas, delay_ms) in frames {
+        let mut canvas = if canvas.dimensions() == (px_w, px_h) || px_w == 0 || px_h == 0 {
+            canvas
+        } else {
+            image::imageops::resize(&canvas, px_w, px_h, image::imageops::FilterType::Lanczos3)
+        };
         if flatten {
             flatten_onto_black(&mut canvas);
         }

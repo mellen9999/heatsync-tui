@@ -26,6 +26,7 @@ getrandom = "0.2"
 # terminal graphics protocols (sixel/halfblock/kitty are core — no chafa C lib,
 # no image-defaults codecs; we hand it already-decoded frames from `image`).
 ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
+emojis = "0.6"
 
 # bare Linux console (TTY) pixel emotes — write straight to /dev/fb0, the same
 # mechanism notcurses' NCPIXEL_LINUXFB uses, but pure-Rust + linux-only so the

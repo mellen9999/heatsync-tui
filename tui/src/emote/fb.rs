@@ -340,7 +340,7 @@ mod linux {
         let frames = composite_frames(key)?;
         let mut out = Vec::with_capacity(frames.len());
         for (canvas, delay_ms) in frames {
-            let rgba = resize(&canvas, tw.max(1), th.max(1), FilterType::Triangle);
+            let rgba = resize(&canvas, tw.max(1), th.max(1), FilterType::Lanczos3);
             out.push(FbFrame { rgba, delay_ms });
         }
         if out.is_empty() {
