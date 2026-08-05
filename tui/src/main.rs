@@ -1,16 +1,20 @@
 //! heatsync tui — heat-sorted live multichat. `heatsync [channels…]` opens the
 //! grid (default demo set); `--mock` runs the offline synthetic feed; `log`,
 //! `search`, `hot` are headless corpus subcommands.
-//! keys: q quit · j/k scroll focused · 1-9 focus · tab cycle · space pause
+//! keys are vi: j/k move the cursor, h/l (or gt/gT) change channel, gg/G ends,
+//! ctrl-d/u/f/b page, counts work (5j), v/V select, y yanks, / and ? search with
+//! n/N, i composes, o joins, m manages, q quits.
 
 #[allow(dead_code)]
 mod cli;
+mod clip;
 mod config;
 mod emote;
 mod http;
 mod kick;
 mod net;
 mod twitch;
+mod vi;
 
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
@@ -49,16 +53,20 @@ enum Feed {
 #[derive(Clone, Copy, PartialEq)]
 enum InputMode {
     Normal,
+    Visual,
     Insert,
     Join,
     Manage,
+    /// typing a `/` or `?` pattern; `vi.dir` holds which way it will run.
+    Search,
 }
 
 struct App {
     channels: Vec<Channel>,
     emotes: Vec<EmoteSet>, // index-aligned with channels
     focus: usize,
-    scroll: usize,
+    /// cursor, selection, counts and search over the focused channel's ring.
+    vi: vi::Vi,
     paused: bool,
     feed: Feed,
     store: Option<EmoteStore>, // terminal graphics tier (sixel/kitty/…)
@@ -142,7 +150,7 @@ fn main() -> io::Result<()> {
             channels: mock::channels(),
             emotes: (0..mock::channels().len()).map(|_| EmoteSet::new()).collect(),
             focus: 0,
-            scroll: 0,
+            vi: vi::Vi::default(),
             paused: false,
             feed: Feed::Mock(mock::Driver::new()),
             store: None,
@@ -238,7 +246,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
         channels,
         emotes,
         focus: 0,
-        scroll: 0,
+        vi: vi::Vi::default(),
         paused: false,
         feed: Feed::Live {
             rx,
@@ -375,9 +383,9 @@ enum Flow {
 }
 
 /// dispatch a keypress by mode. Normal = navigation; Insert = compose a message;
-/// Join = type a channel to open. tab nav is orientation-aware: with a vertical
-/// bar (left/right) j/k move between tabs; with a horizontal bar h/l do. arrows
-/// always work (left/right = tabs, up/down = scroll).
+/// Join = type a channel to open, Search = type a `/` pattern. j/k are always
+/// cursor motion and h/l always change channel, whatever the tab bar's position
+/// — the same keys shouldn't mean different things depending on a layout option.
 fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
         return Flow::Quit;
@@ -421,7 +429,7 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                 KeyCode::Enter | KeyCode::Char('l') => {
                     if !app.channels.is_empty() {
                         app.focus = app.manage_cursor.min(last);
-                        app.scroll = 0;
+                        app.vi.reset();
                         app.mode = InputMode::Normal;
                     }
                 }
@@ -435,60 +443,268 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                 _ => {}
             }
         }
-        InputMode::Normal => {
-            let vert = app.tab_pos.is_vertical();
-            match k.code {
-                KeyCode::Char('q') => return Flow::Quit,
-                KeyCode::Char('j') if vert => next_tab(app),
-                KeyCode::Char('k') if vert => prev_tab(app),
-                KeyCode::Char('j') => app.scroll = app.scroll.saturating_sub(1), // newer
-                KeyCode::Char('k') => app.scroll = app.scroll.saturating_add(1), // older
-                KeyCode::Char('h') if !vert => prev_tab(app),
-                KeyCode::Char('l') if !vert => next_tab(app),
-                KeyCode::Left => prev_tab(app),
-                KeyCode::Right => next_tab(app),
-                KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
-                KeyCode::Up => app.scroll = app.scroll.saturating_add(1),
-                KeyCode::Char('g') => app.scroll = usize::MAX / 2, // oldest loaded
-                KeyCode::Char('G') => app.scroll = 0,              // newest
-                KeyCode::Char('i') | KeyCode::Char('a') => {
-                    app.mode = InputMode::Insert;
-                    app.status = None;
+        InputMode::Normal | InputMode::Visual => return normal_key(app, k),
+        InputMode::Search => match k.code {
+            KeyCode::Esc => {
+                app.mode = if app.vi.visual.is_some() { InputMode::Visual } else { InputMode::Normal };
+                app.input.clear();
+            }
+            KeyCode::Enter => run_search(app),
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            KeyCode::Char(c) => app.input.push(c),
+            _ => {}
+        },
+    }
+    Flow::Continue
+}
+
+/// Normal and Visual share every motion — the only difference is that Visual
+/// keeps an anchor, so the selection grows as the cursor moves. this is also
+/// where counts and the `g` prefix are resolved.
+fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
+    let last = app.channels.get(app.focus).map_or(0, |c| c.messages.len().saturating_sub(1));
+    let page = app.vi.view.get().count.max(1);
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+
+    // `g` is a prefix: gg, gt, gT. anything else after it cancels.
+    if app.vi.g_pending {
+        app.vi.g_pending = false;
+        match k.code {
+            KeyCode::Char('g') => app.vi.to_oldest(last),
+            KeyCode::Char('t') => return tab_and_continue(app, 1),
+            KeyCode::Char('T') => return tab_and_continue(app, -1),
+            _ => return Flow::Continue,
+        }
+        app.vi.keep_visible();
+        return Flow::Continue;
+    }
+
+    if let KeyCode::Char(c) = k.code {
+        if !ctrl {
+            if let Some(d) = c.to_digit(10) {
+                if app.vi.push_digit(d) {
+                    return Flow::Continue;
                 }
-                KeyCode::Char('o') => {
-                    app.mode = InputMode::Join;
-                    app.input.clear();
-                    app.status = None;
-                }
-                KeyCode::Char('x') => close_channel(app),
-                KeyCode::Char('m') => {
-                    app.mode = InputMode::Manage;
-                    app.manage_cursor = app.focus;
-                }
-                KeyCode::Char('T') => {
-                    app.tab_pos = app.tab_pos.next();
-                    save_state(app);
-                }
-                KeyCode::Char(' ') => app.paused = !app.paused,
-                KeyCode::Esc => app.status = None,
-                _ => {}
             }
         }
     }
+
+    if ctrl {
+        match k.code {
+            KeyCode::Char('d') => {
+                let n = app.vi.take_count() * page.div_ceil(2);
+                app.vi.down(n)
+            }
+            KeyCode::Char('u') => {
+                let n = app.vi.take_count() * page.div_ceil(2);
+                app.vi.up(n, last)
+            }
+            KeyCode::Char('f') => {
+                let n = app.vi.take_count() * page;
+                app.vi.down(n)
+            }
+            KeyCode::Char('b') => {
+                let n = app.vi.take_count() * page;
+                app.vi.up(n, last)
+            }
+            _ => return Flow::Continue,
+        }
+        app.vi.keep_visible();
+        return Flow::Continue;
+    }
+
+    match k.code {
+        KeyCode::Char('q') => return Flow::Quit,
+        // motions — j is down the pane (newer), k is up it (older)
+        KeyCode::Char('j') | KeyCode::Down => {
+            let n = app.vi.take_count();
+            app.vi.down(n)
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            let n = app.vi.take_count();
+            app.vi.up(n, last)
+        }
+        KeyCode::Char('G') => app.vi.to_newest(),
+        KeyCode::Char('g') => {
+            app.vi.g_pending = true;
+            return Flow::Continue;
+        }
+        // channel switching is h/l (and gt/gT) in every tab-bar orientation —
+        // j/k are cursor motion, the way they are everywhere else in vi.
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => return tab_and_continue(app, -1),
+        KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => return tab_and_continue(app, 1),
+        // visual selection
+        KeyCode::Char('v') | KeyCode::Char('V') => {
+            if app.vi.visual.is_some() {
+                app.vi.visual = None;
+                app.mode = InputMode::Normal;
+            } else {
+                app.vi.visual = Some(app.vi.cursor);
+                app.mode = InputMode::Visual;
+            }
+            return Flow::Continue;
+        }
+        KeyCode::Char('y') => {
+            yank(app);
+            return Flow::Continue;
+        }
+        KeyCode::Char('/') => return search_prompt(app, vi::Dir::Fwd),
+        KeyCode::Char('?') => return search_prompt(app, vi::Dir::Back),
+        KeyCode::Char('n') => return repeat_search(app, false),
+        KeyCode::Char('N') => return repeat_search(app, true),
+        KeyCode::Esc => {
+            // one escape drops the selection, the next returns to live chat.
+            if app.vi.visual.is_some() || app.mode == InputMode::Visual {
+                app.vi.visual = None;
+                app.mode = InputMode::Normal;
+            } else if !app.vi.following() {
+                app.vi.reset();
+            } else {
+                app.status = None;
+            }
+            return Flow::Continue;
+        }
+        KeyCode::Char('i') | KeyCode::Char('a') => {
+            app.mode = InputMode::Insert;
+            app.status = None;
+            return Flow::Continue;
+        }
+        KeyCode::Char('o') => {
+            app.mode = InputMode::Join;
+            app.input.clear();
+            app.status = None;
+            return Flow::Continue;
+        }
+        KeyCode::Char('x') => {
+            close_channel(app);
+            return Flow::Continue;
+        }
+        KeyCode::Char('m') => {
+            app.mode = InputMode::Manage;
+            app.manage_cursor = app.focus;
+            return Flow::Continue;
+        }
+        KeyCode::Char('T') => {
+            app.tab_pos = app.tab_pos.next();
+            save_state(app);
+            return Flow::Continue;
+        }
+        KeyCode::Char(' ') => {
+            app.paused = !app.paused;
+            return Flow::Continue;
+        }
+        _ => return Flow::Continue,
+    }
+    app.vi.keep_visible();
     Flow::Continue
+}
+
+fn tab_and_continue(app: &mut App, delta: i32) -> Flow {
+    if delta > 0 {
+        next_tab(app)
+    } else {
+        prev_tab(app)
+    }
+    Flow::Continue
+}
+
+/// open the `/` or `?` prompt.
+fn search_prompt(app: &mut App, dir: vi::Dir) -> Flow {
+    app.vi.dir = Some(dir);
+    app.mode = InputMode::Search;
+    app.input.clear();
+    Flow::Continue
+}
+
+/// does this message match `pat`? case-insensitive over the sender and the text,
+/// so `/nymn` finds both who said it and who was mentioned.
+fn matches(m: &Message, pat: &str) -> bool {
+    let pat = pat.to_lowercase();
+    m.text.to_lowercase().contains(&pat) || m.user.to_lowercase().contains(&pat)
+}
+
+/// the message at index-back-from-newest `i` in the focused channel.
+fn message_at(app: &App, i: usize) -> Option<&Message> {
+    let ch = app.channels.get(app.focus)?;
+    let n = ch.messages.len();
+    (i < n).then(|| &ch.messages[n - 1 - i])
+}
+
+fn run_search(app: &mut App) {
+    let pat = app.input.trim().to_string();
+    app.input.clear();
+    app.mode = if app.vi.visual.is_some() { InputMode::Visual } else { InputMode::Normal };
+    if pat.is_empty() {
+        return;
+    }
+    app.vi.pattern = pat;
+    jump_to_match(app, app.vi.dir.unwrap_or(vi::Dir::Fwd));
+}
+
+fn repeat_search(app: &mut App, flip: bool) -> Flow {
+    if app.vi.pattern.is_empty() {
+        app.status = Some("no previous search".into());
+        return Flow::Continue;
+    }
+    let dir = app.vi.dir.unwrap_or(vi::Dir::Fwd);
+    jump_to_match(app, if flip { dir.flip() } else { dir });
+    Flow::Continue
+}
+
+fn jump_to_match(app: &mut App, dir: vi::Dir) {
+    let len = app.channels.get(app.focus).map_or(0, |c| c.messages.len());
+    let pat = app.vi.pattern.clone();
+    let found = vi::search(len, app.vi.cursor, dir, |i| {
+        message_at(app, i).is_some_and(|m| matches(m, &pat))
+    });
+    match found {
+        Some(i) => {
+            app.vi.cursor = i;
+            app.vi.keep_visible();
+            app.status = None;
+        }
+        None => app.status = Some(format!("no match: {pat}")),
+    }
+}
+
+/// copy the selection (or the cursor message) as plain `user: text` lines,
+/// oldest first — the same shape `heatsync log` prints, so a yank pastes
+/// straight into a grep or an issue.
+fn yank(app: &mut App) {
+    let (lo, hi) = app.vi.selection().unwrap_or((app.vi.cursor, app.vi.cursor));
+    let mut lines: Vec<String> = Vec::new();
+    for i in (lo..=hi).rev() {
+        if let Some(m) = message_at(app, i) {
+            lines.push(format!("{}: {}", m.user, m.text));
+        }
+    }
+    if lines.is_empty() {
+        app.status = Some("nothing to yank".into());
+        return;
+    }
+    let n = lines.len();
+    let body = lines.join("\n") + "\n";
+    app.status = Some(match clip::copy(&body) {
+        Ok(via) => format!("yanked {n} line{} → {via}", if n == 1 { "" } else { "s" }),
+        Err(e) => format!("yank failed: {e}"),
+    });
+    app.vi.visual = None;
+    app.mode = InputMode::Normal;
 }
 
 fn next_tab(app: &mut App) {
     if app.focus + 1 < app.channels.len() {
         app.focus += 1;
-        app.scroll = 0;
+        app.vi.reset();
     }
 }
 
 fn prev_tab(app: &mut App) {
     if app.focus > 0 {
         app.focus -= 1;
-        app.scroll = 0;
+        app.vi.reset();
     }
 }
 
@@ -517,7 +733,7 @@ fn join_channel(app: &mut App) {
     app.emotes.push(EmoteSet::new()); // populated async — see spawn_emote_fetch
     spawn_emote_fetch(&app.emote_tx, platform, name);
     app.focus = app.channels.len() - 1;
-    app.scroll = 0;
+    app.vi.reset();
     save_state(app);
 }
 
@@ -581,7 +797,7 @@ fn close_channel(app: &mut App) {
     app.channels.remove(app.focus);
     app.emotes.remove(app.focus);
     app.focus = app.focus.min(app.channels.len().saturating_sub(1));
-    app.scroll = 0;
+    app.vi.reset();
     save_state(app);
 }
 
@@ -629,21 +845,34 @@ fn send_focused(app: &mut App) {
 /// pull new data into the channel buffers for this tick, and keep the emote
 /// image cache warm for what's on screen.
 fn advance(app: &mut App) -> bool {
-    let App { channels, emotes, feed, store, fb, status, .. } = app;
+    let focus = app.focus;
+    let App { channels, emotes, feed, store, fb, status, vi, .. } = app;
+    // how many messages landed in the channel being read. the vi layer needs it
+    // to hold scrollback still — indices count back from the newest message, so
+    // every arrival shifts them and the cursor would otherwise slide off the
+    // message it was parked on.
+    let mut added = 0usize;
     match feed {
-        Feed::Mock(driver) => driver.tick(channels),
+        Feed::Mock(driver) => {
+            let before = channels.get(focus).map_or(0, |c| c.messages.len());
+            driver.tick(channels);
+            added = channels.get(focus).map_or(0, |c| c.messages.len()).saturating_sub(before);
+        }
         Feed::Live { rx, start, connected } => {
             let now = start.elapsed().as_millis() as u64;
             while let Ok(ev) = rx.try_recv() {
                 match ev {
                     ChatEvent::Line(l) => {
-                        if let Some(ch) = channels.iter_mut().find(|c| {
+                        if let Some(i) = channels.iter().position(|c| {
                             c.platform == l.platform && c.name.eq_ignore_ascii_case(&l.channel)
                         }) {
-                            ch.record(
+                            channels[i].record(
                                 Message { user: l.user, text: l.content, color: l.color, heat: 0.0 },
                                 now,
                             );
+                            if i == focus {
+                                added += 1;
+                            }
                         }
                     }
                     ChatEvent::Connected => *connected = true,
@@ -663,6 +892,9 @@ fn advance(app: &mut App) -> bool {
             }
         }
     }
+    let last = channels.get(focus).map_or(0, |c| c.messages.len().saturating_sub(1));
+    vi.absorb_new(added, last);
+    vi.clamp(last);
 
     // request loads for emotes near the bottom of each channel (whichever tier
     // is active), then drain finished loads. request() is idempotent.
@@ -799,26 +1031,49 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
 
     let cap = body.height as usize;
     // plan visible messages newest-first, honouring per-message height + scroll.
-    let mut plan: Vec<(&Message, usize)> = Vec::new();
+    // the index travels with each one so the cursor and selection can be matched
+    // without re-deriving positions.
+    let mut plan: Vec<(&Message, usize, usize)> = Vec::new();
     let mut used = 0usize;
-    for m in ch.messages.iter().rev().skip(app.scroll) {
+    for (i, m) in ch.messages.iter().rev().skip(app.vi.scroll).enumerate() {
         let h = if has_emote(m, set, mode) { EMOTE_H as usize } else { 1 };
         if used + h > cap {
             break;
         }
         used += h;
-        plan.push((m, h));
+        plan.push((m, h, app.vi.scroll + i));
     }
+    // hand the row count back to the vi layer — paging and keeping the cursor on
+    // screen need it, and only this loop knows how many variable-height messages
+    // actually fit.
+    app.vi.view.set(vi::View { count: plan.len() });
     plan.reverse();
 
+    // the cursor bar stays hidden while chat is simply following live, so the
+    // pane reads clean until you actually start navigating.
+    let show_cursor = !app.vi.following();
+
     let mut y = body.y + (cap - used) as u16; // bottom-anchor
-    for (m, h) in plan {
+    for (m, h, idx) in plan {
         let text_row = y + (h as u16 - 1);
-        let (line, places) = layout_message(m, set, mode, body.width);
-        f.render_widget(
-            Paragraph::new(line),
-            Rect { x: body.x, y: text_row, width: body.width, height: 1 },
-        );
+        let (mut line, places) = layout_message(m, set, mode, body.width);
+        // black-on-white for the cursor row and every selected row — the same
+        // treatment hover and active get everywhere else in the product. the
+        // Paragraph style carries the bar across the unwritten cells too, so it
+        // reads as one solid row rather than stopping at the last character.
+        let marked = app.vi.selected(idx) || (show_cursor && idx == app.vi.cursor);
+        let para = if marked {
+            let hl = Style::default().bg(Color::White).fg(Color::Black);
+            // patch every span, not just the paragraph — the per-user colours
+            // and heat hues would otherwise stay bright on a white bar.
+            for span in line.spans.iter_mut() {
+                span.style = span.style.patch(hl);
+            }
+            Paragraph::new(line).style(hl)
+        } else {
+            Paragraph::new(line)
+        };
+        f.render_widget(para, Rect { x: body.x, y: text_row, width: body.width, height: 1 });
         for p in &places {
             let x = body.x + p.col;
             match mode {
@@ -1129,32 +1384,85 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         return;
     }
 
+    // Search mode → the `/` or `?` prompt, vi-style at the bottom.
+    if app.mode == InputMode::Search {
+        let lead = if app.vi.dir == Some(vi::Dir::Back) { "?" } else { "/" };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {lead} "), Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {}", app.input), Style::default().fg(Color::Indexed(231))),
+                Span::styled("\u{2588}", Style::default().fg(BRAND)),
+            ])),
+            area,
+        );
+        return;
+    }
+    // Visual mode → selection size + what you can do with it.
+    if app.mode == InputMode::Visual {
+        let n = app.vi.selection().map_or(1, |(lo, hi)| hi - lo + 1);
+        let hint = |k: &'static str, d: &'static str| {
+            [Span::styled(k, Style::default().fg(BRAND)), Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244)))]
+        };
+        let mut spans = vec![
+            Span::styled(" visual ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {n} line{}  ", if n == 1 { "" } else { "s" }), Style::default().fg(Color::Indexed(231))),
+        ];
+        for pair in [hint("jk", "extend"), hint("y", "yank"), hint("/", "search"), hint("esc", "cancel")] {
+            spans.extend(pair);
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+
     let (dot, dot_color, state) = match &app.feed {
         Feed::Mock(_) => ("\u{25cb} ", Color::Indexed(244), "mock".to_string()),
         Feed::Live { connected: true, .. } => ("\u{25cf} ", Color::Indexed(46), "live".to_string()),
         Feed::Live { connected: false, .. } => ("\u{25cf} ", Color::Indexed(214), "connecting".to_string()),
     };
-    let nav = if app.tab_pos.is_vertical() { "jk" } else { "hl" };
     let mut spans = vec![
         Span::styled(" heatsync ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  {nav} "), Style::default().fg(BRAND)),
+    ];
+    // a message (yank confirmation, search miss, send error) takes the front of
+    // the line the way vi's command line does — appended after the key hints it
+    // was simply truncated away on anything narrower than ~110 columns.
+    if let Some(msg) = &app.status {
+        spans.push(Span::styled(format!("  {msg}"), Style::default().fg(Color::Indexed(214))));
+    }
+    spans.extend([
+        Span::styled("  hl ", Style::default().fg(BRAND)),
         Span::raw("chan  "),
+        Span::styled("jk ", Style::default().fg(BRAND)),
+        Span::raw("move  "),
+        Span::styled("v ", Style::default().fg(BRAND)),
+        Span::raw("select  "),
+        Span::styled("y ", Style::default().fg(BRAND)),
+        Span::raw("yank  "),
+        Span::styled("/ ", Style::default().fg(BRAND)),
+        Span::raw("find  "),
         Span::styled("i ", Style::default().fg(BRAND)),
         Span::raw("say  "),
         Span::styled("o ", Style::default().fg(BRAND)),
         Span::raw("join  "),
         Span::styled("m ", Style::default().fg(BRAND)),
         Span::raw("manage  "),
-        Span::styled("T ", Style::default().fg(BRAND)),
-        Span::raw("tabs  "),
         Span::styled("q ", Style::default().fg(BRAND)),
         Span::raw("quit  "),
-    ];
+    ]);
+    // a pending count or `g` echoes at the bottom, the way vi shows what it is
+    // still waiting on.
+    let pending = match (app.vi.count, app.vi.g_pending) {
+        (0, false) => String::new(),
+        (0, true) => "g".into(),
+        (n, g) => format!("{n}{}", if g { "g" } else { "" }),
+    };
+    if !pending.is_empty() {
+        spans.push(Span::styled(format!("{pending}  "), Style::default().fg(Color::Indexed(231)).add_modifier(Modifier::BOLD)));
+    }
+    if !app.vi.following() {
+        spans.push(Span::styled("SCROLLBACK  ", Style::default().fg(Color::Indexed(214)).add_modifier(Modifier::BOLD)));
+    }
     if app.paused {
         spans.push(Span::styled("PAUSED  ", Style::default().fg(Color::Indexed(214)).add_modifier(Modifier::BOLD)));
-    }
-    if let Some(s) = &app.status {
-        spans.push(Span::styled(format!("{s}  "), Style::default().fg(Color::Indexed(214))));
     }
     spans.push(Span::styled(dot, Style::default().fg(dot_color)));
     spans.push(Span::styled(format!("{state} · {n} ch"), Style::default().fg(Color::Indexed(244))));
