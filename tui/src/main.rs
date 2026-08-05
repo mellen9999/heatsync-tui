@@ -9,6 +9,7 @@
 mod cli;
 mod clip;
 mod config;
+mod edit;
 mod emote;
 mod http;
 mod kick;
@@ -74,6 +75,8 @@ struct App {
     fb: Option<FbEmotes>,      // bare-console framebuffer tier (TERM=linux)
     mode: InputMode,
     input: String,
+    /// the composer: a vi line editor with its own insert/normal modes.
+    line: edit::Line,
     status: Option<String>,          // transient one-line notice (send errors, etc.)
     out: Option<net::Tx>,            // outbound channel to the live WS thread
     twitch_tx: Option<std::sync::mpsc::Sender<twitch::Send>>, // direct twitch sender
@@ -158,6 +161,7 @@ fn main() -> io::Result<()> {
             fb: None,
             mode: InputMode::Normal,
             input: String::new(),
+            line: edit::Line::default(),
             status: None,
             out: None,
             twitch_tx: None,
@@ -258,6 +262,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
         fb,
         mode: InputMode::Normal,
         input: String::new(),
+        line: edit::Line::default(),
         status: None,
         out: Some(out),
         twitch_tx,
@@ -392,18 +397,18 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         return Flow::Quit;
     }
     match app.mode {
-        InputMode::Insert => match k.code {
-            KeyCode::Esc => app.mode = InputMode::Normal,
-            KeyCode::Enter => return send_focused(app),
-            KeyCode::Backspace => {
-                app.input.pop();
-            }
-            KeyCode::Char(c) => {
+        // the composer is a vi line editor: it owns insert vs normal, and only
+        // tells us when the line should be sent or put away.
+        InputMode::Insert => {
+            if !matches!(k.code, KeyCode::Esc | KeyCode::Enter) {
                 app.status = None; // typing dismisses the last command's reply
-                app.input.push(c)
             }
-            _ => {}
-        },
+            match app.line.key(k) {
+                edit::Act::Continue => {}
+                edit::Act::Send => return send_focused(app),
+                edit::Act::Leave => app.mode = InputMode::Normal,
+            }
+        }
         InputMode::Join => match k.code {
             KeyCode::Esc => {
                 app.mode = InputMode::Normal;
@@ -572,6 +577,7 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         }
         KeyCode::Char('i') | KeyCode::Char('a') => {
             app.mode = InputMode::Insert;
+            app.line.focus();
             app.status = None;
             return Flow::Continue;
         }
@@ -834,19 +840,20 @@ fn close_channel(app: &mut App) {
 /// enter in the composer. a leading `/` is a command — ours are handled here,
 /// everything else (mod actions, /me) goes to the platform verbatim.
 fn send_focused(app: &mut App) -> Flow {
-    let text = match slash::parse(&app.input) {
+    let text = match slash::parse(&app.line.text()) {
         slash::Cmd::Join(ch) => {
-            app.input.clear();
+            app.line.accept();
             open_channel(app, &ch);
             return Flow::Continue;
         }
         slash::Cmd::Part(which) => {
-            app.input.clear();
+            app.line.accept();
             part_channel(app, which.as_deref());
             return Flow::Continue;
         }
         slash::Cmd::Quit => return Flow::Quit,
         slash::Cmd::Usage(u) => {
+            // keep the draft so the channel can just be appended
             app.status = Some(u.into());
             return Flow::Continue;
         }
@@ -863,7 +870,7 @@ fn send_focused(app: &mut App) -> Flow {
         Platform::Twitch => match &app.twitch_tx {
             Some(tx) => {
                 let _ = tx.send((name.clone(), text));
-                app.input.clear();
+                app.line.accept();
                 app.status = Some(format!("sent → {name}"));
             }
             None => app.status = Some("no twitch token — run: heatsync login".into()),
@@ -872,7 +879,7 @@ fn send_focused(app: &mut App) -> Flow {
         Platform::Kick => {
             if let Some(ktx) = &app.kick_tx {
                 let _ = ktx.send((name.clone(), text));
-                app.input.clear();
+                app.line.accept();
                 app.status = Some(format!("sent → {name}"));
             } else if let Some(out) = &app.out {
                 let _ = out.send(net::Outbound::Chat {
@@ -880,7 +887,7 @@ fn send_focused(app: &mut App) -> Flow {
                     channel: name.clone(),
                     text,
                 });
-                app.input.clear();
+                app.line.accept();
                 app.status = Some(format!("sent → {name} (via ext)"));
             } else {
                 app.status = Some("no kick auth — run: heatsync login kick".into());
@@ -1417,23 +1424,52 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             Platform::Twitch => app.twitch_tx.is_none(),
             Platform::Kick => app.kick_tx.is_none() && app.out.is_none(),
         };
-        let prompt = format!(" {}·{} ", ch.name, ch.platform.tag());
+        // the tag names the mode as well as the target, so `esc` never leaves
+        // you guessing whether a keystroke will type or command.
+        let normal = app.line.mode() == edit::Mode::Normal;
+        let prompt = if normal {
+            format!(" {}·{} NORMAL ", ch.name, ch.platform.tag())
+        } else {
+            format!(" {}·{} ", ch.name, ch.platform.tag())
+        };
+        let tag = Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD);
         let mut spans = vec![
-            Span::styled(prompt, Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
+            Span::styled(prompt, tag),
             Span::styled(" ❯ ", Style::default().fg(BRAND)),
         ];
         if readonly {
             spans.push(Span::styled("read-only — no send token · esc", Style::default().fg(Color::Indexed(214))));
         } else {
-            spans.push(Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))));
-            spans.push(Span::styled("\u{2588}", Style::default().fg(BRAND))); // cursor
+            // draw the line with a block cursor sitting ON a character in normal
+            // mode and between characters in insert — the same shape vi has, so
+            // the mode is readable without looking at the tag.
+            let chars: Vec<char> = app.line.text().chars().collect();
+            let at = app.line.cursor();
+            let body = Style::default().fg(Color::Indexed(231));
+            let block = Style::default().fg(Color::Black).bg(Color::White);
+            let take = |r: std::ops::Range<usize>| -> String { chars[r].iter().collect() };
+            spans.push(Span::styled(take(0..at.min(chars.len())), body));
+            if at < chars.len() {
+                spans.push(Span::styled(take(at..at + 1), block));
+                spans.push(Span::styled(take(at + 1..chars.len()), body));
+            } else {
+                spans.push(Span::styled(" ", block));
+            }
+            if !app.line.pending().is_empty() {
+                spans.push(Span::styled(format!("  {}", app.line.pending()), Style::default().fg(BRAND).add_modifier(Modifier::BOLD)));
+            }
             // a command's reply (usage, "not open: x") has to be visible from
             // the composer — that is where the command was typed.
             if let Some(msg) = &app.status {
                 spans.push(Span::styled(format!("   {msg}"), Style::default().fg(Color::Indexed(214))));
-            } else if app.input.is_empty() {
+            } else if app.line.is_empty() && !normal {
                 spans.push(Span::styled(
                     "   /join <chan>  /part  /quit  — anything else goes to chat",
+                    Style::default().fg(Color::Indexed(244)),
+                ));
+            } else if normal {
+                spans.push(Span::styled(
+                    "   hjkw0$ move  dcy ops  kj history  esc leave",
                     Style::default().fg(Color::Indexed(244)),
                 ));
             }
