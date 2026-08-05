@@ -13,6 +13,7 @@ mod emote;
 mod http;
 mod kick;
 mod net;
+mod slash;
 mod twitch;
 mod vi;
 
@@ -393,11 +394,14 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
     match app.mode {
         InputMode::Insert => match k.code {
             KeyCode::Esc => app.mode = InputMode::Normal,
-            KeyCode::Enter => send_focused(app),
+            KeyCode::Enter => return send_focused(app),
             KeyCode::Backspace => {
                 app.input.pop();
             }
-            KeyCode::Char(c) => app.input.push(c),
+            KeyCode::Char(c) => {
+                app.status = None; // typing dismisses the last command's reply
+                app.input.push(c)
+            }
             _ => {}
         },
         InputMode::Join => match k.code {
@@ -714,10 +718,15 @@ fn join_channel(app: &mut App) {
     let tok = app.input.trim().to_string();
     app.mode = InputMode::Normal;
     app.input.clear();
+    open_channel(app, &tok);
+}
+
+/// open (or focus, if already open) a channel by `name` / `kick:name`.
+fn open_channel(app: &mut App, tok: &str) {
     if tok.is_empty() {
         return;
     }
-    let (platform, name) = parse_sub(&tok);
+    let (platform, name) = parse_sub(tok);
     if let Some(i) = app
         .channels
         .iter()
@@ -783,6 +792,25 @@ fn manage_move(app: &mut App, delta: isize) {
 }
 
 /// leave the active channel tab.
+/// leave a channel by name, or the focused one when `which` is None.
+fn part_channel(app: &mut App, which: Option<&str>) {
+    if let Some(tok) = which {
+        let (platform, name) = parse_sub(tok);
+        match app
+            .channels
+            .iter()
+            .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
+        {
+            Some(i) => app.focus = i,
+            None => {
+                app.status = Some(format!("not open: {name}"));
+                return;
+            }
+        }
+    }
+    close_channel(app);
+}
+
 fn close_channel(app: &mut App) {
     if app.channels.is_empty() {
         return;
@@ -803,10 +831,29 @@ fn close_channel(app: &mut App) {
 
 /// send the current input line to the focused channel (kick only; twitch has no
 /// send path). clears the input on a successful enqueue.
-fn send_focused(app: &mut App) {
-    let text = app.input.trim().to_string();
+/// enter in the composer. a leading `/` is a command — ours are handled here,
+/// everything else (mod actions, /me) goes to the platform verbatim.
+fn send_focused(app: &mut App) -> Flow {
+    let text = match slash::parse(&app.input) {
+        slash::Cmd::Join(ch) => {
+            app.input.clear();
+            open_channel(app, &ch);
+            return Flow::Continue;
+        }
+        slash::Cmd::Part(which) => {
+            app.input.clear();
+            part_channel(app, which.as_deref());
+            return Flow::Continue;
+        }
+        slash::Cmd::Quit => return Flow::Quit,
+        slash::Cmd::Usage(u) => {
+            app.status = Some(u.into());
+            return Flow::Continue;
+        }
+        slash::Cmd::Send(t) => t,
+    };
     if text.is_empty() || app.channels.is_empty() {
-        return;
+        return Flow::Continue;
     }
     let (platform, name) = {
         let c = &app.channels[app.focus];
@@ -840,6 +887,7 @@ fn send_focused(app: &mut App) {
             }
         }
     }
+    Flow::Continue
 }
 
 /// pull new data into the channel buffers for this tick, and keep the emote
@@ -1379,6 +1427,16 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         } else {
             spans.push(Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))));
             spans.push(Span::styled("\u{2588}", Style::default().fg(BRAND))); // cursor
+            // a command's reply (usage, "not open: x") has to be visible from
+            // the composer — that is where the command was typed.
+            if let Some(msg) = &app.status {
+                spans.push(Span::styled(format!("   {msg}"), Style::default().fg(Color::Indexed(214))));
+            } else if app.input.is_empty() {
+                spans.push(Span::styled(
+                    "   /join <chan>  /part  /quit  — anything else goes to chat",
+                    Style::default().fg(Color::Indexed(244)),
+                ));
+            }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
