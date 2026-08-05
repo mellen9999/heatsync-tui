@@ -1774,17 +1774,21 @@ fn layout_message(
     maxw: u16,
     me: Option<&str>,
 ) -> Vec<RowL> {
-    let text_hue = Color::Indexed(heatsync_core::heat::color(m.heat));
+    // og irc framing: <nick> in dim angle brackets, message text plain white.
+    // heat stays where it belongs — the bar and the tab numbers, not the prose.
+    let text_hue = Color::Indexed(231);
     let user_color = m
         .color
         .as_deref()
         .and_then(parse_hex)
         .unwrap_or(Color::Indexed(244));
+    let bracket = Style::default().fg(Color::Indexed(238));
     let spans = vec![
+        Span::styled("<", bracket),
         Span::styled(m.user.clone(), Style::default().fg(user_color)),
-        Span::styled(": ", Style::default().fg(Color::Indexed(238))),
+        Span::styled("> ", bracket),
     ];
-    let col = UnicodeWidthStr::width(m.user.as_str()) as u16 + 2;
+    let col = UnicodeWidthStr::width(m.user.as_str()) as u16 + 3;
     // mention tint: the whole row block goes dark red when the message @'s you.
     let tint = me
         .filter(|me| {
