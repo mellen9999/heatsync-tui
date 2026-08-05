@@ -49,6 +49,12 @@ pub struct Channel {
     /// wall-clock ms of the last heat update — decay is computed against it.
     pub last_ms: u64,
     pub messages: VecDeque<Message>,
+    /// lifetime message count (monotonic — `messages` is a capped ring, so its
+    /// len can't drive unread state).
+    pub total: u64,
+    /// `total` as of the last time this channel was on screen — unread when
+    /// total has moved past it.
+    pub seen: u64,
     cap: usize,
 }
 
@@ -60,6 +66,8 @@ impl Channel {
             heat: 0.0,
             last_ms: 0,
             messages: VecDeque::with_capacity(cap),
+            total: 0,
+            seen: 0,
             cap,
         }
     }
@@ -85,5 +93,6 @@ impl Channel {
             self.messages.pop_front();
         }
         self.messages.push_back(msg);
+        self.total += 1;
     }
 }

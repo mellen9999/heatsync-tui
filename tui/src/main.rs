@@ -76,6 +76,8 @@ struct App {
     tab_pos: TabPos,
     manage_cursor: usize, // cursor in the Manage view
     me: Option<String>,   // own username (lowercase) — drives @mention tinting
+    // twitch sender feedback (auth failures, NOTICE rejections) → status line.
+    twitch_notes: Option<Receiver<String>>,
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the
     // UI); results arrive here keyed by (platform, name) and merge in.
     emote_tx: Sender<(Platform, String, EmoteSet)>,
@@ -140,6 +142,7 @@ fn main() -> io::Result<()> {
             tab_pos: cfg.tab_pos,
             manage_cursor: 0,
             me: None,
+            twitch_notes: None,
             emote_tx,
             emote_rx,
         }
@@ -223,9 +226,12 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
     let auth = config::load_auth();
     let kick_tx = auth.kick_token.clone().map(kick::spawn);
     let me = auth.twitch_user.as_deref().map(str::to_lowercase);
-    let twitch_tx = match (auth.twitch_user, auth.twitch_oauth) {
-        (Some(u), Some(o)) => Some(twitch::spawn(u, o)),
-        _ => None,
+    let (twitch_tx, twitch_notes) = match (auth.twitch_user, auth.twitch_oauth) {
+        (Some(u), Some(o)) => {
+            let (tx, notes) = twitch::spawn(u, o);
+            (Some(tx), Some(notes))
+        }
+        _ => (None, None),
     };
     App {
         channels,
@@ -249,6 +255,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
         tab_pos,
         manage_cursor: 0,
         me,
+        twitch_notes,
         emote_tx,
         emote_rx,
     }
@@ -328,6 +335,10 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
 
     loop {
         drain_emotes(&mut app);
+        // the focused channel is on screen — whatever it holds is now seen.
+        if let Some(ch) = app.channels.get_mut(app.focus) {
+            ch.seen = ch.total;
+        }
         // per-frame emote draw budget (decoupled from the data-tick pump).
         if let Some(store) = &app.store {
             store.reset_budget();
@@ -880,8 +891,15 @@ fn advance(app: &mut App) -> bool {
         mode,
         composer,
         focus,
+        twitch_notes,
         ..
     } = app;
+    // twitch sender feedback beats the optimistic "sent →" note.
+    if let Some(rx) = twitch_notes {
+        while let Ok(note) = rx.try_recv() {
+            *status = Some(note);
+        }
+    }
     match feed {
         Feed::Mock(driver) => driver.tick(channels),
         Feed::Live {
@@ -1103,14 +1121,18 @@ fn dropdown_rect(app: &App, main: Rect, prev_row: Rect, footer: Rect) -> Option<
 
 /// the channel tab bar — horizontal row (top/bottom) or vertical list (left/right).
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
-    let tab_style = |i: usize, heat: f64| {
+    // ext-parity tab states: current = white block, unread = white text,
+    // nothing new = 808080 gray. (heat still shows as the number in the label.)
+    let tab_style = |i: usize, ch: &Channel| {
         if i == app.focus {
             Style::default()
                 .fg(Color::Black)
-                .bg(BRAND)
+                .bg(Color::Indexed(231))
                 .add_modifier(Modifier::BOLD)
+        } else if ch.total > ch.seen {
+            Style::default().fg(Color::Indexed(231))
         } else {
-            Style::default().fg(Color::Indexed(Tier::of(heat).xterm()))
+            Style::default().fg(Color::Indexed(244))
         }
     };
 
@@ -1127,7 +1149,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
                 height: 1,
             };
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(label, tab_style(i, ch.heat)))),
+                Paragraph::new(Line::from(Span::styled(label, tab_style(i, ch)))),
                 row,
             );
         }
@@ -1136,7 +1158,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         for (i, ch) in app.channels.iter().enumerate() {
             spans.push(Span::styled(
                 format!(" {}·{} {:.0} ", ch.name, ch.platform.tag(), ch.heat),
-                tab_style(i, ch.heat),
+                tab_style(i, ch),
             ));
             spans.push(Span::raw(" "));
         }
@@ -1883,6 +1905,14 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             ));
         } else {
             spans.extend(caret_spans(&app.composer));
+        }
+        // send feedback must be visible WHILE composing — a rejection that only
+        // shows after esc is a silent failure.
+        if let Some(s) = &app.status {
+            spans.push(Span::styled(
+                format!("   {s}"),
+                Style::default().fg(Color::Indexed(214)),
+            ));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
