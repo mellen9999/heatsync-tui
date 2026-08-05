@@ -68,37 +68,6 @@ impl EmoteSet {
     }
 }
 
-/// a rendered chunk of a message: literal text, or a resolved emote.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Token {
-    Text(String),
-    Emote(String), // emote name; resolve via EmoteSet::get for the url
-}
-
-/// split message text into text + emote tokens by whole-word match. adjacent
-/// text words coalesce (single-spaced). input is assumed already sanitized.
-pub fn tokenize(content: &str, set: &EmoteSet) -> Vec<Token> {
-    let mut out: Vec<Token> = Vec::new();
-    let mut text = String::new();
-    for word in content.split_whitespace() {
-        if set.get(word).is_some() {
-            if !text.is_empty() {
-                out.push(Token::Text(std::mem::take(&mut text)));
-            }
-            out.push(Token::Emote(word.to_string()));
-        } else {
-            if !text.is_empty() {
-                text.push(' ');
-            }
-            text.push_str(word);
-        }
-    }
-    if !text.is_empty() {
-        out.push(Token::Text(text));
-    }
-    out
-}
-
 /// a pixel effect on an emote stack. BTTV prefix modifiers and FFZ effect words
 /// share this vocabulary; the render layer applies them in enum order (geometry
 /// → color → motion), so derived Ord IS the application order.
@@ -382,17 +351,17 @@ mod tests {
     }
 
     #[test]
-    fn tokenizes_text_and_emotes() {
+    fn segments_text_and_emotes() {
         let set = EmoteSet::from_list([e("KEKW"), e("GAMBA")]);
-        let toks = tokenize("lol KEKW that GAMBA moment", &set);
+        let segs = segments("lol KEKW that GAMBA moment", &set);
         assert_eq!(
-            toks,
+            segs,
             vec![
-                Token::Text("lol".into()),
-                Token::Emote("KEKW".into()),
-                Token::Text("that".into()),
-                Token::Emote("GAMBA".into()),
-                Token::Text("moment".into()),
+                Segment::Text("lol".into()),
+                Segment::Stack(Stack::new("KEKW", "https://cdn/KEKW.webp".into())),
+                Segment::Text("that".into()),
+                Segment::Stack(Stack::new("GAMBA", "https://cdn/GAMBA.webp".into())),
+                Segment::Text("moment".into()),
             ]
         );
     }
