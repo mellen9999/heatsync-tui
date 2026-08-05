@@ -10,9 +10,12 @@
 
 use std::cell::RefCell;
 
+#[cfg(target_os = "linux")]
 use super::render::{EMOTE_H, EMOTE_W};
 
 /// a queued emote to blit this frame at an (absolute) cell position.
+/// only the linux blitter reads the fields — elsewhere the queue just drains.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct Placement {
     pub col: u16,
     pub row: u16,
