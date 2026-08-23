@@ -139,6 +139,7 @@ fn main() -> io::Result<()> {
         Some("probe") => return cli::probe(&args[1..]),
         Some("diag") => return cli::diag(&args[1..]),
         Some("render-test") => return cli::render_test(&args[1..]),
+        Some("status") => return cli::status(),
         Some("login") if args.get(1).map(String::as_str) == Some("kick") => return kick::login(),
         Some("login") => return cli::login(),
         _ => {}

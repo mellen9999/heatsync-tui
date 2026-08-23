@@ -127,6 +127,77 @@ pub fn hot(limit: u32, hours: u32) -> Option<HotPage> {
     agent().get(&url).call().ok()?.into_json().ok()
 }
 
+// ---- admin status (CLI, mellen-only) --------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthData {
+    #[serde(default)]
+    pub messages_per_minute: f64,
+    #[serde(default)]
+    pub postgres_status: String,
+    #[serde(default)]
+    pub redis_status: String,
+    #[serde(default)]
+    pub ws_connections: i64,
+    #[serde(default)]
+    pub cpu_usage: f64,
+    #[serde(default)]
+    pub ram_usage: f64,
+    #[serde(default)]
+    pub disk_usage: f64,
+    #[serde(default)]
+    pub error_rate: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CountPage {
+    #[serde(default)]
+    pub total: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReportsPage {
+    #[serde(default)]
+    pub reports: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NcmecPage {
+    #[serde(default)]
+    pub count: i64,
+}
+
+fn admin_get<T: for<'de> Deserialize<'de>>(path: &str, token: &str) -> Option<T> {
+    agent()
+        .get(&format!("{BASE}{path}"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .ok()?
+        .into_json()
+        .ok()
+}
+
+pub fn admin_health(token: &str) -> Option<HealthData> {
+    admin_get("/api/admin/health", token)
+}
+
+/// moderation-queue depth (items awaiting review).
+pub fn admin_mod_queue_total(token: &str) -> Option<i64> {
+    admin_get::<CountPage>("/api/admin/moderation-queue?limit=1", token).map(|p| p.total)
+}
+
+/// pending user reports.
+pub fn admin_pending_reports(token: &str) -> Option<i64> {
+    admin_get::<ReportsPage>("/api/admin/reports?status=pending", token)
+        .map(|p| p.reports.len() as i64)
+}
+
+/// NCMEC reports stuck in a failed/manual state — never routine, always worth surfacing.
+pub fn admin_ncmec_backlog(token: &str) -> Option<i64> {
+    admin_get::<NcmecPage>("/api/admin/ncmec-reports", token).map(|p| p.count)
+}
+
 /// minimal percent-encoding for query values (alnum + a few safe chars pass).
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

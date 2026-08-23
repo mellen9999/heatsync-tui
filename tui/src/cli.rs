@@ -125,6 +125,59 @@ pub fn login() -> std::io::Result<()> {
     Ok(())
 }
 
+/// `heatsync status` — mellen-only admin glance: mod queue, reports, NCMEC
+/// backlog, capacity headroom. Reads the SAME endpoints the web admin
+/// dashboard does; no vanity concurrent-user count on purpose.
+pub fn status() -> std::io::Result<()> {
+    let auth = config::load_auth();
+    let Some(token) = auth.admin_token else {
+        eprintln!("no admin token — add `admin_token=<jwt>` to ~/.config/heatsync/token");
+        std::process::exit(1);
+    };
+
+    let mut ok = true;
+    let health = http::admin_health(&token);
+    let mod_queue = http::admin_mod_queue_total(&token);
+    let reports = http::admin_pending_reports(&token);
+    let ncmec = http::admin_ncmec_backlog(&token);
+
+    println!("heatsync — prod status");
+    match &health {
+        Some(h) => {
+            println!(
+                "  postgres: {}   redis: {}",
+                h.postgres_status, h.redis_status
+            );
+            println!(
+                "  cpu {:>5.1}%   ram {:>5.1}%   disk {:>5.1}%   errors/min {:.1}",
+                h.cpu_usage, h.ram_usage, h.disk_usage, h.error_rate
+            );
+            println!("  ws conns: {}   msgs/min: {:.0}", h.ws_connections, h.messages_per_minute);
+        }
+        None => {
+            println!("  health: unreachable (auth expired? check ~/.config/heatsync/token)");
+            ok = false;
+        }
+    }
+    match mod_queue {
+        Some(n) => println!("  mod queue:    {n:>4}  pending"),
+        None => { println!("  mod queue:    ?     (request failed)"); ok = false; }
+    }
+    match reports {
+        Some(n) => println!("  reports:      {n:>4}  pending"),
+        None => { println!("  reports:      ?     (request failed)"); ok = false; }
+    }
+    match ncmec {
+        Some(n) if n > 0 => println!("  ncmec:        {n:>4}  STUCK — needs a look"),
+        Some(_) => println!("  ncmec:           0  clear"),
+        None => { println!("  ncmec:        ?     (request failed)"); ok = false; }
+    }
+    if !ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// `heatsync probe [channels…]` — connect to the live relay, print raw lines
 /// for 8s, report the count. an end-to-end WS smoke test (and a debug tap).
 pub fn probe(args: &[String]) -> std::io::Result<()> {
