@@ -153,7 +153,18 @@ CI compiled and unit-tested on Windows for weeks without anything ever creating 
 window. The smoke step now does, on all three platforms, through
 `cargo run --release -p heatsync-gui -- --smoke`.
 
-Two harness bugs were found and fixed getting there, both worth keeping:
+All three runners are green. The windows leg prints:
+
+```
+Running `target\release\heatsync-gui.exe --smoke`
+[smoke] rendered 30 frames, 23 rows of 10000 msgs, 5 emote stacks — ok
+```
+
+That one line is the whole claim: a window was created, glow initialised against
+a GL driver, thirty frames painted, virtualisation kept 23 rows of 10,000 alive,
+and five emote stacks were uploaded and drawn.
+
+Three harness bugs were found and fixed getting there, all worth keeping:
 
 - The first version redirected stdout/stderr to files and printed them after
   `WaitForExit(ms)`. **That call does not wait for the redirected streams**, so
@@ -162,6 +173,12 @@ Two harness bugs were found and fixed getting there, both worth keeping:
 - The deadline is `timeout-minutes`, not a script. A window that never maps
   leaves eframe not calling the app at all, so no in-process guard can fire —
   and unlike GNU `timeout`, the runner's own deadline exists on macOS too.
+- The binary is launched by `cargo run -p`, not by a hand-built path. The
+  hand-built one exited **127** on windows with no diagnostic; through cargo the
+  same failure read `STATUS_DLL_NOT_FOUND (0xc0000135)`, which named the actual
+  problem — Mesa's `opengl32.dll` is a shim that loads `libgallium_wgl.dll`,
+  which loads more again, and only two had been copied. The whole `x64` DLL set
+  is copied now rather than a hand-picked pair.
 
 **OPEN:** the runner has no real GPU, so this proves the glow path against Mesa's
 software rasteriser only. Only mellen booting heatpc to Windows proves it against
@@ -198,7 +215,18 @@ Numbers, not impressions. Re-measure before claiming any of them moved.
 
 1. **Windows on real hardware** — decision 11. mellen's boot.
 2. **crates.io publish** — decision 6. mellen's two clicks; both names still free.
-3. **Featherweight pass** — `default_fonts` compiles Ubuntu + emoji into the
-   binary when the UI font is Cozette 13px, and the 88 MB RSS has not been
-   attributed between font atlas, emote textures and parsed messages. Both are
-   measurable and neither has been measured.
+3. **Featherweight pass — fonts measured, deliberately not taken.** Dropping the
+   bundled fonts takes the binary from **7,531,848 → 6,115,832 bytes: 1.35 MB,
+   18.8%**. Not shipped, because it also drops emoji coverage, and this is a
+   chat client — bundling an emoji subset ourselves would eat most of the saving
+   back. It is a real option with a real cost, not free.
+
+   One trap found while measuring, worth keeping: **turning `default_fonts` off
+   on `eframe` alone changes nothing.** `egui` is also a direct dependency and
+   its own defaults re-enable the feature through cargo's feature unification —
+   the binary came out byte-for-byte identical, and only `default-features =
+   false` on *both* moved it. A feature you think you disabled is worth
+   re-measuring rather than assuming.
+
+4. **RSS attribution** — 88 MB has not been split between font atlas, emote
+   textures and the parsed message backlog. Measurable; not yet measured.
