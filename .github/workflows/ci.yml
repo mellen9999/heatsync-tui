@@ -112,15 +112,20 @@ jobs:
 
       # Windows is the primary target and the one platform with NO real-driver
       # verification available — there is no windows machine to hand, so CI is
-      # the only thing that ever runs it. One software rasteriser passing is
-      # thin evidence for "works on windows", so the smoke runs a second time
-      # against a genuinely different GL implementation: mesa's d3d12 gallium
-      # driver over WARP, rather than llvmpipe's CPU path. Different driver,
-      # different shader compiler (dxil), same assertions.
-      - name: GUI smoke again, on a different GL driver (d3d12/WARP)
+      # the only thing that ever runs it. One rasteriser passing is thin
+      # evidence for "works on windows", so the smoke runs a second time on a
+      # different gallium backend: softpipe, mesa's reference rasteriser, rather
+      # than llvmpipe's JIT one.
+      #
+      # d3d12/WARP was tried first and cannot work here: it failed with
+      # `NoGlutinConfigs ... NotSupported("provided display handle is not
+      # supported")`, which is glutin saying that driver offers no WGL path for
+      # a desktop-GL window — an environment limit, not a defect in the app. A
+      # step that can never go green is worse than no step, so it is not kept.
+      - name: GUI smoke again, on a different rasteriser (softpipe)
         if: runner.os == 'Windows'
-        timeout-minutes: 5
+        timeout-minutes: 6
         shell: bash
         env:
-          GALLIUM_DRIVER: d3d12
+          GALLIUM_DRIVER: softpipe
         run: exec cargo run --release -p heatsync-gui -- --smoke
