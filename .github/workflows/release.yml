@@ -1,0 +1,99 @@
+name: release
+
+# Builds the GUI and TUI for all three platforms and attaches them to a
+# release.
+#
+# This exists because of a gap that is not a code problem: the GUI is
+# Windows-first, and there is no Windows machine to test it on. CI proves it
+# opens a window and renders — against Mesa's software rasterisers, which is
+# the only GL a GitHub runner has. Nothing has ever run it against a real
+# vendor driver (Radeon, GeForce, Intel), and that is exactly where OpenGL
+# implementations differ most.
+#
+# A downloadable binary is the way out: it lets people on real hardware run
+# the thing and report back, which is the only remaining path to that
+# evidence. Until someone does, "works on Windows" means "works on Windows
+# under llvmpipe and d3d12/WARP in CI" — see docs/decisions.md item 11.
+#
+# Tag-triggered on purpose. Publishing a release is a deliberate act, so it
+# waits for `git tag vX.Y.Z && git push --tags` rather than firing on every
+# push to main.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: linux-x86_64
+            ext: ''
+          - os: windows-latest
+            suffix: windows-x86_64
+            ext: '.exe'
+          - os: macos-latest
+            suffix: macos-aarch64
+            ext: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The GUI links against the system windowing/GL libraries on Linux; the
+      # other two runners already have theirs.
+      - name: Linux windowing deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-x11-0 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+            libgl1-mesa-dri libegl1 libgles2
+
+      - run: cargo build --release -p heatsync-gui -p heatsync-tui
+
+      # Named by platform so three uploads cannot overwrite each other, and so
+      # a downloaded file still says what it is once it leaves the browser.
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for bin in heatsync-gui heatsync-tui; do
+            cp "target/release/${bin}${{ matrix.ext }}" \
+               "dist/${bin}-${{ matrix.suffix }}${{ matrix.ext }}"
+          done
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heatsync-${{ matrix.suffix }}
+          path: dist/*
+          retention-days: 30
+
+  publish:
+    # Only for an actual tag — a manual dispatch builds the artifacts above and
+    # stops there, so the binaries can be checked before anything is published.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Attach binaries to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

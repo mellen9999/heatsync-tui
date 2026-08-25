@@ -180,9 +180,28 @@ Three harness bugs were found and fixed getting there, all worth keeping:
   which loads more again, and only two had been copied. The whole `x64` DLL set
   is copied now rather than a hand-picked pair.
 
-**OPEN:** the runner has no real GPU, so this proves the glow path against Mesa's
-software rasteriser only. Only mellen booting heatpc to Windows proves it against
-an actual Radeon driver.
+**OPEN, and there is no near-term path to closing it.** mellen does not have
+ready access to a Windows machine, so the plan of "boot heatpc and run it once"
+is gone. Nothing has run this against a real vendor driver — Radeon, GeForce,
+Intel — and vendor OpenGL drivers are precisely where implementations diverge.
+
+Two things narrow the gap without closing it:
+
+1. **The windows smoke runs twice, on two different GL implementations.**
+   llvmpipe (CPU rasteriser) and mesa's d3d12 gallium driver over WARP —
+   different driver, different shader compiler (dxil), same assertions. Two
+   independent implementations agreeing is meaningfully better than one, and it
+   is the most CI can offer on a runner with no GPU.
+2. **`release.yml` builds downloadable binaries for all three platforms.** The
+   only remaining route to real-driver evidence is someone running it on real
+   hardware, and that requires the binary to be obtainable. Tag-triggered, so
+   publishing stays a deliberate act.
+
+Until someone reports back from real hardware, **"works on Windows" means
+"works on Windows under llvmpipe and d3d12/WARP in CI"**, and should be written
+that way rather than shortened. This is also the strongest argument on the
+wgpu side of decision 5: glow's hard OpenGL 2.0+ requirement carries the most
+risk exactly on the machines we cannot test.
 
 ## 12. Hidden windows must not burn a core · CONFIRMED
 
@@ -234,7 +253,9 @@ either number as *the* footprint until heatpc gives a real-driver reading.
 
 ## Still open
 
-1. **Windows on real hardware** — decision 11. mellen's boot.
+1. **Windows on real hardware** — decision 11. No longer mellen's boot; there
+   is no Windows machine available. Needs a user on real hardware, which is what
+   `release.yml` exists to make possible.
 2. **crates.io publish** — decision 6. mellen's two clicks; both names still free.
 3. **Featherweight pass — fonts measured, deliberately not taken.** Dropping the
    bundled fonts takes the binary from **7,531,848 → 6,115,832 bytes: 1.35 MB,
