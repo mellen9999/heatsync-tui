@@ -229,7 +229,8 @@ Numbers, not impressions. Re-measure before claiming any of them moved.
 | frame cost, 10k-message backlog | 0.46 ms |
 | font atlas texture | **2,048 KB** |
 | emote textures (5 stacks) | **192 KB** |
-| resident memory, CI linux under llvmpipe | **127 MB** |
+| resident memory, **app only** (headless, 10k msgs + emotes) | **20 MB** |
+| resident memory, CI linux windowed under llvmpipe | 127 MB |
 | Chatterino, for reference | 40–60 MB installed |
 
 The last three come from the smoke run itself and are printed by every CI job on
@@ -243,13 +244,21 @@ every platform, so they cannot drift quietly. Two things they settle:
   which strengthens the case for trimming it and does not change the reason not
   to yet (emoji coverage in a chat client).
 
-**Correction:** this document previously recorded 88 MB resident, carried over
-from a desktop run. The measured figure is 127 MB, and it is not directly
-comparable either — CI renders through llvmpipe, whose software framebuffers
-are part of that number and would not exist on a real GPU. The honest statement
-is that resident memory on a GPU-less linux runner is 127 MB and the desktop
-figure has not been re-measured since it started being printed. Do not quote
-either number as *the* footprint until heatpc gives a real-driver reading.
+**Correction, twice over.** This first recorded 88 MB resident from a desktop
+run, then 127 MB once CI began printing it. Both were measuring the wrong thing.
+
+Running the bench headless — same 10,000 messages, same emote uploads, no window
+and no GL — peaks at **20 MB**. So roughly **107 MB of the windowed CI figure is
+llvmpipe**: software framebuffers and JIT that a real GPU driver does not
+allocate. Our own footprint is ~20 MB, of which 2 MB is the font atlas.
+
+That is the number to reason about, and it reframes the whole featherweight
+question: there is no 100 MB of ours to hunt. It also means the CI figure should
+never be quoted as the app's memory use — it is dominated by the fallback
+renderer that exists only because the runner has no GPU.
+
+Command: run `heatsync-gui --bench` and sample `/proc/self/status`; a real-driver
+windowed reading still needs hardware nobody has to hand (decision 11).
 
 ## Still open
 

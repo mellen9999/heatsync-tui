@@ -122,6 +122,10 @@ struct App {
     cache: emote::Cache,
     view: View,
     started: Instant,
+    /// Wall time from process start to the first painted frame — "instant to
+    /// open" as a number rather than an impression. Printed by the smoke run on
+    /// every platform, so it cannot regress unnoticed.
+    first_frame_ms: Option<f32>,
     loaded: bool,
     stats: bool,
     frames: u32,
@@ -139,6 +143,7 @@ impl App {
             cache: emote::Cache::default(),
             view: View::default(),
             started: Instant::now(),
+            first_frame_ms: None,
             loaded: false,
             stats,
             frames: 0,
@@ -214,6 +219,11 @@ impl eframe::App for App {
             self.load(&ctx);
         }
         let t_ms = self.started.elapsed().as_millis() as u64;
+        if self.first_frame_ms.is_none() {
+            // First pass through the app's own draw — window created, GL
+            // context live, emotes uploaded. What a user experiences as launch.
+            self.first_frame_ms = Some(self.started.elapsed().as_secs_f32() * 1000.0);
+        }
 
         egui::Panel::top("hud").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -273,6 +283,10 @@ impl eframe::App for App {
                     self.view.drawn_last_frame,
                     self.msgs.len(),
                     self.cache.len()
+                );
+                println!(
+                    "[smoke] startup: first frame at {:.0} ms",
+                    self.first_frame_ms.unwrap_or(f32::NAN)
                 );
                 println!(
                     "[smoke] footprint: rss={} font_tex={}KB emote_tex={}KB",
