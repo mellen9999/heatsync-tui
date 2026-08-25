@@ -269,12 +269,24 @@ impl eframe::App for App {
         if let Some(budget) = self.smoke_frames {
             if !self.smoke_done && self.frames + 1 >= budget {
                 self.smoke_done = true;
+                // The footprint numbers ride along with the smoke verdict on
+                // purpose: "lighter than what you already run" is the product
+                // claim, and a claim that is only ever measured by hand is one
+                // that regresses quietly. Every CI run on all three platforms
+                // now prints it.
+                let (font_kb, emote_kb) = texture_kb(&ctx);
                 println!(
                     "[smoke] rendered {} frames, {} rows of {} msgs, {} emote stacks — ok",
                     self.frames + 1,
                     self.view.drawn_last_frame,
                     self.msgs.len(),
                     self.cache.len()
+                );
+                println!(
+                    "[smoke] footprint: rss={} font_tex={}KB emote_tex={}KB",
+                    rss_kb().map_or("n/a".to_string(), |kb| format!("{kb}KB")),
+                    font_kb,
+                    emote_kb
                 );
                 assert!(
                     self.view.drawn_last_frame > 0,
@@ -289,13 +301,17 @@ impl eframe::App for App {
         self.frame_ms = self.frame_ms * 0.9 + ms * 0.1;
         self.frames += 1;
         if self.stats && self.last_report.elapsed() >= Duration::from_secs(1) {
+            let (font_kb, emote_kb) = texture_kb(&ctx);
             eprintln!(
-                "[stats] fps={} frame_ms={:.2} drawn={} of {} stacks={}",
+                "[stats] fps={} frame_ms={:.2} drawn={} of {} stacks={}                  rss={} font_tex={}KB emote_tex={}KB",
                 self.frames,
                 self.frame_ms,
                 self.view.drawn_last_frame,
                 self.msgs.len(),
-                self.cache.len()
+                self.cache.len(),
+                rss_kb().map_or("n/a".to_string(), |kb| format!("{kb}KB")),
+                font_kb,
+                emote_kb
             );
             self.frames = 0;
             self.last_report = Instant::now();
@@ -351,4 +367,44 @@ fn main() -> eframe::Result<()> {
         },
         Box::new(move |_cc| Ok(Box::new(App::new(stats, smoke)))),
     )
+}
+
+/// Resident set size, so the footprint claim is a number rather than a belief.
+///
+/// /proc only — a portable RSS read would mean a dependency, and the claim this
+/// backs ("lighter than what you already run") is checked on linux and windows
+/// by hand, not in a loop. Returns None where there is no /proc.
+fn rss_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        // field 1 is resident pages
+        let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        Some(pages * 4)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Split egui's texture memory into the font atlas and everything else.
+///
+/// Those are the two things worth telling apart: the atlas is a fixed cost paid
+/// once for whichever fonts are compiled in, and the rest scales with how many
+/// distinct emote stacks are on screen. Knowing which one dominates is what
+/// decides whether trimming fonts is worth its cost in emoji coverage.
+fn texture_kb(ctx: &egui::Context) -> (usize, usize) {
+    let manager = ctx.tex_manager();
+    let manager = manager.read();
+    let mut font = 0;
+    let mut other = 0;
+    for (_, meta) in manager.allocated() {
+        if meta.name.contains("font") {
+            font += meta.bytes_used();
+        } else {
+            other += meta.bytes_used();
+        }
+    }
+    (font / 1024, other / 1024)
 }
