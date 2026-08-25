@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "heat-sorted live multichat on the desktop — twitch, kick + youtube in one window"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/mellen9999/heatsync-tui"
 homepage = "https://heatsync.org"
 publish = false  # prototype: not on crates.io until M1 is real

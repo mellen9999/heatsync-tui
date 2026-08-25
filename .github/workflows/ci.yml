@@ -51,9 +51,13 @@ jobs:
       # without a GL driver (VM, RDP session, bare install) hits the same wall,
       # which is the standing argument for wgpu once wgpu-hal builds again.
       #
-      # Every copy is mandatory and the payload is listed. An `-ErrorAction
-      # SilentlyContinue` here would turn "mesa changed its archive layout" into
-      # a GL failure three steps later with nothing pointing at the cause.
+      # The whole x64 set is copied, not a hand-picked pair. Mesa's opengl32.dll
+      # is a shim that loads libgallium_wgl.dll, which loads more again; naming
+      # two of them produced `STATUS_DLL_NOT_FOUND` (0xc0000135) with no hint as
+      # to which one was missing. Copying the set costs nothing on a runner and
+      # cannot be wrong. An `-ErrorAction SilentlyContinue` here would likewise
+      # turn "mesa changed its archive layout" into a GL failure three steps
+      # later with nothing pointing at the cause.
       - name: Mesa software OpenGL (windows runners have no GL driver)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -62,11 +66,14 @@ jobs:
           $url = 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z'
           curl.exe -fsSL -o mesa.7z $url
           7z x mesa.7z -omesa | Out-Null
-          Write-Host '--- mesa payload ---'
-          Get-ChildItem -Recurse mesa -Filter *.dll | ForEach-Object { $_.FullName }
-          # llvmpipe needs its gallium driver alongside the ICD; neither alone works.
-          foreach ($dll in 'opengl32.dll', 'libgallium_wgl.dll') {
-            Copy-Item "mesa\x64\$dll" target\release\ -Force
+          $dlls = Get-ChildItem mesa\x64 -Filter *.dll
+          if (-not ($dlls.Name -contains 'opengl32.dll')) {
+            throw "mesa\x64 has no opengl32.dll — archive layout changed"
+          }
+          Write-Host "--- copying $($dlls.Count) mesa dlls beside the exe ---"
+          $dlls | ForEach-Object {
+            Write-Host "  $($_.Name)"
+            Copy-Item $_.FullName target\release\ -Force
           }
           'GALLIUM_DRIVER=llvmpipe' | Out-File -FilePath $env:GITHUB_ENV -Append
 
