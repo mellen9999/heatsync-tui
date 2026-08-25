@@ -7,9 +7,9 @@ cargo install heatsync-tui
 ```
 
 ```
-heatsync-tui                 # opens your saved channels (or a demo set)
-heatsync-tui xqc forsen kick:trainwreckstv   # explicit channels
-heatsync-tui login           # set up sending (see below)
+heatsync                     # opens your saved channels (or a demo set)
+heatsync xqc forsen kick:trainwreckstv   # explicit channels
+heatsync login           # set up sending (see below)
 ```
 
 keys: `j`/`k` scroll · `h`/`l` (or `j`/`k` with a side tab bar) switch channel ·
@@ -19,7 +19,7 @@ open channels + tab-bar position persist in `~/.config/heatsync/config`.
 ## sending
 
 sending is chatterino-style — direct to the platform, using your own token.
-run `heatsync-tui login` and follow it. reading always comes through heatsync;
+run `heatsync login` and follow it. reading always comes through heatsync;
 only sending needs your token.
 
 ## emotes

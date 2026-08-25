@@ -1,11 +1,10 @@
 # Maintainer: mellen <mellen@heatsync.org>
-#
-# Deliberately does NOT declare provides=('heatsync') or conflicts=('heatsync').
-# An unrelated MIT project of the same name ships `heatsync-bin` on the AUR and
-# that package claims both. Ours installs /usr/bin/heatsync-tui, so the two can
-# sit on the same machine without pacman having to pick one.
 
 pkgname=heatsync-tui
+# the binary is /usr/bin/heatsync. an unrelated AUR `heatsync-bin` also claims
+# that path — declare it so pacman resolves the clash instead of erroring.
+provides=('heatsync')
+conflicts=('heatsync')
 pkgver=0.1.1
 pkgrel=1
 pkgdesc='heat-sorted live multichat in the terminal — twitch + kick, real emotes, vim keys'
@@ -41,7 +40,7 @@ check() {
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
+  install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/heatsync"
   install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md
 }

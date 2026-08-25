@@ -10,14 +10,11 @@ keywords = ["twitch", "kick", "chat", "streaming", "tui"]
 categories = ["command-line-utilities"]
 readme = "README.md"
 
-# The binary is `heatsync-tui`, not `heatsync`. An unrelated MIT project of the
-# same name ships `heatsync-bin` on the AUR, and it declares both
-# `provides: [heatsync]` and `conflicts: [heatsync]` — so installing /usr/bin/heatsync
-# would make pacman refuse to have both on a machine. Ours predates theirs by
-# ~19 months via the domain, but a file conflict makes US look like the squatter
-# on the one shelf where a user meets us first.
+# The package is `heatsync-tui` (crates.io/AUR identity) but the binary users
+# type is `heatsync`. An unrelated AUR `heatsync-bin` also claims /usr/bin/heatsync
+# — the PKGBUILD declares conflicts accordingly; ours predates it via the domain.
 [[bin]]
-name = "heatsync-tui"
+name = "heatsync"
 path = "src/main.rs"
 
 [dependencies]
