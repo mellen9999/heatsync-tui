@@ -9,7 +9,7 @@
 //! no rendering and no app state here — main.rs asks what a key did and draws
 //! the result, which is what lets every motion below be tested directly.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::key::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Mode {

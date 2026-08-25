@@ -1,12 +1,22 @@
 //! heatsync-core — the brain. protocol types, heat ramp, emote resolution, ws
-//! parsing, mock feed. no terminal, no async, no i/o (clocks are passed in).
-//! the tui + cli are thin faces over this.
+//! parsing, mock feed, and the editing model. no terminal, no async, no i/o
+//! (clocks and keystrokes are passed in). every client is a thin face over this.
+//!
+//! The editing half (`key`, `edit`, `vi`, `slash`, `clip`) lived in the tui
+//! until a second face needed it. None of it ever touched the terminal except
+//! for crossterm's key type, which `key` now replaces — a face maps its own
+//! keystrokes into `key::KeyEvent` and gets the same editor.
 
+pub mod clip;
+pub mod edit;
 pub mod emote;
 pub mod heat;
+pub mod key;
 pub mod mock;
 pub mod proto;
 pub mod sanitize;
+pub mod slash;
+pub mod vi;
 
 use std::collections::VecDeque;
 

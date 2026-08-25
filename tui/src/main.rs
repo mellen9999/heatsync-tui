@@ -7,16 +7,17 @@
 
 #[allow(dead_code)]
 mod cli;
-mod clip;
 mod config;
-mod edit;
 mod emote;
 mod http;
+mod key;
 mod kick;
 mod net;
-mod slash;
 mod twitch;
-mod vi;
+
+// The editing model lives in core now, so a gui can share it. Imported under
+// the same names the call sites below already use.
+use heatsync_core::{clip, edit, slash, vi};
 
 use std::io;
 use std::sync::mpsc::{Receiver, Sender};
@@ -404,7 +405,10 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             if !matches!(k.code, KeyCode::Esc | KeyCode::Enter) {
                 app.status = None; // typing dismisses the last command's reply
             }
-            match app.line.key(k) {
+            // Keys core has no vocabulary for (F-keys, Insert) are dropped
+            // rather than widening the editing model to carry them.
+            let Some(ck) = key::to_core(k) else { return Flow::Continue };
+            match app.line.key(ck) {
                 edit::Act::Continue => {}
                 edit::Act::Send => return send_focused(app),
                 edit::Act::Leave => app.mode = InputMode::Normal,
