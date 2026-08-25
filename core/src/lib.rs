@@ -90,6 +90,44 @@ impl Badge {
     }
 }
 
+/// what kind of non-chat event a [`Note`] marks. one vocabulary across
+/// platforms — a kick gift bomb and a twitch submysterygift are both `Gift`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NoteKind {
+    /// new subscription or resub (paid, prime, membership).
+    Sub,
+    /// gifted subs — single or bomb.
+    Gift,
+    /// money thrown at the stream: bits, kicks, superchats, superstickers.
+    Cheer,
+    /// raid — incoming or outgoing.
+    Raid,
+    /// channel point redemption.
+    Redeem,
+    /// stream went live.
+    Live,
+    /// stream went offline.
+    Offline,
+    /// game/category or title change.
+    Category,
+    /// announcement or generic system notice.
+    Notice,
+    /// heat spike / hype train — chat is going off.
+    Spike,
+    /// moderation: ban / timeout / chat clear.
+    Mod,
+}
+
+/// a non-chat event shown inline in the chat flow. `what` is the human
+/// headline ("resubscribed for 14 months", "raiding with 500 viewers") — the
+/// message's `user` is the actor and its `text` carries any attached user
+/// message (a resub message, a redemption input), which renders like chat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    pub kind: NoteKind,
+    pub what: String,
+}
+
 /// one chat line. `heat` is the channel's heat snapshotted at arrival, so a
 /// message sent during a spike stays warm in scrollback. `color` is the user's
 /// chat color (hex) if the platform sent one.
@@ -104,6 +142,9 @@ pub struct Message {
     pub badges: Vec<Badge>,
     /// username this message replies to, when the platform sent one.
     pub reply_to: Option<String>,
+    /// set when this line is an event (sub, raid, redemption, live…) rather
+    /// than plain chat — it renders as an inline notice.
+    pub note: Option<Note>,
     pub heat: f64,
 }
 
@@ -211,6 +252,7 @@ mod channel_tests {
             color: None,
             badges: Vec::new(),
             reply_to: None,
+            note: None,
             heat: 0.0,
         }
     }

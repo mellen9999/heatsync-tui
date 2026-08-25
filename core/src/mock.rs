@@ -140,6 +140,41 @@ impl Driver {
             let spike = self.rng.unit() < 0.03;
             let mult = if spike { 6.0 } else { 1.0 };
             let mut budget = self.activity.get(i).copied().unwrap_or(1.0) * mult;
+            // rare inline events so the offline feed exercises note rendering.
+            if self.rng.unit() < 0.008 {
+                let user = self.rng.pick(USERS).to_string();
+                let (kind, what, text) = match (self.rng.unit() * 5.0) as u32 {
+                    0 => (
+                        crate::NoteKind::Sub,
+                        "subscribed at Tier 1. They've subscribed for 14 months!",
+                        "still here Pog",
+                    ),
+                    1 => (crate::NoteKind::Gift, "is gifting 5 Tier 1 Subs!", ""),
+                    2 => (crate::NoteKind::Raid, "12 raiders have joined!", ""),
+                    3 => (crate::NoteKind::Redeem, "redeemed Hydrate (500)", ""),
+                    _ => (crate::NoteKind::Cheer, "cheered 100 bits", "gg"),
+                };
+                ch.record(
+                    Message {
+                        platform: ch.platform,
+                        user: if matches!(kind, crate::NoteKind::Raid) {
+                            String::new()
+                        } else {
+                            user
+                        },
+                        text: text.to_string(),
+                        color: None,
+                        badges: Vec::new(),
+                        reply_to: None,
+                        note: Some(crate::Note {
+                            kind,
+                            what: what.to_string(),
+                        }),
+                        heat: 0.0,
+                    },
+                    now,
+                );
+            }
             while budget > 0.0 {
                 if self.rng.unit() < budget.min(1.0) {
                     let user = self.rng.pick(USERS).to_string();
@@ -160,6 +195,7 @@ impl Driver {
                             color: None,
                             badges,
                             reply_to: None,
+                            note: None,
                             heat: 0.0,
                         },
                         now,

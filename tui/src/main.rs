@@ -937,6 +937,7 @@ fn send_focused(app: &mut App) -> Flow {
                 color: Some("#ff8700".into()),
                 badges: Vec::new(),
                 reply_to: None,
+                note: None,
                 heat: 0.0,
             },
             now,
@@ -1006,7 +1007,8 @@ fn complete_step(app: &mut App, dir: i32) {
         // recent chatters, newest first, deduped — the people you'd reply to.
         let mut users: Vec<&str> = Vec::new();
         for m in ch.messages.iter().rev() {
-            if !users.iter().any(|u| u.eq_ignore_ascii_case(&m.user)) {
+            // actorless event lines (live/offline/raid) have no user to offer.
+            if !m.user.is_empty() && !users.iter().any(|u| u.eq_ignore_ascii_case(&m.user)) {
                 users.push(&m.user);
             }
             if users.len() >= 50 {
@@ -1077,6 +1079,21 @@ fn drain_feed(app: &mut App) {
                     // channel's emotes burned network + decode for images
                     // that might never be looked at; a switched-to channel is
                     // filled by the tick sweep within 200ms instead.
+                    // the relay double-broadcasts some event frames (usernotice
+                    // arrives twice with the same id) — drop a note identical
+                    // to one already in the recent tail.
+                    // 16 covers a spam-speed channel filling the gap between
+                    // the two broadcasts (~200ms apart).
+                    if l.note.is_some()
+                        && channels[i].messages.iter().rev().take(16).any(|e| {
+                            e.platform == l.platform
+                                && e.user == l.user
+                                && e.text == l.content
+                                && e.note.as_ref() == l.note.as_ref()
+                        })
+                    {
+                        continue;
+                    }
                     if i == *focus {
                         request_stacks(store, fb, &emotes[i], &l.content);
                     }
@@ -1088,6 +1105,7 @@ fn drain_feed(app: &mut App) {
                             color: l.color,
                             badges: l.badges,
                             reply_to: l.reply_to,
+                            note: l.note,
                             heat: 0.0,
                         },
                         now,
@@ -1843,6 +1861,33 @@ fn layout_message(
             1,
         );
     }
+    // an event line: glyph + actor + headline in the event's hue, then any
+    // attached chat text (resub message, kicks message) laid out like chat.
+    if let Some(n) = &m.note {
+        let (glyph, idx) = note_style(n.kind);
+        let hue = Style::default().fg(Color::Indexed(idx));
+        b.prefix(Span::styled(glyph, hue), 1);
+        b.prefix(Span::raw(" "), 1);
+        if !m.user.is_empty() {
+            let uw = UnicodeWidthStr::width(m.user.as_str()) as u16;
+            b.prefix(
+                Span::styled(m.user.clone(), Style::default().fg(user_color)),
+                uw,
+            );
+            b.prefix(Span::raw(" "), 1);
+        }
+        for w in n.what.split(' ') {
+            b.word(w, hue);
+        }
+        if !m.text.is_empty() {
+            b.word("·", Style::default().fg(Color::Indexed(244)));
+            layout_text(&mut b, &m.text, set, mode);
+        }
+        let bg = me
+            .is_some_and(|me| mentions(&m.text, me))
+            .then(|| Style::default().bg(Color::Indexed(236)));
+        return b.finish(bg);
+    }
     // role badges, capped — a badge wall must not eat the line.
     for &bd in m.badges.iter().take(3) {
         b.prefix(badge_span(bd), 1);
@@ -1868,6 +1913,25 @@ fn layout_message(
         .is_some_and(|me| mentions(&m.text, me))
         .then(|| Style::default().bg(Color::Indexed(236)));
     b.finish(bg)
+}
+
+/// one-cell glyph + xterm-256 hue for each event kind. semantic: green=live,
+/// red=mod/danger, orange=money+hype (brand), dim=gone.
+fn note_style(k: heatsync_core::NoteKind) -> (&'static str, u8) {
+    use heatsync_core::NoteKind as K;
+    match k {
+        K::Sub => ("★", 220),
+        K::Gift => ("✦", 213),
+        K::Cheer => ("◆", 208),
+        K::Raid => ("⚑", 201),
+        K::Redeem => ("◇", 39),
+        K::Live => ("●", 40),
+        K::Offline => ("○", 244),
+        K::Category => ("→", 75),
+        K::Notice => ("»", 75),
+        K::Spike => ("▲", 208),
+        K::Mod => ("×", 196),
+    }
 }
 
 /// `#rrggbb` → terminal color. truecolor terminals get the exact rgb; anything
@@ -2202,6 +2266,7 @@ mod wrap_tests {
             color: None,
             badges: Vec::new(),
             reply_to: None,
+            note: None,
             heat: 0.0,
         }
     }

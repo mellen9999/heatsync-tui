@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn synthetic_emote_is_transparent_outside_the_disc_and_opaque_inside() {
         let (rgba, w, _h, _) = &synthetic(1, 1, 16)[0];
-        let corner = (0 * w + 0) * 4 + 3;
-        let centre = ((8) * w + 8) * 4 + 3;
+        let corner = 3;
+        let centre = (8 * w + 8) * 4 + 3;
         assert_eq!(rgba[corner], 0, "corner should be fully transparent");
         assert_eq!(rgba[centre], 255, "centre should be fully opaque");
     }

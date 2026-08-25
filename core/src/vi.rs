@@ -313,9 +313,11 @@ mod tests {
 
     #[test]
     fn selection_covers_both_directions() {
-        let mut v = Vi::default();
-        v.cursor = 5;
-        v.visual = Some(2);
+        let mut v = Vi {
+            cursor: 5,
+            visual: Some(2),
+            ..Vi::default()
+        };
         assert_eq!(v.selection(), Some((2, 5)));
         assert!(v.selected(2) && v.selected(4) && v.selected(5));
         assert!(!v.selected(1) && !v.selected(6));
@@ -326,8 +328,10 @@ mod tests {
 
     #[test]
     fn no_selection_outside_visual_mode() {
-        let mut v = Vi::default();
-        v.cursor = 3;
+        let v = Vi {
+            cursor: 3,
+            ..Vi::default()
+        };
         assert_eq!(v.selection(), None);
         assert!(!v.selected(3));
     }
@@ -375,10 +379,12 @@ mod tests {
 
     #[test]
     fn clamp_survives_a_shrinking_ring() {
-        let mut v = Vi::default();
-        v.cursor = 90;
-        v.scroll = 80;
-        v.visual = Some(95);
+        let mut v = Vi {
+            cursor: 90,
+            scroll: 80,
+            visual: Some(95),
+            ..Vi::default()
+        };
         v.clamp(10); // switched to a channel with 11 messages
         assert_eq!((v.cursor, v.scroll, v.visual), (10, 10, Some(10)));
     }

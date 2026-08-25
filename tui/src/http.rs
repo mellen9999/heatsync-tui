@@ -153,6 +153,7 @@ pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_co
                 color: None,
                 badges: badges_from(r.badges.as_ref()),
                 reply_to: None,
+                note: None,
                 heat: 0.0,
             }
         })
@@ -282,19 +283,6 @@ pub fn admin_ncmec_backlog(token: &str) -> Option<i64> {
     admin_get::<NcmecPage>("/api/admin/ncmec-reports", token).map(|p| p.count)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::iso_from_unix;
-
-    #[test]
-    fn iso_conversion_hits_known_instants() {
-        assert_eq!(iso_from_unix(0), "1970-01-01T00:00:00Z");
-        assert_eq!(iso_from_unix(1_735_689_600), "2025-01-01T00:00:00Z");
-        assert_eq!(iso_from_unix(951_782_400), "2000-02-29T00:00:00Z"); // leap day
-        assert_eq!(iso_from_unix(1_787_697_045), "2026-08-25T22:30:45Z");
-    }
-}
-
 /// minimal percent-encoding for query values (alnum + a few safe chars pass).
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -307,4 +295,17 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iso_from_unix;
+
+    #[test]
+    fn iso_conversion_hits_known_instants() {
+        assert_eq!(iso_from_unix(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_from_unix(1_735_689_600), "2025-01-01T00:00:00Z");
+        assert_eq!(iso_from_unix(951_782_400), "2000-02-29T00:00:00Z"); // leap day
+        assert_eq!(iso_from_unix(1_787_697_045), "2026-08-25T22:30:45Z");
+    }
 }
