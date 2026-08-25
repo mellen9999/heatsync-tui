@@ -1227,7 +1227,9 @@ fn layout_message(
     mode: EmoteMode,
     maxw: u16,
 ) -> (Line<'static>, Vec<Place>) {
-    let text_hue = Color::Indexed(heatsync_core::heat::color(m.heat));
+    // message text is plain white — heat lives in the bar and tab numbers,
+    // never in the reading surface.
+    let text_hue = Color::Indexed(231);
     let user_color = m
         .color
         .as_deref()
