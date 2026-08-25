@@ -37,7 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 use ratatui_image::Image;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// chrome accent: white — active/selected is black-on-white, hint keys are
 /// bright white. color in the ui comes only from semantics (heat tiers, user
@@ -340,15 +340,28 @@ fn spawn_emote_fetch(tx: &Sender<(Platform, String, EmoteSet)>, platform: Platfo
     });
 }
 
-/// merge any emote sets that finished fetching into their channel columns.
+/// merge any emote sets that finished fetching into their channel columns, and
+/// prefetch images for the backlog those sets just made resolvable — messages
+/// that arrived before the set landed were scanned against an empty set.
 fn drain_emotes(app: &mut App) {
-    while let Ok((platform, name, set)) = app.emote_rx.try_recv() {
-        if let Some(i) = app
-            .channels
+    let App {
+        channels,
+        emotes,
+        store,
+        fb,
+        emote_rx,
+        ..
+    } = app;
+    while let Ok((platform, name, set)) = emote_rx.try_recv() {
+        if let Some(i) = channels
             .iter()
             .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
         {
-            app.emotes[i] = set;
+            emotes[i] = set;
+            let from = channels[i].messages.len().saturating_sub(60);
+            for m in channels[i].messages.iter().skip(from) {
+                request_stacks(store, fb, &emotes[i], &m.text);
+            }
         }
     }
 }
@@ -395,6 +408,14 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     let mut draw_cost = Duration::ZERO;
     loop {
         drain_emotes(&mut app);
+        // new chat lines and finished emote loads land on EVERY wake — at the
+        // animation cadence that's within one frame of arrival, never parked
+        // until the next data tick. the tick below keeps only the slow work
+        // (heat decay, the mock driver, the focused-channel prefetch sweep).
+        if !app.paused {
+            drain_feed(&mut app);
+        }
+        pump_loads(&mut app);
         // snapshot the animation clock + reset the per-draw blit budget, so every
         // emote in this frame is sampled at the same instant.
         if let Some(store) = &app.store {
@@ -434,7 +455,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
 
         if last.elapsed() >= tick {
             if !app.paused {
-                advance(&mut app);
+                tick_advance(&mut app);
             }
             last = Instant::now();
         }
@@ -778,9 +799,24 @@ fn send_focused(app: &mut App) -> Flow {
     Flow::Continue
 }
 
-/// pull new data into the channel buffers for this tick, and keep the emote
-/// image cache warm for what's on screen.
-fn advance(app: &mut App) -> bool {
+/// kick off image loads for every emote stack in `text` (idempotent — a key
+/// already cached or in flight is a no-op). the prefetch model: each incoming
+/// line is scanned ONCE as it arrives, plus a cheap focused-channel sweep on
+/// the tick — nothing rescans every channel's backlog anymore.
+fn request_stacks(store: &mut Option<EmoteStore>, fb: &Option<FbEmotes>, set: &EmoteSet, text: &str) {
+    if set.is_empty() {
+        return;
+    }
+    if let Some(s) = store {
+        each_stack(text, set, |k| s.request(k));
+    } else if let Some(f) = fb {
+        each_stack(text, set, |k| f.request(k));
+    }
+}
+
+/// drain the live feed into the channel buffers. runs on every event-loop wake,
+/// so a chat line shows on the very next frame instead of the next data tick.
+fn drain_feed(app: &mut App) {
     let App {
         channels,
         emotes,
@@ -790,77 +826,92 @@ fn advance(app: &mut App) -> bool {
         status,
         ..
     } = app;
+    let Feed::Live {
+        rx,
+        start,
+        connected,
+    } = feed
+    else {
+        return; // mock advances on the tick — it's a synthetic cadence
+    };
+    let now = start.elapsed().as_millis() as u64;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            ChatEvent::Line(l) => {
+                if let Some(i) = channels.iter().position(|c| {
+                    c.platform == l.platform && c.name.eq_ignore_ascii_case(&l.channel)
+                }) {
+                    // fetch starts the instant the line lands — by the time it
+                    // scrolls into view the image is usually already built.
+                    request_stacks(store, fb, &emotes[i], &l.content);
+                    channels[i].record(
+                        Message {
+                            user: l.user,
+                            text: l.content,
+                            color: l.color,
+                            heat: 0.0,
+                        },
+                        now,
+                    );
+                }
+            }
+            ChatEvent::Connected => *connected = true,
+            ChatEvent::Disconnected => *connected = false,
+            ChatEvent::Auth(ok) => {
+                *status = Some(if ok {
+                    "authenticated".into()
+                } else {
+                    "auth failed — check HEATSYNC_TOKEN".into()
+                });
+            }
+            ChatEvent::SendResult { ok, error } => {
+                if !ok {
+                    *status = Some(format!("send failed: {}", error.unwrap_or_default()));
+                }
+            }
+        }
+    }
+}
+
+/// merge finished emote loads into the cache (every wake — a built emote is on
+/// screen the next frame, never parked until the tick).
+fn pump_loads(app: &mut App) {
+    if let Some(store) = &mut app.store {
+        store.pump();
+    } else if let Some(fb) = &mut app.fb {
+        fb.pump();
+    }
+}
+
+/// the slow-cadence work: heat decay, the mock driver, and a prefetch sweep of
+/// the focused channel only (covers focus switches and cache-evicted emotes;
+/// arrival-time scans in drain_feed cover everything else).
+fn tick_advance(app: &mut App) {
+    let App {
+        channels,
+        emotes,
+        feed,
+        store,
+        fb,
+        focus,
+        ..
+    } = app;
     match feed {
         Feed::Mock(driver) => {
             driver.tick(channels);
         }
-        Feed::Live {
-            rx,
-            start,
-            connected,
-        } => {
+        Feed::Live { start, .. } => {
             let now = start.elapsed().as_millis() as u64;
-            while let Ok(ev) = rx.try_recv() {
-                match ev {
-                    ChatEvent::Line(l) => {
-                        if let Some(i) = channels.iter().position(|c| {
-                            c.platform == l.platform && c.name.eq_ignore_ascii_case(&l.channel)
-                        }) {
-                            channels[i].record(
-                                Message {
-                                    user: l.user,
-                                    text: l.content,
-                                    color: l.color,
-                                    heat: 0.0,
-                                },
-                                now,
-                            );
-                        }
-                    }
-                    ChatEvent::Connected => *connected = true,
-                    ChatEvent::Disconnected => *connected = false,
-                    ChatEvent::Auth(ok) => {
-                        *status = Some(if ok {
-                            "authenticated".into()
-                        } else {
-                            "auth failed — check HEATSYNC_TOKEN".into()
-                        });
-                    }
-                    ChatEvent::SendResult { ok, error } => {
-                        if !ok {
-                            *status = Some(format!("send failed: {}", error.unwrap_or_default()));
-                        }
-                    }
-                }
-            }
             for ch in channels.iter_mut() {
                 ch.cool(now);
             }
         }
     }
-    // request loads for emotes near the bottom of each channel (whichever tier
-    // is active), then drain finished loads. request() is idempotent.
-    let want_urls = |f: &mut dyn FnMut(&str)| {
-        for (ci, ch) in channels.iter().enumerate() {
-            let set = &emotes[ci];
-            if set.is_empty() {
-                continue;
-            }
-            let start = ch.messages.len().saturating_sub(60);
-            for m in ch.messages.iter().skip(start) {
-                each_stack(&m.text, set, |key| f(key));
-            }
+    if let Some(ch) = channels.get(*focus) {
+        let from = ch.messages.len().saturating_sub(60);
+        for m in ch.messages.iter().skip(from) {
+            request_stacks(store, fb, &emotes[*focus], &m.text);
         }
-    };
-    if let Some(store) = store {
-        want_urls(&mut |u| store.request(u));
-        store.pump()
-    } else if let Some(fb) = fb {
-        want_urls(&mut |u| fb.request(u));
-        fb.pump();
-        false
-    } else {
-        false
     }
 }
 
@@ -995,26 +1046,25 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let cap = body.height as usize;
     // plan visible messages newest-first, honouring per-message height. chat
     // always follows live — there is no scrollback and no message cursor.
-    let mut plan: Vec<(&Message, usize)> = Vec::new();
+    // one layout pass per message: the same walk that builds the spans also
+    // reports whether the row holds an image (its height) — messages are never
+    // tokenized twice per frame.
+    let mut plan: Vec<(Line, Vec<Place>, usize)> = Vec::new();
     let mut used = 0usize;
     for m in ch.messages.iter().rev() {
-        let h = if has_emote(m, set, mode) {
-            EMOTE_H as usize
-        } else {
-            1
-        };
+        let (line, places, has_stack) = layout_message(m, set, mode, body.width);
+        let h = if has_stack { EMOTE_H as usize } else { 1 };
         if used + h > cap {
             break;
         }
         used += h;
-        plan.push((m, h));
+        plan.push((line, places, h));
     }
     plan.reverse();
 
     let mut y = body.y + (cap - used) as u16; // bottom-anchor
-    for (m, h) in plan {
+    for (line, places, h) in plan {
         let text_row = y + (h as u16 - 1);
-        let (line, places) = layout_message(m, set, mode, body.width);
         f.render_widget(
             Paragraph::new(line),
             Rect {
@@ -1165,21 +1215,6 @@ fn each_stack(text: &str, set: &EmoteSet, mut f: impl FnMut(&str)) {
     flush(&mut urls, &mut f);
 }
 
-/// does this message contain at least one loaded (ready-to-draw) emote stack?
-/// does this message contain an emote we will draw as an image? true as soon as
-/// the NAME resolves in the set — before the image has finished loading — so the
-/// row is already EMOTE_H tall when the picture arrives. reserving the space up
-/// front is what stops the whole chat from re-laying-out (and every sixel below
-/// from being re-emitted) each time an emote lands.
-fn has_emote(m: &Message, set: &EmoteSet, mode: EmoteMode) -> bool {
-    if mode.square_cells().is_none() {
-        return false; // text tier: emote names are just words
-    }
-    let mut any = false;
-    each_stack(&m.text, set, |_| any = true);
-    any
-}
-
 /// truncate a label to `w` display columns (approximate; ASCII-dominant labels).
 fn fit(s: String, w: u16) -> String {
     let w = w as usize;
@@ -1194,10 +1229,10 @@ fn fit(s: String, w: u16) -> String {
 /// occupy the same footprint the image will, or the line shifts when it loads.
 fn fit_exact(s: &str, w: u16) -> String {
     let w = w as usize;
-    let mut out = String::new();
+    let mut out = String::with_capacity(w);
     let mut used = 0usize;
     for c in s.chars() {
-        let cw = UnicodeWidthStr::width(c.to_string().as_str());
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
         if used + cw > w {
             break;
         }
@@ -1220,13 +1255,15 @@ struct Place {
 /// lay a message onto one row: the text line (with blank cells where ready emote
 /// stacks go) plus the reserved emote slots. a base emote absorbs any following
 /// zero-width (overlay) emotes into one stack. an unloaded/text-mode emote falls
-/// back to its name in brand color.
+/// back to its name. the third return is whether the row reserves image space —
+/// true from the moment the NAME resolves (loading placeholder included), so the
+/// row is already EMOTE_H tall when the picture arrives and nothing reflows.
 fn layout_message(
     m: &Message,
     set: &EmoteSet,
     mode: EmoteMode,
     maxw: u16,
-) -> (Line<'static>, Vec<Place>) {
+) -> (Line<'static>, Vec<Place>, bool) {
     // message text is plain white — heat lives in the bar and tab numbers,
     // never in the reading surface.
     let text_hue = Color::Indexed(231);
@@ -1241,6 +1278,7 @@ fn layout_message(
     ];
     let mut col = UnicodeWidthStr::width(m.user.as_str()) as u16 + 2;
     let mut places = Vec::new();
+    let mut has_stack = false;
 
     let toks = tokenize(&m.text, set);
     let mut i = 0;
@@ -1279,6 +1317,7 @@ fn layout_message(
                 }
                 .filter(|(w, _)| col + w <= maxw && !urls.is_empty());
                 if let Some((w, ready)) = w {
+                    has_stack = true;
                     if ready {
                         places.push(Place { col, w, key });
                         spans.push(Span::raw(" ".repeat(w as usize)));
@@ -1306,7 +1345,7 @@ fn layout_message(
             }
         }
     }
-    (Line::from(spans), places)
+    (Line::from(spans), places, has_stack)
 }
 
 /// `#rrggbb` → nearest-ish terminal color (truecolor if the term supports it).
