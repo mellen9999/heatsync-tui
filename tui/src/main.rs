@@ -771,28 +771,43 @@ fn open_channel(app: &mut App, tok: &str) {
     let Some((platform, name)) = subs.first().cloned() else {
         return;
     };
+    // subscribe one source and start its fetches (shared by open and upgrade).
+    let start_sub = |app: &App, p: Platform, n: &str| {
+        if let Some(out) = &app.out {
+            let _ = out.send(net::Outbound::Join {
+                platform: p,
+                channel: n.to_string(),
+            });
+        }
+        if p != Platform::Youtube {
+            spawn_emote_fetch(&app.emote_tx, p, n.to_string());
+            spawn_history(&app.hist_tx, p, n.to_string());
+        }
+    };
+    // a tab already carrying the primary sub upgrades in place: any sources it
+    // doesn't have yet merge into it — `kick:a` open, then `kick:a+yt:x`
+    // typed, and the existing tab becomes the merge instead of a dead focus.
     if let Some(i) = app
         .channels
         .iter()
-        .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
+        .position(|c| c.matches(platform, &name))
     {
-        app.focus = i; // already open → just switch to it
+        let fresh: Vec<Sub> = subs
+            .into_iter()
+            .filter(|(p, n)| !app.channels[i].matches(*p, n))
+            .collect();
+        for (p, n) in &fresh {
+            start_sub(app, *p, n);
+        }
+        app.channels[i].extra.extend(fresh);
+        app.focus = i;
+        save_state(app);
         return;
     }
     let mut ch = Channel::new(&name, platform, 200);
     ch.extra = subs[1..].to_vec();
     for (p, n) in ch.subs() {
-        let n = n.to_string();
-        if let Some(out) = &app.out {
-            let _ = out.send(net::Outbound::Join {
-                platform: p,
-                channel: n.clone(),
-            });
-        }
-        if p != Platform::Youtube {
-            spawn_emote_fetch(&app.emote_tx, p, n.clone());
-            spawn_history(&app.hist_tx, p, n);
-        }
+        start_sub(app, p, n);
     }
     app.channels.push(ch);
     app.emotes.push(EmoteSet::new()); // populated async — see spawn_emote_fetch
