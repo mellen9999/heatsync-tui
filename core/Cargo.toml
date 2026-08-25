@@ -8,6 +8,7 @@ repository = "https://github.com/mellen9999/heatsync-tui"
 homepage = "https://heatsync.org"
 keywords = ["twitch", "kick", "chat", "streaming", "emotes"]
 categories = ["api-bindings", "network-programming"]
+readme = "README.md"
 
 # the brain: protocol types, heat ramp, emote resolution, ws parsing.
 # ZERO terminal/async/io deps — TUI and CLI are thin faces over this.

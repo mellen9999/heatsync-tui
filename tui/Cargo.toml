@@ -8,6 +8,7 @@ repository = "https://github.com/mellen9999/heatsync-tui"
 homepage = "https://heatsync.org"
 keywords = ["twitch", "kick", "chat", "streaming", "tui"]
 categories = ["command-line-utilities"]
+readme = "README.md"
 
 # The binary is `heatsync-tui`, not `heatsync`. An unrelated MIT project of the
 # same name ships `heatsync-bin` on the AUR, and it declares both
