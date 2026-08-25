@@ -55,7 +55,10 @@ mod tests {
     fn join_takes_a_channel() {
         assert_eq!(parse("/join hot"), Cmd::Join("hot".into()));
         assert_eq!(parse("/j xqc"), Cmd::Join("xqc".into()));
-        assert_eq!(parse("/join kick:trainwreckstv"), Cmd::Join("kick:trainwreckstv".into()));
+        assert_eq!(
+            parse("/join kick:trainwreckstv"),
+            Cmd::Join("kick:trainwreckstv".into())
+        );
         assert_eq!(parse("  /join   hot  "), Cmd::Join("hot".into()));
     }
 
@@ -99,7 +102,11 @@ mod tests {
             "/w someguy hello",
             "/announce hello chat",
         ] {
-            assert_eq!(parse(line), Cmd::Send(line.into()), "{line} must reach the platform");
+            assert_eq!(
+                parse(line),
+                Cmd::Send(line.into()),
+                "{line} must reach the platform"
+            );
         }
     }
 

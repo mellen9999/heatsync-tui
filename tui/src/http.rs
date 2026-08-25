@@ -32,7 +32,10 @@ fn agent() -> ureq::Agent {
 
 /// channel emote set (7tv/bttv/ffz precedence, deduped server-side).
 pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
-    let url = format!("{BASE}/api/channel/{channel}/emotes?platform={}", platform_q(platform));
+    let url = format!(
+        "{BASE}/api/channel/{channel}/emotes?platform={}",
+        platform_q(platform)
+    );
     let resp: EmoteSetResponse = agent().get(&url).call().ok()?.into_json().ok()?;
     Some(EmoteSet::from_list(resp.emotes))
 }
@@ -93,9 +96,8 @@ pub fn search(q: &str, channel: Option<&str>, limit: u32) -> Option<ArchivePage>
 
 /// a channel's log for a UTC date (YYYY-MM-DD).
 pub fn channel_log(channel: &str, from: &str, to: &str, limit: u32) -> Option<ArchivePage> {
-    let url = format!(
-        "{BASE}/api/archive/channel/{channel}/messages?from={from}&to={to}&limit={limit}"
-    );
+    let url =
+        format!("{BASE}/api/archive/channel/{channel}/messages?from={from}&to={to}&limit={limit}");
     agent().get(&url).call().ok()?.into_json().ok()
 }
 

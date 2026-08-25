@@ -25,9 +25,19 @@ pub type Sub = (Platform, String);
 
 /// outbound requests from the app to the WS thread.
 pub enum Outbound {
-    Chat { platform: Platform, channel: String, text: String },
-    Join { platform: Platform, channel: String },
-    Part { platform: Platform, channel: String },
+    Chat {
+        platform: Platform,
+        channel: String,
+        text: String,
+    },
+    Join {
+        platform: Platform,
+        channel: String,
+    },
+    Part {
+        platform: Platform,
+        channel: String,
+    },
 }
 
 /// the app's handle for sending outbound frames.
@@ -95,7 +105,10 @@ fn session(
         }
     }
     for (platform, channel) in subs.iter() {
-        if ws.send(WsMsg::Text(proto::join(*platform, channel).into())).is_err() {
+        if ws
+            .send(WsMsg::Text(proto::join(*platform, channel).into()))
+            .is_err()
+        {
             return SessionEnd::Dropped;
         }
     }
@@ -141,12 +154,19 @@ fn session(
         // drain queued outbound requests.
         while let Ok(o) = out.try_recv() {
             let frame = match o {
-                Outbound::Chat { platform: Platform::Kick, channel, text } => {
+                Outbound::Chat {
+                    platform: Platform::Kick,
+                    channel,
+                    text,
+                } => {
                     *req += 1;
                     proto::send_kick(&channel, &text, *req)
                 }
                 // twitch has no send path — silently drop.
-                Outbound::Chat { platform: Platform::Twitch, .. } => continue,
+                Outbound::Chat {
+                    platform: Platform::Twitch,
+                    ..
+                } => continue,
                 Outbound::Join { platform, channel } => {
                     if !subs.iter().any(|(p, c)| *p == platform && c == &channel) {
                         subs.push((platform, channel.clone()));

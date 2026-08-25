@@ -63,7 +63,9 @@ fn session(user: &str, oauth: &str, rx: &Receiver<Send>) -> End {
         return End::Dropped;
     }
     if ws
-        .send(WsMsg::Text(format!("NICK {}\r\n", user.to_lowercase()).into()))
+        .send(WsMsg::Text(
+            format!("NICK {}\r\n", user.to_lowercase()).into(),
+        ))
         .is_err()
     {
         return End::Dropped;
@@ -97,7 +99,9 @@ fn session(user: &str, oauth: &str, rx: &Receiver<Send>) -> End {
                 Ok((channel, text)) => {
                     let chan = channel.to_lowercase();
                     if joined.insert(chan.clone())
-                        && ws.send(WsMsg::Text(format!("JOIN #{chan}\r\n").into())).is_err()
+                        && ws
+                            .send(WsMsg::Text(format!("JOIN #{chan}\r\n").into()))
+                            .is_err()
                     {
                         return End::Dropped;
                     }

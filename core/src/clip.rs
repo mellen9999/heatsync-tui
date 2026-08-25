@@ -9,7 +9,10 @@ use std::process::{Command, Stdio};
 pub fn copy(text: &str) -> Result<&'static str, String> {
     // wayland, then X — whichever tool is present. a missing binary is not an
     // error, it just means we try the next path.
-    for (bin, args) in [("wl-copy", &[][..]), ("xclip", &["-selection", "clipboard"])] {
+    for (bin, args) in [
+        ("wl-copy", &[][..]),
+        ("xclip", &["-selection", "clipboard"]),
+    ] {
         match pipe_to(bin, args, text) {
             Ok(true) => return Ok(bin),
             Ok(false) => continue, // not installed
@@ -54,7 +57,9 @@ fn osc52(text: &str) -> Result<(), String> {
         seq
     };
     let mut stdout = std::io::stdout();
-    stdout.write_all(out.as_bytes()).map_err(|e| e.to_string())?;
+    stdout
+        .write_all(out.as_bytes())
+        .map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())
 }
 
@@ -68,8 +73,16 @@ fn b64(data: &[u8]) -> String {
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }

@@ -111,7 +111,9 @@ pub fn hot(args: &[String]) -> std::io::Result<()> {
 pub fn login() -> std::io::Result<()> {
     match config::ensure_token_file() {
         Some(p) => {
-            println!("twitch sending — sends go DIRECT to twitch (like chatterino), not via heatsync:");
+            println!(
+                "twitch sending — sends go DIRECT to twitch (like chatterino), not via heatsync:"
+            );
             println!("  1. get a twitch oauth token with the 'chat:edit' scope");
             println!("     e.g. https://twitchtokengenerator.com  (pick a bot/chat token)");
             println!("  2. edit {}", p.display());
@@ -152,7 +154,10 @@ pub fn status() -> std::io::Result<()> {
                 "  cpu {:>5.1}%   ram {:>5.1}%   disk {:>5.1}%   errors/min {:.1}",
                 h.cpu_usage, h.ram_usage, h.disk_usage, h.error_rate
             );
-            println!("  ws conns: {}   msgs/min: {:.0}", h.ws_connections, h.messages_per_minute);
+            println!(
+                "  ws conns: {}   msgs/min: {:.0}",
+                h.ws_connections, h.messages_per_minute
+            );
         }
         None => {
             println!("  health: unreachable (auth expired? check ~/.config/heatsync/token)");
@@ -161,16 +166,25 @@ pub fn status() -> std::io::Result<()> {
     }
     match mod_queue {
         Some(n) => println!("  mod queue:    {n:>4}  pending"),
-        None => { println!("  mod queue:    ?     (request failed)"); ok = false; }
+        None => {
+            println!("  mod queue:    ?     (request failed)");
+            ok = false;
+        }
     }
     match reports {
         Some(n) => println!("  reports:      {n:>4}  pending"),
-        None => { println!("  reports:      ?     (request failed)"); ok = false; }
+        None => {
+            println!("  reports:      ?     (request failed)");
+            ok = false;
+        }
     }
     match ncmec {
         Some(n) if n > 0 => println!("  ncmec:        {n:>4}  STUCK — needs a look"),
         Some(_) => println!("  ncmec:           0  clear"),
-        None => { println!("  ncmec:        ?     (request failed)"); ok = false; }
+        None => {
+            println!("  ncmec:        ?     (request failed)");
+            ok = false;
+        }
     }
     if !ok {
         std::process::exit(1);
@@ -198,7 +212,13 @@ pub fn probe(args: &[String]) -> std::io::Result<()> {
     while let Some(rem) = deadline.checked_duration_since(Instant::now()) {
         match rx.recv_timeout(rem) {
             Ok(ChatEvent::Line(l)) => {
-                println!("[{}/{}] {}: {}", plat_tag(l.platform), l.channel, l.user, l.content);
+                println!(
+                    "[{}/{}] {}: {}",
+                    plat_tag(l.platform),
+                    l.channel,
+                    l.user,
+                    l.content
+                );
                 n += 1;
             }
             Ok(ChatEvent::Connected) => eprintln!("· connected"),
@@ -302,19 +322,31 @@ pub fn render_test(args: &[String]) -> std::io::Result<()> {
         eprintln!(
             "  sixel bytes → /tmp/emote.six ({} bytes){}",
             first.len(),
-            if wrapped { " [tmux-wrapped — rerun with `env -u TMUX`]" } else { "" }
+            if wrapped {
+                " [tmux-wrapped — rerun with `env -u TMUX`]"
+            } else {
+                ""
+            }
         );
     }
     if take > 1 {
         let px = (w_cells as u32 * cw as u32, block_h);
+        eprintln!("  pixels changing between consecutive frames (lower = less shimmer):");
         eprintln!(
-            "  pixels changing between consecutive frames (lower = less shimmer):"
+            "    per-frame palette (before): {:.1}%",
+            pixel_churn(&raw, px) * 100.0
         );
-        eprintln!("    per-frame palette (before): {:.1}%", pixel_churn(&raw, px) * 100.0);
-        eprintln!("    shared palette   (after):  {:.1}%", pixel_churn(&stable, px) * 100.0);
+        eprintln!(
+            "    shared palette   (after):  {:.1}%",
+            pixel_churn(&stable, px) * 100.0
+        );
         eprintln!(
             "    source frames actually differ by: {:.1}% (the real motion)",
-            source_churn(&canvases_src(&frames[..take], w_cells as u32 * cw as u32, block_h)) * 100.0
+            source_churn(&canvases_src(
+                &frames[..take],
+                w_cells as u32 * cw as u32,
+                block_h
+            )) * 100.0
         );
     }
     Ok(())
@@ -340,7 +372,11 @@ fn source_churn(frames: &[image::RgbaImage]) -> f64 {
     let mut total = 0.0;
     for w in frames.windows(2) {
         let n = w[0].pixels().len().max(1);
-        let diff = w[0].pixels().zip(w[1].pixels()).filter(|(a, b)| a != b).count();
+        let diff = w[0]
+            .pixels()
+            .zip(w[1].pixels())
+            .filter(|(a, b)| a != b)
+            .count();
         total += diff as f64 / n as f64;
     }
     total / (frames.len() - 1) as f64
@@ -379,7 +415,9 @@ fn sixel_decode(data: &str, w: u32, h: u32) -> Vec<u32> {
     let num = |b: &[char], i: &mut usize| -> u32 {
         let mut n = 0u32;
         while *i < b.len() && b[*i].is_ascii_digit() {
-            n = n.saturating_mul(10).saturating_add(b[*i] as u32 - '0' as u32);
+            n = n
+                .saturating_mul(10)
+                .saturating_add(b[*i] as u32 - '0' as u32);
             *i += 1;
         }
         n
@@ -410,7 +448,15 @@ fn sixel_decode(data: &str, w: u32, h: u32) -> Vec<u32> {
                     let ch = b[i];
                     i += 1;
                     for _ in 0..n {
-                        put(&mut out, w, h, x, band, ch, *palette.get(&color).unwrap_or(&0));
+                        put(
+                            &mut out,
+                            w,
+                            h,
+                            x,
+                            band,
+                            ch,
+                            *palette.get(&color).unwrap_or(&0),
+                        );
                         x += 1;
                     }
                 }
@@ -431,7 +477,15 @@ fn sixel_decode(data: &str, w: u32, h: u32) -> Vec<u32> {
                 }
             }
             c if ('?'..='~').contains(&c) => {
-                put(&mut out, w, h, x, band, c, *palette.get(&color).unwrap_or(&0));
+                put(
+                    &mut out,
+                    w,
+                    h,
+                    x,
+                    band,
+                    c,
+                    *palette.get(&color).unwrap_or(&0),
+                );
                 x += 1;
                 i += 1;
             }
@@ -456,7 +510,11 @@ fn put(out: &mut [u32], w: u32, h: u32, x: u32, band: u32, ch: char, rgb: u32) {
     }
 }
 
-fn encode_all(picker: &ratatui_image::picker::Picker, canvases: &[image::RgbaImage], w_cells: u16) -> Vec<String> {
+fn encode_all(
+    picker: &ratatui_image::picker::Picker,
+    canvases: &[image::RgbaImage],
+    w_cells: u16,
+) -> Vec<String> {
     let size = ratatui::layout::Rect::new(0, 0, w_cells, crate::emote::render::EMOTE_H);
     canvases
         .iter()
@@ -473,17 +531,23 @@ fn encode_all(picker: &ratatui_image::picker::Picker, canvases: &[image::RgbaIma
         .collect()
 }
 
-
 /// `heatsync diag` — console/graphics diagnostic. no network, no TUI. prints
 /// every input the emote-tier decision depends on, says which tier it would
 /// pick and WHY the others were rejected, then (on a usable console) paints a
 /// test rectangle straight to /dev/fb0 so scanout can be confirmed by eye.
 pub fn diag(_args: &[String]) -> std::io::Result<()> {
     let env = |k: &str| std::env::var(k).unwrap_or_else(|_| "<unset>".into());
-    println!("TERM={}  TMUX={}  WAYLAND_DISPLAY={}  DISPLAY={}",
+    println!(
+        "TERM={}  TMUX={}  WAYLAND_DISPLAY={}  DISPLAY={}",
         env("TERM"),
-        if std::env::var_os("TMUX").is_some() { "set" } else { "<unset>" },
-        env("WAYLAND_DISPLAY"), env("DISPLAY"));
+        if std::env::var_os("TMUX").is_some() {
+            "set"
+        } else {
+            "<unset>"
+        },
+        env("WAYLAND_DISPLAY"),
+        env("DISPLAY")
+    );
 
     let (cols, rows) = match crossterm::terminal::size() {
         Ok((c, r)) => {
@@ -536,17 +600,41 @@ pub fn diag(_args: &[String]) -> std::io::Result<()> {
             Ok(fb) => {
                 let v = fb.var_screen_info.clone();
                 let f = fb.fix_screen_info.clone();
-                println!("fb0: {}x{} bpp={} line_length={} smem_len={} xoff={} yoff={}",
-                    v.xres, v.yres, v.bits_per_pixel, f.line_length, f.smem_len, v.xoffset, v.yoffset);
-                println!("fb0 bitfields: r=({},{}) g=({},{}) b=({},{})",
-                    v.red.offset, v.red.length, v.green.offset, v.green.length,
-                    v.blue.offset, v.blue.length);
+                println!(
+                    "fb0: {}x{} bpp={} line_length={} smem_len={} xoff={} yoff={}",
+                    v.xres,
+                    v.yres,
+                    v.bits_per_pixel,
+                    f.line_length,
+                    f.smem_len,
+                    v.xoffset,
+                    v.yoffset
+                );
+                println!(
+                    "fb0 bitfields: r=({},{}) g=({},{}) b=({},{})",
+                    v.red.offset,
+                    v.red.length,
+                    v.green.offset,
+                    v.green.length,
+                    v.blue.offset,
+                    v.blue.length
+                );
                 println!("fb0 mmap len = {} bytes", fb.frame.len());
                 if cols > 0 && rows > 0 {
-                    println!("cell = {}x{} px", (v.xres / cols as u32).max(1), (v.yres / rows as u32).max(1));
+                    println!(
+                        "cell = {}x{} px",
+                        (v.xres / cols as u32).max(1),
+                        (v.yres / rows as u32).max(1)
+                    );
                 }
                 if reasons.is_empty() {
-                    paint_test(fb, v.xres, v.yres, f.line_length, (v.bits_per_pixel / 8).max(1));
+                    paint_test(
+                        fb,
+                        v.xres,
+                        v.yres,
+                        f.line_length,
+                        (v.bits_per_pixel / 8).max(1),
+                    );
                 }
             }
         }
@@ -577,7 +665,11 @@ fn paint_test(mut fb: framebuffer::Framebuffer, xres: u32, yres: u32, line_len: 
                 continue;
             }
             // heatsync orange #ff8700, written little-endian for xrgb8888.
-            for (i, b) in [0x00u8, 0x87, 0xff, 0x00].iter().take(bpp as usize).enumerate() {
+            for (i, b) in [0x00u8, 0x87, 0xff, 0x00]
+                .iter()
+                .take(bpp as usize)
+                .enumerate()
+            {
                 buf[off + i] = *b;
             }
         }

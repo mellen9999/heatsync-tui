@@ -31,7 +31,10 @@ impl FbEmotes {
         #[cfg(target_os = "linux")]
         {
             let inner = linux::Inner::open(_cols, _rows)?;
-            Some(FbEmotes { inner, pending: RefCell::new(Vec::new()) })
+            Some(FbEmotes {
+                inner,
+                pending: RefCell::new(Vec::new()),
+            })
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -86,9 +89,11 @@ impl FbEmotes {
 
     /// queue an emote to be painted at a cell position (called during layout).
     pub fn push(&self, col: u16, row: u16, url: &str) {
-        self.pending
-            .borrow_mut()
-            .push(Placement { col, row, url: url.to_string() });
+        self.pending.borrow_mut().push(Placement {
+            col,
+            row,
+            url: url.to_string(),
+        });
     }
 
     /// paint all queued emotes to the framebuffer, then clear the queue. call
@@ -241,7 +246,13 @@ mod linux {
                 return;
             }
             cache.insert(url.to_string(), Entry::Loading);
-            if self.jobs.send(Job { url: url.to_string() }).is_err() {
+            if self
+                .jobs
+                .send(Job {
+                    url: url.to_string(),
+                })
+                .is_err()
+            {
                 cache.insert(url.to_string(), Entry::Failed);
             }
         }
@@ -331,8 +342,8 @@ mod linux {
                 let [r, g, b, a] = pixel.0;
                 let (r, g, b) = if a < 128 { (0, 0, 0) } else { (r, g, b) };
                 let val = pack(&self.fmt, r, g, b);
-                let off = (y + self.fmt.yoff) * self.fmt.line_len
-                    + (x + self.fmt.xoff) * self.fmt.bpp;
+                let off =
+                    (y + self.fmt.yoff) * self.fmt.line_len + (x + self.fmt.xoff) * self.fmt.bpp;
                 if off + self.fmt.bpp > buf.len() {
                     continue;
                 }
@@ -400,8 +411,13 @@ mod linux {
     }
 
     fn tmux(args: &[&str]) -> Option<String> {
-        let out = std::process::Command::new("tmux").args(args).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        let out = std::process::Command::new("tmux")
+            .args(args)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     /// pack an 8-bit rgb triple into the framebuffer's native pixel per its
@@ -455,12 +471,19 @@ mod linux {
         for (canvas, delay_ms) in frames {
             let delay_ms = delay_ms.max(MIN_DELAY_MS);
             total_ms += delay_ms as u64;
-            out.push(FbFrame { rgba: fit_center(&canvas, tw, th), delay_ms });
+            out.push(FbFrame {
+                rgba: fit_center(&canvas, tw, th),
+                delay_ms,
+            });
         }
         if out.is_empty() {
             None
         } else {
-            Some(Anim { frames: out, w_cells, total_ms })
+            Some(Anim {
+                frames: out,
+                w_cells,
+                total_ms,
+            })
         }
     }
 }

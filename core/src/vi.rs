@@ -83,7 +83,9 @@ impl Vi {
         if d == 0 && self.count == 0 {
             return false;
         }
-        self.count = (self.count.saturating_mul(10)).saturating_add(d as usize).min(1_000_000);
+        self.count = (self.count.saturating_mul(10))
+            .saturating_add(d as usize)
+            .min(1_000_000);
         true
     }
 
@@ -116,7 +118,8 @@ impl Vi {
 
     /// is this message inside the visual selection?
     pub fn selected(&self, idx: usize) -> bool {
-        self.selection().is_some_and(|(lo, hi)| (lo..=hi).contains(&idx))
+        self.selection()
+            .is_some_and(|(lo, hi)| (lo..=hi).contains(&idx))
     }
 
     /// pull the viewport so the cursor is on screen. `count` is what the last
@@ -159,7 +162,12 @@ impl Vi {
 /// find the next match from `from`, exclusive, wrapping once (vi's `wrapscan`).
 /// `is_match(i)` tests the message at index-back-from-newest `i`. returns the
 /// index, or None if nothing in the ring matches.
-pub fn search(len: usize, from: usize, dir: Dir, is_match: impl Fn(usize) -> bool) -> Option<usize> {
+pub fn search(
+    len: usize,
+    from: usize,
+    dir: Dir,
+    is_match: impl Fn(usize) -> bool,
+) -> Option<usize> {
     if len == 0 {
         return None;
     }
@@ -282,7 +290,10 @@ mod tests {
     fn live_view_keeps_following_when_messages_arrive() {
         let mut v = vi_with(10);
         v.absorb_new(5, 500);
-        assert!(v.following(), "at the bottom, new chat scrolls in as normal");
+        assert!(
+            v.following(),
+            "at the bottom, new chat scrolls in as normal"
+        );
         assert_eq!(v.cursor, 0);
     }
 
@@ -348,7 +359,11 @@ mod tests {
     #[test]
     fn search_finds_the_cursor_message_only_after_a_full_lap() {
         let hit = |i: usize| i == 4;
-        assert_eq!(search(10, 4, Dir::Fwd, hit), Some(4), "wraps all the way round");
+        assert_eq!(
+            search(10, 4, Dir::Fwd, hit),
+            Some(4),
+            "wraps all the way round"
+        );
         assert_eq!(search(10, 3, Dir::Fwd, hit), Some(4));
     }
 

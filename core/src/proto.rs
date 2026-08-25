@@ -25,7 +25,10 @@ pub enum Event {
     /// authentication outcome (true = ok).
     Auth(bool),
     /// result of an outbound send: ok, or an error reason.
-    SendResult { ok: bool, error: Option<String> },
+    SendResult {
+        ok: bool,
+        error: Option<String>,
+    },
     Pong,
     Ignore,
 }
@@ -64,7 +67,10 @@ pub fn parse(raw: &str) -> Event {
         "authentication_failed" => Event::Auth(false),
         "chat:send_kick_result" | "chat:send_youtube_result" => Event::SendResult {
             ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false),
-            error: v.get("error").and_then(Value::as_str).map(|s| s.to_string()),
+            error: v
+                .get("error")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string()),
         },
         "pong" => Event::Pong,
         _ => Event::Ignore,
@@ -90,10 +96,7 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
         .and_then(Value::as_str)
         .filter(|s| s.starts_with('#') && (s.len() == 7 || s.len() == 4))
         .map(|s| s.to_string());
-    let channel = channel
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let channel = channel.and_then(Value::as_str).unwrap_or("").to_string();
     Some(ChatLine {
         platform,
         channel,
@@ -209,7 +212,10 @@ mod tests {
 
     #[test]
     fn join_frames_are_correct() {
-        assert_eq!(join(Platform::Twitch, "xqc"), r#"{"channel":"xqc","type":"irc:join"}"#);
+        assert_eq!(
+            join(Platform::Twitch, "xqc"),
+            r#"{"channel":"xqc","type":"irc:join"}"#
+        );
         assert!(join(Platform::Kick, "x").contains("channel:join"));
     }
 }

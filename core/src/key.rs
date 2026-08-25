@@ -39,10 +39,26 @@ pub struct KeyModifiers {
 }
 
 impl KeyModifiers {
-    pub const NONE: Self = Self { ctrl: false, alt: false, shift: false };
-    pub const CONTROL: Self = Self { ctrl: true, alt: false, shift: false };
-    pub const ALT: Self = Self { ctrl: false, alt: true, shift: false };
-    pub const SHIFT: Self = Self { ctrl: false, alt: false, shift: true };
+    pub const NONE: Self = Self {
+        ctrl: false,
+        alt: false,
+        shift: false,
+    };
+    pub const CONTROL: Self = Self {
+        ctrl: true,
+        alt: false,
+        shift: false,
+    };
+    pub const ALT: Self = Self {
+        ctrl: false,
+        alt: true,
+        shift: false,
+    };
+    pub const SHIFT: Self = Self {
+        ctrl: false,
+        alt: false,
+        shift: true,
+    };
 
     pub fn contains(self, other: Self) -> bool {
         (!other.ctrl || self.ctrl) && (!other.alt || self.alt) && (!other.shift || self.shift)
@@ -63,11 +79,17 @@ impl KeyEvent {
 
     /// An unmodified keystroke — the common case in tests and in plain typing.
     pub fn bare(code: KeyCode) -> Self {
-        Self { code, modifiers: KeyModifiers::NONE }
+        Self {
+            code,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     pub fn ctrl(code: KeyCode) -> Self {
-        Self { code, modifiers: KeyModifiers::CONTROL }
+        Self {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+        }
     }
 }
 
@@ -84,7 +106,11 @@ mod tests {
 
     #[test]
     fn contains_asks_for_a_subset_not_equality() {
-        let ctrl_shift = KeyModifiers { ctrl: true, alt: false, shift: true };
+        let ctrl_shift = KeyModifiers {
+            ctrl: true,
+            alt: false,
+            shift: true,
+        };
         assert!(ctrl_shift.contains(KeyModifiers::CONTROL));
         assert!(ctrl_shift.contains(KeyModifiers::SHIFT));
         assert!(!ctrl_shift.contains(KeyModifiers::ALT));

@@ -113,7 +113,9 @@ pub fn load_auth() -> Auth {
     let mut user = std::env::var("TWITCH_USER").ok().filter(|s| !s.is_empty());
     let mut oauth = std::env::var("TWITCH_OAUTH").ok().filter(|s| !s.is_empty());
     let mut kick = std::env::var("KICK_TOKEN").ok().filter(|s| !s.is_empty());
-    let mut admin = std::env::var("HEATSYNC_ADMIN_TOKEN").ok().filter(|s| !s.is_empty());
+    let mut admin = std::env::var("HEATSYNC_ADMIN_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
     if let Some(p) = token_path() {
         if let Ok(text) = fs::read_to_string(&p) {
             for line in text.lines() {
@@ -130,8 +132,17 @@ pub fn load_auth() -> Auth {
             }
         }
     }
-    let oauth = oauth.map(|o| o.trim_start_matches("oauth:").trim_start_matches('#').to_string());
-    Auth { twitch_user: user, twitch_oauth: oauth, kick_token: kick, admin_token: admin }
+    let oauth = oauth.map(|o| {
+        o.trim_start_matches("oauth:")
+            .trim_start_matches('#')
+            .to_string()
+    });
+    Auth {
+        twitch_user: user,
+        twitch_oauth: oauth,
+        kick_token: kick,
+        admin_token: admin,
+    }
 }
 
 /// persist a `kick_token=` line into the token file, preserving other keys.
@@ -157,7 +168,10 @@ pub fn save_kick_token(token: &str) {
 }
 
 pub fn load() -> Config {
-    let mut cfg = Config { tab_pos: TabPos::Top, channels: Vec::new() };
+    let mut cfg = Config {
+        tab_pos: TabPos::Top,
+        channels: Vec::new(),
+    };
     if let Some(p) = path() {
         if let Ok(text) = fs::read_to_string(&p) {
             for line in text.lines() {

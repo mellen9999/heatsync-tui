@@ -189,7 +189,13 @@ impl EmoteStore {
         }
         self.cache.insert(key.to_string(), Entry::Loading);
         // if the loader thread died the send fails — mark failed, fall to text.
-        if self.jobs.send(Job { key: key.to_string() }).is_err() {
+        if self
+            .jobs
+            .send(Job {
+                key: key.to_string(),
+            })
+            .is_err()
+        {
             self.cache.insert(key.to_string(), Entry::Failed);
         }
     }
@@ -432,14 +438,23 @@ pub(crate) fn fit_center(src: &RgbaImage, tw: u32, th: u32) -> RgbaImage {
     // Lanczos3 for downscales (crisp, and — unlike Nearest — stable frame to
     // frame, so a moving edge doesn't pop pixels on and off); Triangle when
     // enlarging, which stays smooth instead of ringing.
-    let filter = if ratio < 1.0 { FilterType::Lanczos3 } else { FilterType::Triangle };
+    let filter = if ratio < 1.0 {
+        FilterType::Lanczos3
+    } else {
+        FilterType::Triangle
+    };
     let scaled = if (nw, nh) == (sw, sh) {
         src.clone()
     } else {
         image::imageops::resize(src, nw, nh, filter)
     };
     // replace, not overlay — copy alpha verbatim onto the empty canvas.
-    image::imageops::replace(&mut canvas, &scaled, ((tw - nw) / 2) as i64, ((th - nh) / 2) as i64);
+    image::imageops::replace(
+        &mut canvas,
+        &scaled,
+        ((tw - nw) / 2) as i64,
+        ((th - nh) / 2) as i64,
+    );
     canvas
 }
 
@@ -507,7 +522,10 @@ fn sample_frame(frames: &[decode::Frame], t_ms: u64) -> usize {
     if frames.len() <= 1 {
         return 0;
     }
-    let total: u64 = frames.iter().map(|f| f.delay_ms.max(MIN_DELAY_MS) as u64).sum();
+    let total: u64 = frames
+        .iter()
+        .map(|f| f.delay_ms.max(MIN_DELAY_MS) as u64)
+        .sum();
     if total == 0 {
         return 0;
     }
@@ -535,7 +553,13 @@ fn source_url(url: &str, min_px: u32) -> Option<String> {
         (s != url).then_some(s)
     };
     if url.contains("cdn.7tv.app") {
-        let t = if min_px > 96 { "/4x" } else if min_px > 64 { "/3x" } else { "/2x" };
+        let t = if min_px > 96 {
+            "/4x"
+        } else if min_px > 64 {
+            "/3x"
+        } else {
+            "/2x"
+        };
         return swap("/1x", t);
     }
     if url.contains("betterttv.net") {
@@ -592,7 +616,13 @@ fn loader(picker: Picker, jobs: Receiver<Job>, done: Sender<Done>) {
     let flatten = picker.protocol_type() == ProtocolType::Sixel;
     for job in jobs {
         let built = build(&picker, &job.key, flatten);
-        if done.send(Done { key: job.key, built }).is_err() {
+        if done
+            .send(Done {
+                key: job.key,
+                built,
+            })
+            .is_err()
+        {
             return; // store dropped → app closed
         }
     }
@@ -613,12 +643,17 @@ pub fn composite_frames(key: &str, min_px: u32) -> Option<Vec<(RgbaImage, u32)>>
     // canvas = base (first layer) native size; overlays resize onto it.
     let (tw, th) = layers[0].frames.first()?.img.dimensions();
     let single = layers.len() == 1;
-    let driver = layers.iter().max_by_key(|l| l.frames.len()).expect("≥1 layer");
+    let driver = layers
+        .iter()
+        .max_by_key(|l| l.frames.len())
+        .expect("≥1 layer");
     let mut out = Vec::with_capacity(driver.frames.len());
     let mut t = 0u64;
     for df in &driver.frames {
         let canvas = if single {
-            layers[0].frames[sample_frame(&layers[0].frames, t)].img.clone()
+            layers[0].frames[sample_frame(&layers[0].frames, t)]
+                .img
+                .clone()
         } else {
             let mut c = RgbaImage::new(tw, th);
             for layer in &layers {
@@ -683,7 +718,11 @@ fn build(picker: &Picker, key: &str, flatten: bool) -> Option<Built> {
     if out.is_empty() {
         None
     } else {
-        Some(Built { frames: out, w_cells, total_ms })
+        Some(Built {
+            frames: out,
+            w_cells,
+            total_ms,
+        })
     }
 }
 
@@ -720,7 +759,10 @@ mod tests {
 
     #[test]
     fn sample_frame_walks_timeline() {
-        let f = |ms: u32| decode::Frame { img: RgbaImage::new(1, 1), delay_ms: ms };
+        let f = |ms: u32| decode::Frame {
+            img: RgbaImage::new(1, 1),
+            delay_ms: ms,
+        };
         let frames = vec![f(100), f(100), f(100)];
         assert_eq!(sample_frame(&frames, 0), 0);
         assert_eq!(sample_frame(&frames, 150), 1);
@@ -821,12 +863,14 @@ mod tests {
 
     #[test]
     fn subsample_caps_frames_and_keeps_duration() {
-        let frames: Vec<(RgbaImage, u32)> =
-            (0..300).map(|_| (RgbaImage::new(1, 1), 20)).collect();
+        let frames: Vec<(RgbaImage, u32)> = (0..300).map(|_| (RgbaImage::new(1, 1), 20)).collect();
         let out = subsample(frames, MAX_FRAMES);
         assert_eq!(out.len(), MAX_FRAMES);
         let total: u64 = out.iter().map(|f| f.1 as u64).sum();
-        assert!((5500..=6500).contains(&total), "loop length preserved: {total}");
+        assert!(
+            (5500..=6500).contains(&total),
+            "loop length preserved: {total}"
+        );
     }
 
     #[test]
@@ -874,7 +918,11 @@ mod tests {
         for px in frames[0].pixels() {
             seen.insert([px[0], px[1], px[2]]);
         }
-        assert!(seen.len() <= PALETTE_COLORS as usize, "{} colors", seen.len());
+        assert!(
+            seen.len() <= PALETTE_COLORS as usize,
+            "{} colors",
+            seen.len()
+        );
     }
 
     #[test]
@@ -912,8 +960,11 @@ mod tests {
             Some("https://cdn.frankerfacez.com/emote/1234/2")
         );
         assert_eq!(
-            source_url("https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0", 40)
-                .as_deref(),
+            source_url(
+                "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0",
+                40
+            )
+            .as_deref(),
             Some("https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0")
         );
     }

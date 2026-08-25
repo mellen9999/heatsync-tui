@@ -78,10 +78,10 @@ struct App {
     input: String,
     /// the composer: a vi line editor with its own insert/normal modes.
     line: edit::Line,
-    status: Option<String>,          // transient one-line notice (send errors, etc.)
-    out: Option<net::Tx>,            // outbound channel to the live WS thread
+    status: Option<String>, // transient one-line notice (send errors, etc.)
+    out: Option<net::Tx>,   // outbound channel to the live WS thread
     twitch_tx: Option<std::sync::mpsc::Sender<twitch::Send>>, // direct twitch sender
-    kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>,     // direct kick sender
+    kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>, // direct kick sender
     tab_pos: TabPos,
     manage_cursor: usize, // cursor in the Manage view
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the
@@ -154,7 +154,9 @@ fn main() -> io::Result<()> {
         let (emote_tx, emote_rx) = std::sync::mpsc::channel();
         App {
             channels: mock::channels(),
-            emotes: (0..mock::channels().len()).map(|_| EmoteSet::new()).collect(),
+            emotes: (0..mock::channels().len())
+                .map(|_| EmoteSet::new())
+                .collect(),
             focus: 0,
             vi: vi::Vi::default(),
             paused: false,
@@ -205,7 +207,10 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
         saved
     };
 
-    eprintln!("heatsync: fetching emotes + connecting to {} channels…", subs.len());
+    eprintln!(
+        "heatsync: fetching emotes + connecting to {} channels…",
+        subs.len()
+    );
     // pick the emote tier now, while we're still a normal terminal:
     //   1. a graphics-capable emulator (sixel/kitty) → EmoteStore
     //   2. else a bare Linux console with /dev/fb0 → framebuffer tier
@@ -240,7 +245,9 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
         spawn_emote_fetch(&emote_tx, *platform, name.clone());
     }
 
-    let token = std::env::var("HEATSYNC_TOKEN").ok().filter(|t| !t.is_empty());
+    let token = std::env::var("HEATSYNC_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
     let (rx, out) = net::spawn(subs, token);
     // direct-to-platform sending if the user supplied their own platform tokens.
     let auth = config::load_auth();
@@ -309,7 +316,10 @@ fn save_state(app: &App) {
         .iter()
         .map(|c| (c.platform, c.name.clone()))
         .collect();
-    config::save(&config::Config { tab_pos: app.tab_pos, channels });
+    config::save(&config::Config {
+        tab_pos: app.tab_pos,
+        channels,
+    });
 }
 
 fn parse_sub(tok: &str) -> Sub {
@@ -407,7 +417,9 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             }
             // Keys core has no vocabulary for (F-keys, Insert) are dropped
             // rather than widening the editing model to carry them.
-            let Some(ck) = key::to_core(k) else { return Flow::Continue };
+            let Some(ck) = key::to_core(k) else {
+                return Flow::Continue;
+            };
             match app.line.key(ck) {
                 edit::Act::Continue => {}
                 edit::Act::Send => return send_focused(app),
@@ -460,7 +472,11 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         InputMode::Normal | InputMode::Visual => return normal_key(app, k),
         InputMode::Search => match k.code {
             KeyCode::Esc => {
-                app.mode = if app.vi.visual.is_some() { InputMode::Visual } else { InputMode::Normal };
+                app.mode = if app.vi.visual.is_some() {
+                    InputMode::Visual
+                } else {
+                    InputMode::Normal
+                };
                 app.input.clear();
             }
             KeyCode::Enter => run_search(app),
@@ -478,7 +494,10 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
 /// keeps an anchor, so the selection grows as the cursor moves. this is also
 /// where counts and the `g` prefix are resolved.
 fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
-    let last = app.channels.get(app.focus).map_or(0, |c| c.messages.len().saturating_sub(1));
+    let last = app
+        .channels
+        .get(app.focus)
+        .map_or(0, |c| c.messages.len().saturating_sub(1));
     let page = app.vi.view.get().count.max(1);
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -650,7 +669,11 @@ fn message_at(app: &App, i: usize) -> Option<&Message> {
 fn run_search(app: &mut App) {
     let pat = app.input.trim().to_string();
     app.input.clear();
-    app.mode = if app.vi.visual.is_some() { InputMode::Visual } else { InputMode::Normal };
+    app.mode = if app.vi.visual.is_some() {
+        InputMode::Visual
+    } else {
+        InputMode::Normal
+    };
     if pat.is_empty() {
         return;
     }
@@ -747,7 +770,10 @@ fn open_channel(app: &mut App, tok: &str) {
         return;
     }
     if let Some(out) = &app.out {
-        let _ = out.send(net::Outbound::Join { platform, channel: name.clone() });
+        let _ = out.send(net::Outbound::Join {
+            platform,
+            channel: name.clone(),
+        });
     }
     app.channels.push(Channel::new(&name, platform, 200));
     app.emotes.push(EmoteSet::new()); // populated async — see spawn_emote_fetch
@@ -768,7 +794,10 @@ fn manage_delete(app: &mut App) {
         (c.platform, c.name.clone())
     };
     if let Some(out) = &app.out {
-        let _ = out.send(net::Outbound::Part { platform, channel: name });
+        let _ = out.send(net::Outbound::Part {
+            platform,
+            channel: name,
+        });
     }
     app.channels.remove(i);
     app.emotes.remove(i);
@@ -831,7 +860,10 @@ fn close_channel(app: &mut App) {
         (c.platform, c.name.clone())
     };
     if let Some(out) = &app.out {
-        let _ = out.send(net::Outbound::Part { platform, channel: name });
+        let _ = out.send(net::Outbound::Part {
+            platform,
+            channel: name,
+        });
     }
     app.channels.remove(app.focus);
     app.emotes.remove(app.focus);
@@ -906,7 +938,16 @@ fn send_focused(app: &mut App) -> Flow {
 /// image cache warm for what's on screen.
 fn advance(app: &mut App) -> bool {
     let focus = app.focus;
-    let App { channels, emotes, feed, store, fb, status, vi, .. } = app;
+    let App {
+        channels,
+        emotes,
+        feed,
+        store,
+        fb,
+        status,
+        vi,
+        ..
+    } = app;
     // how many messages landed in the channel being read. the vi layer needs it
     // to hold scrollback still — indices count back from the newest message, so
     // every arrival shifts them and the cursor would otherwise slide off the
@@ -916,9 +957,16 @@ fn advance(app: &mut App) -> bool {
         Feed::Mock(driver) => {
             let before = channels.get(focus).map_or(0, |c| c.messages.len());
             driver.tick(channels);
-            added = channels.get(focus).map_or(0, |c| c.messages.len()).saturating_sub(before);
+            added = channels
+                .get(focus)
+                .map_or(0, |c| c.messages.len())
+                .saturating_sub(before);
         }
-        Feed::Live { rx, start, connected } => {
+        Feed::Live {
+            rx,
+            start,
+            connected,
+        } => {
             let now = start.elapsed().as_millis() as u64;
             while let Ok(ev) = rx.try_recv() {
                 match ev {
@@ -927,7 +975,12 @@ fn advance(app: &mut App) -> bool {
                             c.platform == l.platform && c.name.eq_ignore_ascii_case(&l.channel)
                         }) {
                             channels[i].record(
-                                Message { user: l.user, text: l.content, color: l.color, heat: 0.0 },
+                                Message {
+                                    user: l.user,
+                                    text: l.content,
+                                    color: l.color,
+                                    heat: 0.0,
+                                },
                                 now,
                             );
                             if i == focus {
@@ -938,7 +991,11 @@ fn advance(app: &mut App) -> bool {
                     ChatEvent::Connected => *connected = true,
                     ChatEvent::Disconnected => *connected = false,
                     ChatEvent::Auth(ok) => {
-                        *status = Some(if ok { "authenticated".into() } else { "auth failed — check HEATSYNC_TOKEN".into() });
+                        *status = Some(if ok {
+                            "authenticated".into()
+                        } else {
+                            "auth failed — check HEATSYNC_TOKEN".into()
+                        });
                     }
                     ChatEvent::SendResult { ok, error } => {
                         if !ok {
@@ -952,7 +1009,9 @@ fn advance(app: &mut App) -> bool {
             }
         }
     }
-    let last = channels.get(focus).map_or(0, |c| c.messages.len().saturating_sub(1));
+    let last = channels
+        .get(focus)
+        .map_or(0, |c| c.messages.len().saturating_sub(1));
     vi.absorb_new(added, last);
     vi.clamp(last);
 
@@ -1009,7 +1068,10 @@ fn ui(f: &mut Frame, app: &App) {
     if app.channels.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  no channels — press ", Style::default().fg(Color::Indexed(244))),
+                Span::styled(
+                    "  no channels — press ",
+                    Style::default().fg(Color::Indexed(244)),
+                ),
                 Span::styled("o", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
                 Span::styled(" to join one", Style::default().fg(Color::Indexed(244))),
             ])),
@@ -1030,11 +1092,13 @@ fn ui(f: &mut Frame, app: &App) {
             (a[1], a[0])
         }
         TabPos::Left => {
-            let a = Layout::horizontal([Constraint::Length(TAB_COL_W), Constraint::Min(0)]).split(main);
+            let a =
+                Layout::horizontal([Constraint::Length(TAB_COL_W), Constraint::Min(0)]).split(main);
             (a[0], a[1])
         }
         TabPos::Right => {
-            let a = Layout::horizontal([Constraint::Min(0), Constraint::Length(TAB_COL_W)]).split(main);
+            let a =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(TAB_COL_W)]).split(main);
             (a[1], a[0])
         }
     };
@@ -1048,7 +1112,10 @@ fn ui(f: &mut Frame, app: &App) {
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
     let tab_style = |i: usize, heat: f64| {
         if i == app.focus {
-            Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(BRAND)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Indexed(Tier::of(heat).xterm()))
         }
@@ -1060,8 +1127,16 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
                 break;
             }
             let label = fit(format!(" {} {:.0} ", ch.name, ch.heat), area.width);
-            let row = Rect { x: area.x, y: area.y + i as u16, width: area.width, height: 1 };
-            f.render_widget(Paragraph::new(Line::from(Span::styled(label, tab_style(i, ch.heat)))), row);
+            let row = Rect {
+                x: area.x,
+                y: area.y + i as u16,
+                width: area.width,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, tab_style(i, ch.heat)))),
+                row,
+            );
         }
     } else {
         let mut spans = Vec::new();
@@ -1082,9 +1157,11 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
 fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let ch = &app.channels[app.focus];
     let set = &app.emotes[app.focus];
-    let [barrow, body] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    f.render_widget(Paragraph::new(heat_bar(ch.heat, barrow.width as usize)), barrow);
+    let [barrow, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    f.render_widget(
+        Paragraph::new(heat_bar(ch.heat, barrow.width as usize)),
+        barrow,
+    );
     if body.height == 0 || body.width == 0 {
         return;
     }
@@ -1096,7 +1173,11 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let mut plan: Vec<(&Message, usize, usize)> = Vec::new();
     let mut used = 0usize;
     for (i, m) in ch.messages.iter().rev().skip(app.vi.scroll).enumerate() {
-        let h = if has_emote(m, set, mode) { EMOTE_H as usize } else { 1 };
+        let h = if has_emote(m, set, mode) {
+            EMOTE_H as usize
+        } else {
+            1
+        };
         if used + h > cap {
             break;
         }
@@ -1133,13 +1214,29 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
         } else {
             Paragraph::new(line)
         };
-        f.render_widget(para, Rect { x: body.x, y: text_row, width: body.width, height: 1 });
+        f.render_widget(
+            para,
+            Rect {
+                x: body.x,
+                y: text_row,
+                width: body.width,
+                height: 1,
+            },
+        );
         for p in &places {
             let x = body.x + p.col;
             match mode {
                 EmoteMode::Term(store) => {
                     if let Some(proto) = store.frame(&p.key) {
-                        f.render_widget(Image::new(proto), Rect { x, y, width: p.w, height: h as u16 });
+                        f.render_widget(
+                            Image::new(proto),
+                            Rect {
+                                x,
+                                y,
+                                width: p.w,
+                                height: h as u16,
+                            },
+                        );
                     }
                 }
                 EmoteMode::Fb(fb) => {
@@ -1154,7 +1251,12 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
                     let lines: Vec<Line> = (0..h).map(|_| Line::raw(pad.clone())).collect();
                     f.render_widget(
                         Paragraph::new(lines),
-                        Rect { x, y, width: p.w, height: h as u16 },
+                        Rect {
+                            x,
+                            y,
+                            width: p.w,
+                            height: h as u16,
+                        },
                     );
                     fb.push(x, y, &p.key);
                 }
@@ -1168,12 +1270,20 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
 /// rover-style channel manager: a single-pane list, cursor row highlighted, the
 /// active channel marked. reorder/leave/open from here.
 fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
-    let [head, list] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let [head, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" channels ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {} open", app.channels.len()), Style::default().fg(Color::Indexed(244))),
+            Span::styled(
+                " channels ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(BRAND)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {} open", app.channels.len()),
+                Style::default().fg(Color::Indexed(244)),
+            ),
         ])),
         head,
     );
@@ -1196,7 +1306,10 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
         let sel = i == app.manage_cursor;
         let hue = Color::Indexed(Tier::of(ch.heat).xterm());
         let style = if sel {
-            Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(BRAND)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(hue)
         };
@@ -1209,7 +1322,12 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
             ch.heat,
             ch.messages.len(),
         );
-        let row = Rect { x: list.x, y: list.y + i as u16, width: list.width, height: 1 };
+        let row = Rect {
+            x: list.x,
+            y: list.y + i as u16,
+            width: list.width,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(fit(label, list.width), style))),
             row,
@@ -1302,9 +1420,18 @@ struct Place {
 /// stacks go) plus the reserved emote slots. a base emote absorbs any following
 /// zero-width (overlay) emotes into one stack. an unloaded/text-mode emote falls
 /// back to its name in brand color.
-fn layout_message(m: &Message, set: &EmoteSet, mode: EmoteMode, maxw: u16) -> (Line<'static>, Vec<Place>) {
+fn layout_message(
+    m: &Message,
+    set: &EmoteSet,
+    mode: EmoteMode,
+    maxw: u16,
+) -> (Line<'static>, Vec<Place>) {
     let text_hue = Color::Indexed(heatsync_core::heat::color(m.heat));
-    let user_color = m.color.as_deref().and_then(parse_hex).unwrap_or(Color::Indexed(244));
+    let user_color = m
+        .color
+        .as_deref()
+        .and_then(parse_hex)
+        .unwrap_or(Color::Indexed(244));
     let mut spans = vec![
         Span::styled(m.user.clone(), Style::default().fg(user_color)),
         Span::styled(": ", Style::default().fg(Color::Indexed(244))),
@@ -1364,7 +1491,10 @@ fn layout_message(m: &Message, set: &EmoteSet, mode: EmoteMode, maxw: u16) -> (L
                     col += w;
                 } else {
                     col += UnicodeWidthStr::width(base_name.as_str()) as u16;
-                    spans.push(Span::styled(base_name, Style::default().fg(BRAND).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(
+                        base_name,
+                        Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+                    ));
                 }
             }
         }
@@ -1391,7 +1521,10 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
     let hue = Color::Indexed(heatsync_core::heat::color(heat));
     Line::from(vec![
         Span::styled("\u{2588}".repeat(filled), Style::default().fg(hue)),
-        Span::styled("\u{2591}".repeat(width - filled), Style::default().fg(Color::Indexed(236))),
+        Span::styled(
+            "\u{2591}".repeat(width - filled),
+            Style::default().fg(Color::Indexed(236)),
+        ),
     ])
 }
 
@@ -1399,10 +1532,29 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // Manage mode → rover-style key hints.
     if app.mode == InputMode::Manage {
         let hint = |k: &'static str, d: &'static str| {
-            [Span::styled(k, Style::default().fg(BRAND)), Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244)))]
+            [
+                Span::styled(k, Style::default().fg(BRAND)),
+                Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244))),
+            ]
         };
-        let mut spans = vec![Span::styled(" manage ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)), Span::raw("  ")];
-        for pair in [hint("jk", "move"), hint("enter", "open"), hint("a", "add"), hint("d", "leave"), hint("JK", "reorder"), hint("esc", "back")] {
+        let mut spans = vec![
+            Span::styled(
+                " manage ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(BRAND)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+        ];
+        for pair in [
+            hint("jk", "move"),
+            hint("enter", "open"),
+            hint("a", "add"),
+            hint("d", "leave"),
+            hint("JK", "reorder"),
+            hint("esc", "back"),
+        ] {
             spans.extend(pair);
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1411,11 +1563,20 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // Join mode → type a channel to open.
     if app.mode == InputMode::Join {
         let spans = vec![
-            Span::styled(" join ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " join ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(BRAND)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ❯ ", Style::default().fg(BRAND)),
             Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))),
             Span::styled("\u{2588}", Style::default().fg(BRAND)),
-            Span::styled("   name or kick:name", Style::default().fg(Color::Indexed(244))),
+            Span::styled(
+                "   name or kick:name",
+                Style::default().fg(Color::Indexed(244)),
+            ),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
@@ -1437,13 +1598,19 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         } else {
             format!(" {}·{} ", ch.name, ch.platform.tag())
         };
-        let tag = Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD);
+        let tag = Style::default()
+            .fg(Color::Black)
+            .bg(BRAND)
+            .add_modifier(Modifier::BOLD);
         let mut spans = vec![
             Span::styled(prompt, tag),
             Span::styled(" ❯ ", Style::default().fg(BRAND)),
         ];
         if readonly {
-            spans.push(Span::styled("read-only — no send token · esc", Style::default().fg(Color::Indexed(214))));
+            spans.push(Span::styled(
+                "read-only — no send token · esc",
+                Style::default().fg(Color::Indexed(214)),
+            ));
         } else {
             // draw the line with a block cursor sitting ON a character in normal
             // mode and between characters in insert — the same shape vi has, so
@@ -1461,12 +1628,18 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 spans.push(Span::styled(" ", block));
             }
             if !app.line.pending().is_empty() {
-                spans.push(Span::styled(format!("  {}", app.line.pending()), Style::default().fg(BRAND).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    format!("  {}", app.line.pending()),
+                    Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+                ));
             }
             // a command's reply (usage, "not open: x") has to be visible from
             // the composer — that is where the command was typed.
             if let Some(msg) = &app.status {
-                spans.push(Span::styled(format!("   {msg}"), Style::default().fg(Color::Indexed(214))));
+                spans.push(Span::styled(
+                    format!("   {msg}"),
+                    Style::default().fg(Color::Indexed(214)),
+                ));
             } else if app.line.is_empty() && !normal {
                 spans.push(Span::styled(
                     "   /join <chan>  /part  /quit  — anything else goes to chat",
@@ -1485,11 +1658,24 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
 
     // Search mode → the `/` or `?` prompt, vi-style at the bottom.
     if app.mode == InputMode::Search {
-        let lead = if app.vi.dir == Some(vi::Dir::Back) { "?" } else { "/" };
+        let lead = if app.vi.dir == Some(vi::Dir::Back) {
+            "?"
+        } else {
+            "/"
+        };
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(format!(" {lead} "), Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {}", app.input), Style::default().fg(Color::Indexed(231))),
+                Span::styled(
+                    format!(" {lead} "),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(BRAND)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {}", app.input),
+                    Style::default().fg(Color::Indexed(231)),
+                ),
                 Span::styled("\u{2588}", Style::default().fg(BRAND)),
             ])),
             area,
@@ -1500,13 +1686,30 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     if app.mode == InputMode::Visual {
         let n = app.vi.selection().map_or(1, |(lo, hi)| hi - lo + 1);
         let hint = |k: &'static str, d: &'static str| {
-            [Span::styled(k, Style::default().fg(BRAND)), Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244)))]
+            [
+                Span::styled(k, Style::default().fg(BRAND)),
+                Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244))),
+            ]
         };
         let mut spans = vec![
-            Span::styled(" visual ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {n} line{}  ", if n == 1 { "" } else { "s" }), Style::default().fg(Color::Indexed(231))),
+            Span::styled(
+                " visual ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(BRAND)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {n} line{}  ", if n == 1 { "" } else { "s" }),
+                Style::default().fg(Color::Indexed(231)),
+            ),
         ];
-        for pair in [hint("jk", "extend"), hint("y", "yank"), hint("/", "search"), hint("esc", "cancel")] {
+        for pair in [
+            hint("jk", "extend"),
+            hint("y", "yank"),
+            hint("/", "search"),
+            hint("esc", "cancel"),
+        ] {
             spans.extend(pair);
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1515,17 +1718,28 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
 
     let (dot, dot_color, state) = match &app.feed {
         Feed::Mock(_) => ("\u{25cb} ", Color::Indexed(244), "mock".to_string()),
-        Feed::Live { connected: true, .. } => ("\u{25cf} ", Color::Indexed(46), "live".to_string()),
-        Feed::Live { connected: false, .. } => ("\u{25cf} ", Color::Indexed(214), "connecting".to_string()),
+        Feed::Live {
+            connected: true, ..
+        } => ("\u{25cf} ", Color::Indexed(46), "live".to_string()),
+        Feed::Live {
+            connected: false, ..
+        } => ("\u{25cf} ", Color::Indexed(214), "connecting".to_string()),
     };
-    let mut spans = vec![
-        Span::styled(" heatsync ", Style::default().fg(Color::Black).bg(BRAND).add_modifier(Modifier::BOLD)),
-    ];
+    let mut spans = vec![Span::styled(
+        " heatsync ",
+        Style::default()
+            .fg(Color::Black)
+            .bg(BRAND)
+            .add_modifier(Modifier::BOLD),
+    )];
     // a message (yank confirmation, search miss, send error) takes the front of
     // the line the way vi's command line does — appended after the key hints it
     // was simply truncated away on anything narrower than ~110 columns.
     if let Some(msg) = &app.status {
-        spans.push(Span::styled(format!("  {msg}"), Style::default().fg(Color::Indexed(214))));
+        spans.push(Span::styled(
+            format!("  {msg}"),
+            Style::default().fg(Color::Indexed(214)),
+        ));
     }
     spans.extend([
         Span::styled("  hl ", Style::default().fg(BRAND)),
@@ -1555,16 +1769,34 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         (n, g) => format!("{n}{}", if g { "g" } else { "" }),
     };
     if !pending.is_empty() {
-        spans.push(Span::styled(format!("{pending}  "), Style::default().fg(Color::Indexed(231)).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            format!("{pending}  "),
+            Style::default()
+                .fg(Color::Indexed(231))
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     if !app.vi.following() {
-        spans.push(Span::styled("SCROLLBACK  ", Style::default().fg(Color::Indexed(214)).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "SCROLLBACK  ",
+            Style::default()
+                .fg(Color::Indexed(214))
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     if app.paused {
-        spans.push(Span::styled("PAUSED  ", Style::default().fg(Color::Indexed(214)).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "PAUSED  ",
+            Style::default()
+                .fg(Color::Indexed(214))
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     spans.push(Span::styled(dot, Style::default().fg(dot_color)));
-    spans.push(Span::styled(format!("{state} · {n} ch"), Style::default().fg(Color::Indexed(244))));
+    spans.push(Span::styled(
+        format!("{state} · {n} ch"),
+        Style::default().fg(Color::Indexed(244)),
+    ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

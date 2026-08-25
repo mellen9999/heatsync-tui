@@ -32,7 +32,9 @@ pub fn spawn(token: String) -> Sender<Send> {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(12)).build()
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(12))
+        .build()
 }
 
 fn run(token: String, rx: Receiver<Send>) {
@@ -79,7 +81,10 @@ fn post(token: &str, id: u64, text: &str) -> Result<(), ureq::Error> {
 
 /// `heatsync login kick` — authorization-code + PKCE flow via a loopback redirect.
 pub fn login() -> std::io::Result<()> {
-    let client_id = match std::env::var("KICK_CLIENT_ID").ok().filter(|s| !s.is_empty()) {
+    let client_id = match std::env::var("KICK_CLIENT_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c,
         None => {
             println!("kick sending needs a kick app (kick has no token generator):");
@@ -165,7 +170,9 @@ fn exchange(client_id: &str, code: &str, verifier: &str) -> Option<String> {
         .ok()?
         .into_json()
         .ok()?;
-    v.get("access_token").and_then(Value::as_str).map(str::to_string)
+    v.get("access_token")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 // ---- small crypto/encoding helpers ---------------------------------------
@@ -198,7 +205,8 @@ fn rand_b64url(n: usize) -> String {
     let mut buf = vec![0u8; n];
     // security-critical (PKCE verifier + CSRF state): never fall back to zeroed
     // bytes — abort the flow loudly if the CSPRNG is unavailable.
-    getrandom::getrandom(&mut buf).expect("CSPRNG unavailable — cannot generate secure OAuth values");
+    getrandom::getrandom(&mut buf)
+        .expect("CSPRNG unavailable — cannot generate secure OAuth values");
     b64url(&buf)
 }
 
@@ -207,7 +215,9 @@ fn pct(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

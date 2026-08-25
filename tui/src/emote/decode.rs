@@ -55,10 +55,7 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, BoxErr> {
         }
         _ => single(bytes)?,
     };
-    let (width, height) = frames
-        .first()
-        .map(|f| f.img.dimensions())
-        .unwrap_or((0, 0));
+    let (width, height) = frames.first().map(|f| f.img.dimensions()).unwrap_or((0, 0));
     if frames.is_empty() {
         return Err("decoded zero frames".into());
     }
@@ -71,10 +68,7 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, BoxErr> {
 
 fn single(bytes: &[u8]) -> Result<Vec<Frame>, BoxErr> {
     let img = image::load_from_memory(bytes)?.to_rgba8();
-    Ok(vec![Frame {
-        img,
-        delay_ms: 0,
-    }])
+    Ok(vec![Frame { img, delay_ms: 0 }])
 }
 
 fn collect<'a>(dec: impl AnimationDecoder<'a>) -> Result<Vec<Frame>, BoxErr> {
@@ -119,12 +113,8 @@ mod tests {
         {
             let mut enc = GifEncoder::new(&mut buf);
             for px in [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]] {
-                let frame = IFrame::from_parts(
-                    solid(4, 4, px),
-                    0,
-                    0,
-                    Delay::from_numer_denom_ms(100, 1),
-                );
+                let frame =
+                    IFrame::from_parts(solid(4, 4, px), 0, 0, Delay::from_numer_denom_ms(100, 1));
                 enc.encode_frame(frame).unwrap();
             }
         }

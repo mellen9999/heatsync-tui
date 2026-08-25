@@ -19,8 +19,12 @@ pub fn clean(input: &str) -> String {
             // C1 controls (0x80–0x9F) — the 8-bit CSI/OSC introducers.
             c if (0x80..=0x9f).contains(&(c as u32)) => {}
             // zero-width / bidi-override troublemakers used to spoof text.
-            '\u{200b}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}' | '\u{feff}' => {}
+            '\u{200b}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}' => {}
             c => out.push(c),
         }
     }

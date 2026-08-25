@@ -27,14 +27,42 @@ impl Rng {
 }
 
 const USERS: &[&str] = &[
-    "forsen", "nymn", "pajlada", "supibot", "mel", "kkona", "wide", "peeposit",
-    "gigachad", "monkas", "widepeepo", "hasanabi", "vedal", "neuro", "anon",
+    "forsen",
+    "nymn",
+    "pajlada",
+    "supibot",
+    "mel",
+    "kkona",
+    "wide",
+    "peeposit",
+    "gigachad",
+    "monkas",
+    "widepeepo",
+    "hasanabi",
+    "vedal",
+    "neuro",
+    "anon",
 ];
 
 const WORDS: &[&str] = &[
-    "GAMBA", "OMEGALUL", "Sadge", "PepeLaugh", "gigachad moment", "actual clip",
-    "no way", "chat is this real", "COPIUM", "based", "ratio", "Nerd",
-    "KEKW", "this is peak", "mods asleep", "PogU", "sptvJAM", "Aware",
+    "GAMBA",
+    "OMEGALUL",
+    "Sadge",
+    "PepeLaugh",
+    "gigachad moment",
+    "actual clip",
+    "no way",
+    "chat is this real",
+    "COPIUM",
+    "based",
+    "ratio",
+    "Nerd",
+    "KEKW",
+    "this is peak",
+    "mods asleep",
+    "PogU",
+    "sptvJAM",
+    "Aware",
 ];
 
 /// per-channel baseline messages/tick — spreads channels across the ramp.
@@ -45,11 +73,31 @@ struct Seed {
 }
 
 const SEEDS: &[Seed] = &[
-    Seed { name: "xqc", platform: Platform::Twitch, activity: 7.0 },
-    Seed { name: "forsen", platform: Platform::Twitch, activity: 2.5 },
-    Seed { name: "hasanabi", platform: Platform::Twitch, activity: 1.0 },
-    Seed { name: "trainwreckstv", platform: Platform::Kick, activity: 11.0 },
-    Seed { name: "adin", platform: Platform::Kick, activity: 0.4 },
+    Seed {
+        name: "xqc",
+        platform: Platform::Twitch,
+        activity: 7.0,
+    },
+    Seed {
+        name: "forsen",
+        platform: Platform::Twitch,
+        activity: 2.5,
+    },
+    Seed {
+        name: "hasanabi",
+        platform: Platform::Twitch,
+        activity: 1.0,
+    },
+    Seed {
+        name: "trainwreckstv",
+        platform: Platform::Kick,
+        activity: 11.0,
+    },
+    Seed {
+        name: "adin",
+        platform: Platform::Kick,
+        activity: 0.4,
+    },
 ];
 
 /// the demo channel set — same shape the live feed produces.
@@ -97,7 +145,12 @@ impl Driver {
                     let user = self.rng.pick(USERS).to_string();
                     let text = self.rng.pick(WORDS).to_string();
                     ch.record(
-                        Message { user, text, color: None, heat: 0.0 },
+                        Message {
+                            user,
+                            text,
+                            color: None,
+                            heat: 0.0,
+                        },
                         now,
                     );
                 }

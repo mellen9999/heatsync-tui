@@ -438,7 +438,14 @@ impl Line {
             }
             Some(op) => {
                 let (lo, hi) = if target >= self.cursor {
-                    (self.cursor, if inclusive { (target + 1).min(self.text.len()) } else { target })
+                    (
+                        self.cursor,
+                        if inclusive {
+                            (target + 1).min(self.text.len())
+                        } else {
+                            target
+                        },
+                    )
                 } else {
                     (target, self.cursor)
                 };
@@ -484,14 +491,19 @@ impl Line {
     }
 
     fn first_non_blank(&self) -> usize {
-        self.text.iter().position(|c| !c.is_whitespace()).unwrap_or(0)
+        self.text
+            .iter()
+            .position(|c| !c.is_whitespace())
+            .unwrap_or(0)
     }
 
     fn find_target(&self, ch: char, back: bool, till: bool, n: usize) -> Option<usize> {
         let mut at = self.cursor;
         for _ in 0..n {
             at = if back {
-                self.text[..at.min(self.text.len())].iter().rposition(|&c| c == ch)?
+                self.text[..at.min(self.text.len())]
+                    .iter()
+                    .rposition(|&c| c == ch)?
             } else {
                 let from = at + 1;
                 from + self.text.get(from..)?.iter().position(|&c| c == ch)?
@@ -511,7 +523,11 @@ impl Line {
             if i >= len {
                 break;
             }
-            let start = if big { 1.min(class(self.text[i])) } else { class(self.text[i]) };
+            let start = if big {
+                1.min(class(self.text[i]))
+            } else {
+                class(self.text[i])
+            };
             // step off the current run…
             while i < len && cls(self.text[i], big) == start && start != 0 {
                 i += 1;
@@ -651,7 +667,11 @@ mod tests {
     fn escape_enters_normal_mode_and_steps_left() {
         let l = line("hello<esc>");
         assert_eq!(l.mode(), Mode::Normal);
-        assert_eq!(l.cursor(), 4, "vi puts the cursor on the last char, not past it");
+        assert_eq!(
+            l.cursor(),
+            4,
+            "vi puts the cursor on the last char, not past it"
+        );
     }
 
     #[test]
@@ -665,9 +685,17 @@ mod tests {
     fn escape_first_cancels_a_half_typed_command() {
         let mut l = line("hello world<esc>0");
         run(&mut l, "2d");
-        assert_eq!(l.key(special(KeyCode::Esc)), Act::Continue, "cancels the pending d");
+        assert_eq!(
+            l.key(special(KeyCode::Esc)),
+            Act::Continue,
+            "cancels the pending d"
+        );
         assert_eq!(l.text(), "hello world");
-        assert_eq!(l.key(special(KeyCode::Esc)), Act::Leave, "second one leaves");
+        assert_eq!(
+            l.key(special(KeyCode::Esc)),
+            Act::Leave,
+            "second one leaves"
+        );
     }
 
     #[test]
@@ -928,7 +956,9 @@ mod tests {
     fn every_motion_survives_an_empty_line() {
         let mut l = Line::default();
         l.key(special(KeyCode::Esc));
-        for keys in ["h", "l", "w", "b", "e", "$", "0", "^", "x", "X", "dw", "dd", "p", "u", "D"] {
+        for keys in [
+            "h", "l", "w", "b", "e", "$", "0", "^", "x", "X", "dw", "dd", "p", "u", "D",
+        ] {
             run(&mut l, keys);
             assert_eq!(l.text(), "");
             assert_eq!(l.cursor(), 0, "{keys} moved the cursor off an empty line");
