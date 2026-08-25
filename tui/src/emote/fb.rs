@@ -11,6 +11,8 @@
 use std::cell::RefCell;
 
 /// a queued emote to blit this frame at an (absolute) cell position.
+/// only the linux blitter reads the fields — elsewhere the queue just drains.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct Placement {
     pub col: u16,
     pub row: u16,
