@@ -7,7 +7,7 @@ cargo install heatsync-tui
 ```
 
 ```
-heatsync-tui                 # opens your saved channels (or a demo set)
+heatsync-tui                 # or just: hs — opens your saved channels (or a demo set)
 heatsync-tui xqc forsen kick:trainwreckstv   # explicit channels
 heatsync-tui login           # set up sending (see below)
 ```
