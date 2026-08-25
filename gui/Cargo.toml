@@ -14,6 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 heatsync-core = { path = "../core", version = "0.1.0" }
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+# glow (OpenGL), not wgpu. A chat window is 2D text and quads — wgpu buys
+# nothing here and drags in the whole wgpu-hal/D3D12 tree, which as of
+# windows 0.62.2 does not compile on the windows runner at all. Fewer deps,
+# smaller binary, and it is the backend that works everywhere.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.36"
 image = { version = "0.25", default-features = false, features = ["gif", "webp", "png", "jpeg"] }
