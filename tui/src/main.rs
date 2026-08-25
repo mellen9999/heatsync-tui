@@ -128,11 +128,11 @@ impl EmoteMode<'_> {
 
 /// Printed by `--help`, and again when the TUI is asked to start without a tty.
 const USAGE: &str = "\
-heatsync — heat-sorted live multichat in the terminal
+heatsync-tui — heat-sorted live multichat in the terminal
 
 USAGE:
-    heatsync [CHANNEL...]        open the chat UI on those channels
-    heatsync <SUBCOMMAND>
+    heatsync-tui [CHANNEL...]        open the chat UI on those channels
+    heatsync-tui <SUBCOMMAND>
 
 SUBCOMMANDS:
     log        print recent messages
@@ -164,12 +164,12 @@ fn main() -> io::Result<()> {
         Some("login") if args.get(1).map(String::as_str) == Some("kick") => return kick::login(),
         Some("login") => return cli::login(),
         // The two flags every installed binary is asked first. Without them
-        // `heatsync --version` fell through to the TUI, tried to connect to
+        // `heatsync-tui --version` fell through to the TUI, tried to connect to
         // three channels, and then panicked out of ratatui because there was no
         // terminal — which is what a fresh `cargo install` looks like when you
         // check what you just installed.
         Some("--version") | Some("-V") => {
-            println!("{} {}", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"));
+            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Some("--help") | Some("-h") | Some("help") => {
@@ -184,7 +184,7 @@ fn main() -> io::Result<()> {
     // job or a CI step would otherwise get.
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         eprintln!(
-            "heatsync: not a terminal — the chat UI needs an interactive tty.\n\
+            "heatsync-tui: not a terminal — the chat UI needs an interactive tty.\n\
              Run it directly, or use a subcommand that writes to stdout:\n\
              \n\
              {USAGE}"
