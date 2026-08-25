@@ -91,12 +91,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bin=./target/release/heatsync-gui
+          # `cargo run` rather than a hand-built path: it is the only spelling
+          # that needs no per-platform `.exe` suffix and no assumption about
+          # where the profile puts the binary. Hand-building it produced a bare
+          # `exit 127` on windows with no message at all. Nothing rebuilds here
+          # — the release build two steps up is already warm — and cargo echoes
+          # the resolved path it runs, so a future move names itself.
           # Linux runners are headless; the other two have a real window server.
           if [ "$RUNNER_OS" = Linux ]; then
-            exec xvfb-run -a "$bin" --smoke
+            exec xvfb-run -a cargo run --release -p heatsync-gui -- --smoke
           fi
-          # Not `[ ... ] && bin=...`: under `set -e` a false test is a failing
-          # command, so on macos that one-liner would exit before it ever ran.
-          if [ "$RUNNER_OS" = Windows ]; then bin="$bin.exe"; fi
-          exec "$bin" --smoke
+          exec cargo run --release -p heatsync-gui -- --smoke
