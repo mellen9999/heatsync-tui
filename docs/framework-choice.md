@@ -69,10 +69,14 @@ What does matter, and what actually decided it:
   one per emote stack gets correct inline layout for free. That is the single
   capability the alternatives lack.
 - **The real footprint levers are dependency count and the font atlas**, not the
-  toolkit's paint model. Now measured, and the split is lopsided: the font atlas
-  is **2,048 KB** against **192 KB** of emote textures. Ten to one. `eframe` is already `default-features = false`; the
+  toolkit's paint model. `eframe` is already `default-features = false`; the
   remaining weight is `default_fonts` (Ubuntu + emoji, compiled in) and the
   `image` codecs, which are genuinely needed for gif/webp emotes.
+
+  Measured, the split is lopsided: **2,048 KB of font atlas against 192 KB of
+  emote textures**, ten to one. Both together are 2.2 MB of a 127 MB resident
+  set, so texture memory is not where the footprint goes either — optimising
+  emote textures would have been optimising 0.15% of it.
 
 Where idle cost *does* appear, it is a real cost and it needed fixing: eframe
 keeps calling the app when the window is hidden, so an unmapped window spun a
