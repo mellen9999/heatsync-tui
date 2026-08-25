@@ -1281,9 +1281,11 @@ fn layout_message(
                         // still loading: hold the exact same footprint and show
                         // as much of the name as fits, so the image swaps in
                         // place instead of shoving the line around.
+                        // white (231), not brand orange — emote names sit inside
+                        // chat text and need contrast, not accent spam.
                         spans.push(Span::styled(
                             fit_exact(&base_name, w),
-                            Style::default().fg(BRAND),
+                            Style::default().fg(Color::Indexed(231)),
                         ));
                     }
                     col += w;
@@ -1291,7 +1293,9 @@ fn layout_message(
                     col += UnicodeWidthStr::width(base_name.as_str()) as u16;
                     spans.push(Span::styled(
                         base_name,
-                        Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Indexed(231))
+                            .add_modifier(Modifier::BOLD),
                     ));
                 }
             }
