@@ -43,65 +43,60 @@ jobs:
 
       - run: cargo build --release
 
+      # The windows runner is a VM with no OpenGL driver, and glow hard-requires
+      # OpenGL 2.0+ — without this the smoke dies on
+      # `egui_glow requires opengl 2.0+`. Mesa's software opengl32.dll beside the
+      # exe satisfies it: windows searches the exe's own directory before the
+      # system one. Worth knowing this is not only a CI quirk — any windows box
+      # without a GL driver (VM, RDP session, bare install) hits the same wall,
+      # which is the standing argument for wgpu once wgpu-hal builds again.
+      #
+      # Every copy is mandatory and the payload is listed. An `-ErrorAction
+      # SilentlyContinue` here would turn "mesa changed its archive layout" into
+      # a GL failure three steps later with nothing pointing at the cause.
+      - name: Mesa software OpenGL (windows runners have no GL driver)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z'
+          curl.exe -fsSL -o mesa.7z $url
+          7z x mesa.7z -omesa | Out-Null
+          Write-Host '--- mesa payload ---'
+          Get-ChildItem -Recurse mesa -Filter *.dll | ForEach-Object { $_.FullName }
+          # llvmpipe needs its gallium driver alongside the ICD; neither alone works.
+          foreach ($dll in 'opengl32.dll', 'libgallium_wgl.dll') {
+            Copy-Item "mesa\x64\$dll" target\release\ -Force
+          }
+          'GALLIUM_DRIVER=llvmpipe' | Out-File -FilePath $env:GITHUB_ENV -Append
+
       # The one thing the e2e above cannot cover: actually creating a window and
       # painting through glow. Windows is the primary target and OpenGL drivers
       # are where it differs most, so this is the step that stops "compiles on
       # windows" being mistaken for "runs on windows".
       #
-      # Wrapped in an external timeout on purpose. A window that never maps
-      # leaves eframe not calling the app at all, so no in-process deadline can
-      # fire — only killing it from outside is a guard that cannot be evaded.
+      # Deliberately one step for all three platforms, run through git-bash on
+      # windows. Two things it gets right that a per-platform script did not:
+      #
+      #   * The deadline is `timeout-minutes`, not a script. A window that never
+      #     maps leaves eframe not calling the app at all, so no in-process guard
+      #     can fire; the runner killing the step is the one guard that cannot be
+      #     evaded, and unlike GNU `timeout` it exists on all three runners.
+      #   * Nothing is redirected. The binary's stderr is the CI log. Capturing
+      #     it to a file and printing it afterwards is how the first windows
+      #     failure arrived as a bare `exit code 1` with the panic message left
+      #     unflushed in a file nobody read.
       - name: GUI smoke (opens a window, renders, exits)
-        if: runner.os == 'Linux'
-        run: timeout 120 xvfb-run -a ./target/release/heatsync-gui --smoke
-
-      # macOS has no GNU `timeout`; background it and poll instead of adding a
-      # coreutils install just for this.
-      - name: GUI smoke (opens a window, renders, exits)
-        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        shell: bash
         run: |
-          ./target/release/heatsync-gui --smoke &
-          pid=$!
-          for _ in $(seq 1 120); do
-            kill -0 $pid 2>/dev/null || break
-            sleep 1
-          done
-          if kill -0 $pid 2>/dev/null; then
-            kill $pid
-            echo "gui smoke timed out: the window never rendered" >&2
-            exit 1
+          set -euo pipefail
+          bin=./target/release/heatsync-gui
+          # Linux runners are headless; the other two have a real window server.
+          if [ "$RUNNER_OS" = Linux ]; then
+            exec xvfb-run -a "$bin" --smoke
           fi
-          wait $pid
-
-      # The windows runner is a VM with no OpenGL driver, and glow hard-requires
-      # OpenGL 2.0+ — without this the smoke dies on
-      # `egui_glow requires opengl 2.0+`. Mesa's software opengl32.dll next to
-      # the exe satisfies it. Worth knowing that this is not only a CI quirk:
-      # any windows box without a GL driver (VM, RDP session, bare install) hits
-      # the same wall, which is an argument for wgpu once wgpu-hal builds again.
-      - name: Mesa software OpenGL (windows runners have no GL driver)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $url = 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z'
-          curl.exe -L -o mesa.7z $url
-          7z x mesa.7z -omesa | Out-Null
-          Copy-Item mesa\x64\opengl32.dll  target\release\ -Force
-          Copy-Item mesa\x64\libgallium_wgl.dll target\release\ -Force -ErrorAction SilentlyContinue
-          Copy-Item mesa\x64\dxil.dll     target\release\ -Force -ErrorAction SilentlyContinue
-          "GALLIUM_DRIVER=llvmpipe" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: GUI smoke (opens a window, renders, exits)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $p = Start-Process -FilePath .\target\release\heatsync-gui.exe `
-                 -ArgumentList '--smoke' -PassThru -NoNewWindow `
-                 -RedirectStandardOutput smoke.log -RedirectStandardError smoke.err
-          if (-not $p.WaitForExit(120000)) {
-            $p.Kill()
-            Write-Error "gui smoke timed out: the window never rendered"
-            exit 1
-          }
-          Get-Content smoke.log, smoke.err -ErrorAction SilentlyContinue
-          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          # Not `[ ... ] && bin=...`: under `set -e` a false test is a failing
+          # command, so on macos that one-liner would exit before it ever ran.
+          if [ "$RUNNER_OS" = Windows ]; then bin="$bin.exe"; fi
+          exec "$bin" --smoke
