@@ -76,7 +76,7 @@ fn collect<'a>(dec: impl AnimationDecoder<'a>) -> Result<Vec<Frame>, BoxErr> {
     for f in dec.into_frames() {
         let f = f?;
         let (num, den) = f.delay().numer_denom_ms();
-        let ms = if den == 0 { 0 } else { num / den };
+        let ms = num.checked_div(den).unwrap_or(0);
         out.push(Frame {
             img: f.into_buffer(),
             delay_ms: ms.max(20), // floor: never spin faster than 50fps per frame

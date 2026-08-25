@@ -100,13 +100,13 @@ fn session(
     }
     // authenticate first (required before any send is accepted).
     if let Some(t) = token {
-        if ws.send(WsMsg::Text(proto::authenticate(t).into())).is_err() {
+        if ws.send(WsMsg::Text(proto::authenticate(t))).is_err() {
             return SessionEnd::Dropped;
         }
     }
     for (platform, channel) in subs.iter() {
         if ws
-            .send(WsMsg::Text(proto::join(*platform, channel).into()))
+            .send(WsMsg::Text(proto::join(*platform, channel)))
             .is_err()
         {
             return SessionEnd::Dropped;
@@ -178,13 +178,13 @@ fn session(
                     proto::part(platform, &channel)
                 }
             };
-            if ws.send(WsMsg::Text(frame.into())).is_err() {
+            if ws.send(WsMsg::Text(frame)).is_err() {
                 return SessionEnd::Dropped;
             }
         }
 
         if last_hb.elapsed() >= HEARTBEAT {
-            if ws.send(WsMsg::Text(proto::heartbeat().into())).is_err() {
+            if ws.send(WsMsg::Text(proto::heartbeat())).is_err() {
                 return SessionEnd::Dropped;
             }
             last_hb = Instant::now();

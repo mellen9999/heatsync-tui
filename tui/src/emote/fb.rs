@@ -59,7 +59,7 @@ impl FbEmotes {
     pub fn cells(&self, _url: &str) -> Option<u16> {
         #[cfg(target_os = "linux")]
         {
-            return self.inner.cells(_url);
+            self.inner.cells(_url)
         }
         #[cfg(not(target_os = "linux"))]
         None
@@ -70,7 +70,7 @@ impl FbEmotes {
     pub fn square_cells(&self) -> u16 {
         #[cfg(target_os = "linux")]
         {
-            return self.inner.square_cells();
+            self.inner.square_cells()
         }
         #[cfg(not(target_os = "linux"))]
         1
@@ -81,7 +81,7 @@ impl FbEmotes {
     pub fn next_flip_in(&self) -> Option<std::time::Duration> {
         #[cfg(target_os = "linux")]
         {
-            return self.inner.next_flip_in();
+            self.inner.next_flip_in()
         }
         #[cfg(not(target_os = "linux"))]
         None

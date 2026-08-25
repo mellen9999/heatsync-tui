@@ -57,15 +57,13 @@ fn session(user: &str, oauth: &str, rx: &Receiver<Send>) -> End {
     // "PASS…\r\nNICK…\r\n" frame gets the connection dropped before auth, so
     // PASS and NICK must go as separate frames.
     if ws
-        .send(WsMsg::Text(format!("PASS oauth:{oauth}\r\n").into()))
+        .send(WsMsg::Text(format!("PASS oauth:{oauth}\r\n")))
         .is_err()
     {
         return End::Dropped;
     }
     if ws
-        .send(WsMsg::Text(
-            format!("NICK {}\r\n", user.to_lowercase()).into(),
-        ))
+        .send(WsMsg::Text(format!("NICK {}\r\n", user.to_lowercase())))
         .is_err()
     {
         return End::Dropped;
@@ -99,14 +97,12 @@ fn session(user: &str, oauth: &str, rx: &Receiver<Send>) -> End {
                 Ok((channel, text)) => {
                     let chan = channel.to_lowercase();
                     if joined.insert(chan.clone())
-                        && ws
-                            .send(WsMsg::Text(format!("JOIN #{chan}\r\n").into()))
-                            .is_err()
+                        && ws.send(WsMsg::Text(format!("JOIN #{chan}\r\n"))).is_err()
                     {
                         return End::Dropped;
                     }
                     let line = format!("PRIVMSG #{chan} :{text}\r\n");
-                    if ws.send(WsMsg::Text(line.into())).is_err() {
+                    if ws.send(WsMsg::Text(line)).is_err() {
                         return End::Dropped;
                     }
                 }

@@ -69,11 +69,14 @@ fn resolve(token: &str, slug: &str) -> Option<u64> {
     obj.get("broadcaster_user_id").and_then(Value::as_u64)
 }
 
-fn post(token: &str, id: u64, text: &str) -> Result<(), ureq::Error> {
+// Boxed: ureq::Error is a large enum, and returning it bare makes every Ok
+// carry that width too.
+fn post(token: &str, id: u64, text: &str) -> Result<(), Box<ureq::Error>> {
     agent()
         .post(&format!("{API}/chat"))
         .set("Authorization", &format!("Bearer {token}"))
-        .send_json(json!({ "content": text, "type": "user", "broadcaster_user_id": id }))?;
+        .send_json(json!({ "content": text, "type": "user", "broadcaster_user_id": id }))
+        .map_err(Box::new)?;
     Ok(())
 }
 
