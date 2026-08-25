@@ -233,10 +233,6 @@ fn strip_bttv(word: &str) -> (Vec<Effect>, bool, &str) {
 ///
 /// modifier words that never find an emote degrade to literal text. adjacent
 /// text words coalesce single-spaced. input is assumed already sanitized.
-///
-/// this is the grammar-aware successor to [`tokenize`]; the tui's current
-/// renderer still consumes the plain [`Token`] stream (no modifier grammar
-/// yet), so both live here until render adopts stacks/effects.
 pub fn segments(content: &str, set: &EmoteSet) -> Vec<Segment> {
     let mut out: Vec<Segment> = Vec::new();
     let mut text = String::new();
@@ -323,40 +319,6 @@ pub fn segments(content: &str, set: &EmoteSet) -> Vec<Segment> {
     out
 }
 
-/// a rendered chunk of a message: literal text, or a resolved emote name.
-/// legacy surface — no modifier grammar. kept because the tui's current
-/// renderer (main.rs) lays out plain text/emote tokens; see [`segments`] for
-/// the modifier-aware replacement once render adopts stacks/effects.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Token {
-    Text(String),
-    Emote(String), // emote name; resolve via EmoteSet::get for the url
-}
-
-/// split message text into text + emote tokens by whole-word match. adjacent
-/// text words coalesce (single-spaced). input is assumed already sanitized.
-pub fn tokenize(content: &str, set: &EmoteSet) -> Vec<Token> {
-    let mut out: Vec<Token> = Vec::new();
-    let mut text = String::new();
-    for word in content.split_whitespace() {
-        if set.get(word).is_some() {
-            if !text.is_empty() {
-                out.push(Token::Text(std::mem::take(&mut text)));
-            }
-            out.push(Token::Emote(word.to_string()));
-        } else {
-            if !text.is_empty() {
-                text.push(' ');
-            }
-            text.push_str(word);
-        }
-    }
-    if !text.is_empty() {
-        out.push(Token::Text(text));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,22 +348,6 @@ mod tests {
         ]);
         assert_eq!(set.get("Kappa").unwrap().provider, "7tv");
         assert_eq!(set.len(), 1);
-    }
-
-    #[test]
-    fn tokenizes_text_and_emotes() {
-        let set = EmoteSet::from_list([e("KEKW"), e("GAMBA")]);
-        let toks = tokenize("lol KEKW that GAMBA moment", &set);
-        assert_eq!(
-            toks,
-            vec![
-                Token::Text("lol".into()),
-                Token::Emote("KEKW".into()),
-                Token::Text("that".into()),
-                Token::Emote("GAMBA".into()),
-                Token::Text("moment".into()),
-            ]
-        );
     }
 
     #[test]

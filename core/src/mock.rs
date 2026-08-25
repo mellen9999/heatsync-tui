@@ -144,11 +144,21 @@ impl Driver {
                 if self.rng.unit() < budget.min(1.0) {
                     let user = self.rng.pick(USERS).to_string();
                     let text = self.rng.pick(WORDS).to_string();
+                    // sprinkle role badges so the offline feed exercises the
+                    // same chrome the live one does.
+                    let badges = match self.rng.unit() {
+                        r if r < 0.03 => vec![crate::Badge::Moderator],
+                        r if r < 0.05 => vec![crate::Badge::Vip],
+                        r if r < 0.12 => vec![crate::Badge::Subscriber],
+                        _ => Vec::new(),
+                    };
                     ch.record(
                         Message {
                             user,
                             text,
                             color: None,
+                            badges,
+                            reply_to: None,
                             heat: 0.0,
                         },
                         now,

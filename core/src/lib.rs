@@ -8,6 +8,7 @@
 //! keystrokes into `key::KeyEvent` and gets the same editor.
 
 pub mod clip;
+pub mod complete;
 pub mod edit;
 pub mod emote;
 pub mod heat;
@@ -25,6 +26,8 @@ use std::collections::VecDeque;
 pub enum Platform {
     Twitch,
     Kick,
+    /// youtube live chat — a "channel" here is a live VIDEO id, not a handle.
+    Youtube,
 }
 
 impl Platform {
@@ -32,6 +35,57 @@ impl Platform {
         match self {
             Platform::Twitch => "tw",
             Platform::Kick => "kk",
+            Platform::Youtube => "yt",
+        }
+    }
+}
+
+/// a user role badge, normalized across platforms. twitch sends
+/// `"broadcaster/1,moderator/1"`, kick sends `[{name, version}]` — both parse
+/// into this one vocabulary and unknown badges are dropped (nothing renders a
+/// badge we don't recognize).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Badge {
+    Broadcaster,
+    Moderator,
+    Vip,
+    Subscriber,
+    Founder,
+    Staff,
+    Verified,
+    Og,
+}
+
+impl Badge {
+    /// a platform badge name (already lowercased by the caller or matched
+    /// case-insensitively here) → our vocabulary. `partner` is twitch's
+    /// verified checkmark.
+    pub fn from_name(name: &str) -> Option<Badge> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "broadcaster" => Badge::Broadcaster,
+            "moderator" => Badge::Moderator,
+            "vip" => Badge::Vip,
+            "subscriber" => Badge::Subscriber,
+            "founder" => Badge::Founder,
+            "staff" | "admin" => Badge::Staff,
+            "verified" | "partner" => Badge::Verified,
+            "og" => Badge::Og,
+            _ => return None,
+        })
+    }
+
+    /// single-cell glyph — badges must never widen a line by more than one
+    /// column each.
+    pub fn glyph(self) -> char {
+        match self {
+            Badge::Broadcaster => 'B',
+            Badge::Moderator => 'M',
+            Badge::Vip => 'V',
+            Badge::Subscriber => 'S',
+            Badge::Founder => 'F',
+            Badge::Staff => 'A',
+            Badge::Verified => '✓',
+            Badge::Og => 'O',
         }
     }
 }
@@ -44,6 +98,9 @@ pub struct Message {
     pub user: String,
     pub text: String,
     pub color: Option<String>,
+    pub badges: Vec<Badge>,
+    /// username this message replies to, when the platform sent one.
+    pub reply_to: Option<String>,
     pub heat: f64,
 }
 
@@ -84,6 +141,26 @@ impl Channel {
         self.last_ms = now_ms;
     }
 
+    /// seed scrollback with archived history: prepended oldest-outward, deduped
+    /// against lines already buffered (the live feed may overlap the archive's
+    /// tail), heat untouched — history is cold by definition. `msgs` is
+    /// chronological (oldest first); the cap still bounds the buffer.
+    pub fn backfill(&mut self, msgs: Vec<Message>) {
+        for m in msgs.into_iter().rev() {
+            if self.messages.len() == self.cap {
+                break;
+            }
+            if self
+                .messages
+                .iter()
+                .any(|e| e.user == m.user && e.text == m.text)
+            {
+                continue;
+            }
+            self.messages.push_front(m);
+        }
+    }
+
     /// record a message: decay to now, add one increment, snapshot heat onto
     /// the line, then store it (evicting the oldest past the cap).
     pub fn record(&mut self, mut msg: Message, now_ms: u64) {
@@ -94,5 +171,53 @@ impl Channel {
             self.messages.pop_front();
         }
         self.messages.push_back(msg);
+    }
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+
+    fn msg(user: &str, text: &str) -> Message {
+        Message {
+            user: user.into(),
+            text: text.into(),
+            color: None,
+            badges: Vec::new(),
+            reply_to: None,
+            heat: 0.0,
+        }
+    }
+
+    #[test]
+    fn backfill_prepends_in_order_and_dedupes_against_live() {
+        let mut ch = Channel::new("c", Platform::Twitch, 10);
+        ch.record(msg("live", "already here"), 1);
+        ch.backfill(vec![
+            msg("a", "one"),
+            msg("live", "already here"), // overlap with the live tail
+            msg("b", "two"),
+        ]);
+        let got: Vec<&str> = ch.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(got, vec!["one", "two", "already here"]);
+    }
+
+    #[test]
+    fn backfill_respects_the_cap_keeping_the_newest_history() {
+        let mut ch = Channel::new("c", Platform::Twitch, 3);
+        ch.record(msg("live", "now"), 1);
+        ch.backfill((0..5).map(|i| msg("u", &format!("h{i}"))).collect());
+        assert_eq!(ch.messages.len(), 3);
+        let got: Vec<&str> = ch.messages.iter().map(|m| m.text.as_str()).collect();
+        // newest history survives, oldest is dropped
+        assert_eq!(got, vec!["h3", "h4", "now"]);
+    }
+
+    #[test]
+    fn backfill_leaves_heat_alone() {
+        let mut ch = Channel::new("c", Platform::Kick, 10);
+        ch.backfill(vec![msg("a", "x")]);
+        assert_eq!(ch.heat, 0.0);
+        assert_eq!(ch.messages[0].heat, 0.0);
     }
 }

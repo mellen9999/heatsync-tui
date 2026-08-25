@@ -3,4 +3,5 @@
 
 pub mod decode;
 pub mod fb;
+pub mod fx;
 pub mod render;

@@ -18,6 +18,7 @@ fn platform_q(p: Platform) -> &'static str {
     match p {
         Platform::Twitch => "twitch",
         Platform::Kick => "kick",
+        Platform::Youtube => "youtube",
     }
 }
 
@@ -80,6 +81,9 @@ pub struct ArchiveMsg {
     pub message: String,
     #[serde(default)]
     pub timestamp: String,
+    /// `[{name, version}]` — same shape the kick ws frames use.
+    #[serde(default)]
+    pub badges: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +110,76 @@ pub fn channel_log(channel: &str, from: &str, to: &str, limit: u32) -> Option<Ar
     let url =
         format!("{BASE}/api/archive/channel/{channel}/messages?from={from}&to={to}&limit={limit}");
     agent().get(&url).call().ok()?.into_json().ok()
+}
+
+/// the last messages a channel saw, oldest first — scrollback seed for a fresh
+/// tab. the archive reads ascending, so we ask for a recent window and keep the
+/// tail, widening the window when a quiet channel comes back thin. rows are
+/// sanitized here — archive content crosses the same trust boundary live chat
+/// does.
+pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_core::Message> {
+    use heatsync_core::{proto::badges_from, sanitize};
+    let mut best: Vec<ArchiveMsg> = Vec::new();
+    for mins in [10u64, 60, 480] {
+        let from = iso_from_unix(unix_now().saturating_sub(mins * 60));
+        let to = iso_from_unix(unix_now());
+        let Some(page) = channel_log(channel, &from, &to, 200) else {
+            continue;
+        };
+        let rows: Vec<ArchiveMsg> = page
+            .results
+            .into_iter()
+            .filter(|r| r.platform == platform_q(platform))
+            .collect();
+        let enough = rows.len() >= want;
+        best = rows;
+        if enough {
+            break;
+        }
+    }
+    let skip = best.len().saturating_sub(want);
+    best.drain(..skip);
+    best.into_iter()
+        .map(|r| {
+            let user = sanitize::clean(r.display_name.as_deref().unwrap_or(&r.username));
+            heatsync_core::Message {
+                user: if user.is_empty() {
+                    sanitize::clean(&r.username)
+                } else {
+                    user
+                },
+                text: sanitize::clean(&r.message),
+                color: None,
+                badges: badges_from(r.badges.as_ref()),
+                reply_to: None,
+                heat: 0.0,
+            }
+        })
+        .filter(|m| !m.user.is_empty() || !m.text.is_empty())
+        .collect()
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// unix seconds → `YYYY-MM-DDThh:mm:ssZ`. hand-rolled civil-date conversion
+/// (Hinnant's algorithm) — fifteen tested lines beat a date dependency.
+fn iso_from_unix(t: u64) -> String {
+    let (h, mi, s) = ((t % 86400) / 3600, (t % 3600) / 60, t % 60);
+    let z = (t / 86400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
 /// hottest posts across the platform (these carry real heat).
@@ -205,6 +279,19 @@ pub fn admin_pending_reports(token: &str) -> Option<i64> {
 /// NCMEC reports stuck in a failed/manual state — never routine, always worth surfacing.
 pub fn admin_ncmec_backlog(token: &str) -> Option<i64> {
     admin_get::<NcmecPage>("/api/admin/ncmec-reports", token).map(|p| p.count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iso_from_unix;
+
+    #[test]
+    fn iso_conversion_hits_known_instants() {
+        assert_eq!(iso_from_unix(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_from_unix(1_735_689_600), "2025-01-01T00:00:00Z");
+        assert_eq!(iso_from_unix(951_782_400), "2000-02-29T00:00:00Z"); // leap day
+        assert_eq!(iso_from_unix(1_787_697_045), "2026-08-25T22:30:45Z");
+    }
 }
 
 /// minimal percent-encoding for query values (alnum + a few safe chars pass).

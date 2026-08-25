@@ -57,16 +57,17 @@ pub struct Config {
     pub channels: Vec<(Platform, String)>,
 }
 
-/// serialize a channel as `twitch:name` / `kick:name` for the config line.
+/// serialize a channel as `twitch:name` / `kick:name` / `yt:videoid`.
 fn chan_str(p: Platform, name: &str) -> String {
     let pfx = match p {
         Platform::Twitch => "twitch",
         Platform::Kick => "kick",
+        Platform::Youtube => "yt",
     };
     format!("{pfx}:{name}")
 }
 
-/// parse one `twitch:name` / `kick:name` / `name` token (bare = twitch).
+/// parse one `twitch:name` / `kick:name` / `yt:id` / `name` token (bare = twitch).
 fn parse_chan(s: &str) -> Option<(Platform, String)> {
     let s = s.trim();
     if s.is_empty() {
@@ -74,6 +75,8 @@ fn parse_chan(s: &str) -> Option<(Platform, String)> {
     }
     if let Some(r) = s.strip_prefix("kick:") {
         Some((Platform::Kick, r.trim().to_string()))
+    } else if let Some(r) = s.strip_prefix("yt:").or_else(|| s.strip_prefix("youtube:")) {
+        Some((Platform::Youtube, r.trim().to_string()))
     } else if let Some(r) = s.strip_prefix("twitch:") {
         Some((Platform::Twitch, r.trim().to_string()))
     } else {

@@ -182,6 +182,9 @@ mod linux {
         start: Instant,
         budget: std::cell::Cell<usize>,
         square_w: u16,
+        /// ms until the soonest flip among animations DRAWN last blit — what
+        /// the event loop sleeps on. off-screen animations schedule nothing.
+        next_flip: std::cell::Cell<u64>,
     }
 
     impl Inner {
@@ -239,6 +242,7 @@ mod linux {
                 start: Instant::now(),
                 budget: std::cell::Cell::new(DRAW_BUDGET),
                 square_w: width_cells(1.0, cw, ch),
+                next_flip: std::cell::Cell::new(u64::MAX),
             })
         }
 
@@ -295,17 +299,10 @@ mod linux {
             }
         }
 
-        /// ms until the soonest-flipping loaded emote changes frame.
+        /// ms until the soonest flip among animations painted last blit —
+        /// off-screen animations (cached, never queued) never wake the loop.
         pub fn next_flip_in(&self) -> Option<Duration> {
-            let now = self.start.elapsed().as_millis() as u64;
-            let mut soonest = u64::MAX;
-            for e in self.cache.borrow().values() {
-                if let Entry::Ready(a) = e {
-                    if a.frames.len() > 1 {
-                        soonest = soonest.min(frame_at(&a.frames, now, a.total_ms).1);
-                    }
-                }
-            }
+            let soonest = self.next_flip.get();
             (soonest != u64::MAX).then(|| Duration::from_millis(soonest.max(1)))
         }
 
@@ -314,6 +311,7 @@ mod linux {
             let now = self.start.elapsed().as_millis() as u64;
             let cache = self.cache.borrow();
             let mut fb = self.fb.borrow_mut();
+            self.next_flip.set(u64::MAX);
             for p in queued {
                 if self.budget.get() == 0 {
                     break;
@@ -323,7 +321,10 @@ mod linux {
                     _ => continue,
                 };
                 self.budget.set(self.budget.get() - 1);
-                let idx = frame_at(&a.frames, now, a.total_ms).0;
+                let (idx, flip_in) = frame_at(&a.frames, now, a.total_ms);
+                if a.frames.len() > 1 {
+                    self.next_flip.set(self.next_flip.get().min(flip_in));
+                }
                 self.paint(&mut fb, &a.frames[idx].rgba, p.col, p.row);
             }
         }

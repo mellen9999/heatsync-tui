@@ -27,9 +27,10 @@ use config::TabPos;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use emote::fb::FbEmotes;
 use emote::render::{EmoteStore, EMOTE_H};
-use heatsync_core::emote::{tokenize, EmoteSet, Token};
+use heatsync_core::complete::Completion;
+use heatsync_core::emote::{segments, EmoteSet, Segment};
 use heatsync_core::heat::Tier;
-use heatsync_core::{mock, Channel, Message, Platform};
+use heatsync_core::{mock, Badge, Channel, Message, Platform};
 use net::{ChatEvent, Sub};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -82,10 +83,18 @@ struct App {
     kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>, // direct kick sender
     tab_pos: TabPos,
     manage_cursor: usize, // cursor in the Manage view
+    /// a tab-completion walk in progress; any non-tab key ends it.
+    completion: Option<Completion>,
+    /// own username (twitch login), for mention highlighting.
+    me: Option<String>,
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the
     // UI); results arrive here keyed by (platform, name) and merge in.
     emote_tx: Sender<(Platform, String, EmoteSet)>,
     emote_rx: Receiver<(Platform, String, EmoteSet)>,
+    // archived scrollback arrives the same way: fetched per channel at join,
+    // merged in behind whatever live lines have already landed.
+    hist_tx: Sender<(Platform, String, Vec<Message>)>,
+    hist_rx: Receiver<(Platform, String, Vec<Message>)>,
 }
 
 /// which emote backend a channel column should draw with this frame.
@@ -135,6 +144,7 @@ heatsync-tui — heat-sorted live multichat in the terminal
 
 USAGE:
     heatsync-tui [CHANNEL...]        open the chat UI on those channels
+                                     (name, kick:name, yt:videoid or a youtube url)
     heatsync-tui <SUBCOMMAND>
 
 SUBCOMMANDS:
@@ -201,6 +211,7 @@ fn main() -> io::Result<()> {
 
     let app = if mock_mode {
         let (emote_tx, emote_rx) = std::sync::mpsc::channel();
+        let (hist_tx, hist_rx) = std::sync::mpsc::channel();
         App {
             channels: mock::channels(),
             emotes: (0..mock::channels().len())
@@ -220,8 +231,12 @@ fn main() -> io::Result<()> {
             kick_tx: None,
             tab_pos: cfg.tab_pos,
             manage_cursor: 0,
+            completion: None,
+            me: None,
             emote_tx,
             emote_rx,
+            hist_tx,
+            hist_rx,
         }
     } else {
         build_live(&chan_args, cfg.tab_pos, cfg.channels)
@@ -285,12 +300,18 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
     // channels open immediately with empty emote sets; each set is fetched on a
     // background thread and merged in via emote_rx once it lands (no UI stall).
     let (emote_tx, emote_rx) = std::sync::mpsc::channel();
+    let (hist_tx, hist_rx) = std::sync::mpsc::channel();
     let mut channels = Vec::new();
     let mut emotes = Vec::new();
     for (platform, name) in &subs {
         channels.push(Channel::new(name, *platform, 200));
         emotes.push(EmoteSet::new());
-        spawn_emote_fetch(&emote_tx, *platform, name.clone());
+        // youtube has no emote API, and its archive is keyed by broadcaster
+        // name (we only know the video id) — both fetches would be dead calls.
+        if *platform != Platform::Youtube {
+            spawn_emote_fetch(&emote_tx, *platform, name.clone());
+            spawn_history(&hist_tx, *platform, name.clone());
+        }
     }
 
     let token = std::env::var("HEATSYNC_TOKEN")
@@ -299,6 +320,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
     let (rx, out) = net::spawn(subs, token);
     // direct-to-platform sending if the user supplied their own platform tokens.
     let auth = config::load_auth();
+    let me = auth.twitch_user.clone();
     let kick_tx = auth.kick_token.clone().map(kick::spawn);
     let twitch_tx = match (auth.twitch_user, auth.twitch_oauth) {
         (Some(u), Some(o)) => Some(twitch::spawn(u, o)),
@@ -325,8 +347,12 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
         kick_tx,
         tab_pos,
         manage_cursor: 0,
+        completion: None,
+        me,
         emote_tx,
         emote_rx,
+        hist_tx,
+        hist_rx,
     }
 }
 
@@ -340,6 +366,48 @@ fn spawn_emote_fetch(tx: &Sender<(Platform, String, EmoteSet)>, platform: Platfo
     });
 }
 
+/// fetch a channel's recent archive tail on a detached thread — scrollback on
+/// open instead of an empty pane waiting for the feed to warm up.
+fn spawn_history(tx: &Sender<(Platform, String, Vec<Message>)>, platform: Platform, name: String) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let msgs = http::recent(&name, platform, 60);
+        if !msgs.is_empty() {
+            let _ = tx.send((platform, name, msgs));
+        }
+    });
+}
+
+/// merge fetched history behind whatever live lines already landed, and start
+/// image loads for the emotes it references.
+fn drain_history(app: &mut App) {
+    let App {
+        channels,
+        emotes,
+        store,
+        fb,
+        hist_rx,
+        focus,
+        ..
+    } = app;
+    while let Ok((platform, name, msgs)) = hist_rx.try_recv() {
+        if let Some(i) = channels
+            .iter()
+            .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
+        {
+            channels[i].backfill(msgs);
+            // focused channel only — background history warms up via the tick
+            // sweep when it's actually looked at.
+            if i == *focus {
+                let from = channels[i].messages.len().saturating_sub(60);
+                for m in channels[i].messages.iter().skip(from) {
+                    request_stacks(store, fb, &emotes[i], &m.text);
+                }
+            }
+        }
+    }
+}
+
 /// merge any emote sets that finished fetching into their channel columns, and
 /// prefetch images for the backlog those sets just made resolvable — messages
 /// that arrived before the set landed were scanned against an empty set.
@@ -350,6 +418,7 @@ fn drain_emotes(app: &mut App) {
         store,
         fb,
         emote_rx,
+        focus,
         ..
     } = app;
     while let Ok((platform, name, set)) = emote_rx.try_recv() {
@@ -358,9 +427,13 @@ fn drain_emotes(app: &mut App) {
             .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
         {
             emotes[i] = set;
-            let from = channels[i].messages.len().saturating_sub(60);
-            for m in channels[i].messages.iter().skip(from) {
-                request_stacks(store, fb, &emotes[i], &m.text);
+            // rescan only the channel on screen — a background channel's
+            // backlog is warmed by the tick sweep if and when it's focused.
+            if i == *focus {
+                let from = channels[i].messages.len().saturating_sub(60);
+                for m in channels[i].messages.iter().skip(from) {
+                    request_stacks(store, fb, &emotes[i], &m.text);
+                }
             }
         }
     }
@@ -385,11 +458,31 @@ fn save_state(app: &App) {
 fn parse_sub(tok: &str) -> Sub {
     if let Some(rest) = tok.strip_prefix("kick:") {
         (Platform::Kick, rest.to_string())
+    } else if let Some(rest) = tok.strip_prefix("yt:").or_else(|| tok.strip_prefix("youtube:")) {
+        (Platform::Youtube, yt_video_id(rest))
+    } else if tok.contains("youtube.com") || tok.contains("youtu.be") {
+        (Platform::Youtube, yt_video_id(tok))
     } else if let Some(rest) = tok.strip_prefix("twitch:") {
         (Platform::Twitch, rest.to_string())
     } else {
         (Platform::Twitch, tok.to_string())
     }
+}
+
+/// pull the live VIDEO id out of whatever the user pasted: a bare id, a
+/// `watch?v=` url, `youtu.be/id`, or `/live/id`. youtube chat subscribes by
+/// video id — a handle url can't be resolved client-side, so the id is the
+/// canonical channel name.
+fn yt_video_id(tok: &str) -> String {
+    let tail = tok
+        .split_once("v=")
+        .map(|(_, t)| t)
+        .or_else(|| tok.split_once("youtu.be/").map(|(_, t)| t))
+        .or_else(|| tok.split_once("/live/").map(|(_, t)| t))
+        .unwrap_or(tok);
+    tail.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
 }
 
 fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
@@ -408,6 +501,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     let mut draw_cost = Duration::ZERO;
     loop {
         drain_emotes(&mut app);
+        drain_history(&mut app);
         // new chat lines and finished emote loads land on EVERY wake — at the
         // animation cadence that's within one frame of arrival, never parked
         // until the next data tick. the tick below keeps only the slow work
@@ -416,13 +510,31 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             drain_feed(&mut app);
         }
         pump_loads(&mut app);
+        // composer preview: load images for emotes in the draft as it's typed
+        // (idempotent per key — a cached emote costs a hash lookup).
+        if app.mode == InputMode::Insert && !app.channels.is_empty() {
+            let text = app.line.text();
+            let focus = app.focus;
+            let App {
+                store, fb, emotes, ..
+            } = &mut app;
+            request_stacks(store, fb, &emotes[focus], &text);
+        }
         // snapshot the animation clock + reset the per-draw blit budget, so every
         // emote in this frame is sampled at the same instant.
         if let Some(store) = &app.store {
             store.begin_frame();
         }
         let drew_at = Instant::now();
-        terminal.draw(|f| ui(f, &app))?;
+        // synchronized output (DECSET 2026): the terminal holds presentation
+        // until the frame is complete. without it every sixel/kitty blit shows
+        // as it streams — on an animation-heavy channel that reads as flicker
+        // and a cursor darting to each emote. foot/kitty/wezterm and tmux ≥3.4
+        // honour it; terminals that don't simply ignore the mode.
+        crossterm::execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
+        let drew = terminal.draw(|f| ui(f, &app));
+        crossterm::execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
+        drew?;
         // exponential moving average — one slow frame shouldn't throttle us, a
         // sustained slow terminal should.
         draw_cost = (draw_cost * 3 + drew_at.elapsed()) / 4;
@@ -480,6 +592,18 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         // the composer is a vi line editor: it owns insert vs normal, and only
         // tells us when the line should be sent or put away.
         InputMode::Insert => {
+            // tab walks emote/username completion; any other key ends the walk.
+            match k.code {
+                KeyCode::Tab => {
+                    complete_step(app, 1);
+                    return Flow::Continue;
+                }
+                KeyCode::BackTab => {
+                    complete_step(app, -1);
+                    return Flow::Continue;
+                }
+                _ => app.completion = None,
+            }
             if !matches!(k.code, KeyCode::Esc | KeyCode::Enter) {
                 app.status = None; // typing dismisses the last command's reply
             }
@@ -644,7 +768,10 @@ fn open_channel(app: &mut App, tok: &str) {
     }
     app.channels.push(Channel::new(&name, platform, 200));
     app.emotes.push(EmoteSet::new()); // populated async — see spawn_emote_fetch
-    spawn_emote_fetch(&app.emote_tx, platform, name);
+    if platform != Platform::Youtube {
+        spawn_emote_fetch(&app.emote_tx, platform, name.clone());
+        spawn_history(&app.hist_tx, platform, name);
+    }
     app.focus = app.channels.len() - 1;
     save_state(app);
 }
@@ -764,6 +891,25 @@ fn send_focused(app: &mut App) -> Flow {
     if text.is_empty() || app.channels.is_empty() {
         return Flow::Continue;
     }
+    // offline feed: echo the line locally — the composer (completion, preview,
+    // history) works end-to-end with no network and nothing leaves the machine.
+    if matches!(app.feed, Feed::Mock(_)) {
+        let ch = &mut app.channels[app.focus];
+        let now = ch.last_ms;
+        ch.record(
+            Message {
+                user: "you".into(),
+                text,
+                color: Some("#ff8700".into()),
+                badges: Vec::new(),
+                reply_to: None,
+                heat: 0.0,
+            },
+            now,
+        );
+        app.line.accept();
+        return Flow::Continue;
+    }
     let (platform, name) = {
         let c = &app.channels[app.focus];
         (c.platform, c.name.clone())
@@ -795,8 +941,57 @@ fn send_focused(app: &mut App) -> Flow {
                 app.status = Some("no kick auth — run: heatsync login kick".into());
             }
         }
+        // youtube sends only via the authenticated relay (extension path).
+        Platform::Youtube => match &app.out {
+            Some(out) => {
+                let _ = out.send(net::Outbound::Chat {
+                    platform: Platform::Youtube,
+                    channel: name.clone(),
+                    text,
+                });
+                app.line.accept();
+                app.status = Some(format!("sent → {name} (via ext)"));
+            }
+            None => app.status = Some("no send path — set HEATSYNC_TOKEN".into()),
+        },
     }
     Flow::Continue
+}
+
+/// one tab press: start or continue a completion walk over the focused
+/// channel's emote names and recent chatters. `dir` is 1 (tab) or -1 (s-tab).
+fn complete_step(app: &mut App, dir: i32) {
+    // completion is a typing gesture — vi-normal keeps tab inert.
+    if app.line.mode() != edit::Mode::Insert {
+        return;
+    }
+    if app.completion.is_none() {
+        let Some(ch) = app.channels.get(app.focus) else {
+            return;
+        };
+        // recent chatters, newest first, deduped — the people you'd reply to.
+        let mut users: Vec<&str> = Vec::new();
+        for m in ch.messages.iter().rev() {
+            if !users.iter().any(|u| u.eq_ignore_ascii_case(&m.user)) {
+                users.push(&m.user);
+            }
+            if users.len() >= 50 {
+                break;
+            }
+        }
+        let text = app.line.text();
+        app.completion = Completion::build(
+            &text,
+            app.line.cursor(),
+            app.emotes[app.focus].names(),
+            users.into_iter(),
+        );
+    }
+    if let Some(c) = &mut app.completion {
+        let (lo, hi, s) = c.advance(dir);
+        let s = s.to_string();
+        app.line.replace_range(lo, hi, &s);
+    }
 }
 
 /// kick off image loads for every emote stack in `text` (idempotent — a key
@@ -824,6 +1019,7 @@ fn drain_feed(app: &mut App) {
         store,
         fb,
         status,
+        focus,
         ..
     } = app;
     let Feed::Live {
@@ -841,14 +1037,21 @@ fn drain_feed(app: &mut App) {
                 if let Some(i) = channels.iter().position(|c| {
                     c.platform == l.platform && c.name.eq_ignore_ascii_case(&l.channel)
                 }) {
-                    // fetch starts the instant the line lands — by the time it
-                    // scrolls into view the image is usually already built.
-                    request_stacks(store, fb, &emotes[i], &l.content);
+                    // fetch starts the instant the line lands — but only for
+                    // the channel on screen. prefetching every background
+                    // channel's emotes burned network + decode for images
+                    // that might never be looked at; a switched-to channel is
+                    // filled by the tick sweep within 200ms instead.
+                    if i == *focus {
+                        request_stacks(store, fb, &emotes[i], &l.content);
+                    }
                     channels[i].record(
                         Message {
                             user: l.user,
                             text: l.content,
                             color: l.color,
+                            badges: l.badges,
+                            reply_to: l.reply_to,
                             heat: 0.0,
                         },
                         now,
@@ -933,8 +1136,19 @@ fn emote_mode(app: &App) -> EmoteMode<'_> {
 
 fn ui(f: &mut Frame, app: &App) {
     let mode = emote_mode(app);
-    let [main, footer] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
+    // wysiwyg strip: while composing, a draft that resolves an emote gets a
+    // live preview row above the footer — the message as it will actually
+    // render, images included. zero rows (and zero cost) otherwise.
+    let preview_h = preview_height(app, mode);
+    let [main, preview, footer] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(preview_h),
+        Constraint::Length(1),
+    ])
+    .areas(f.area());
+    if preview_h > 0 {
+        draw_preview(f, preview, app, mode);
+    }
 
     if app.mode == InputMode::Manage {
         draw_manage(f, main, app);
@@ -983,6 +1197,36 @@ fn ui(f: &mut Frame, app: &App) {
     draw_tabs(f, tabs, app);
     draw_active(f, chat, app, mode);
     draw_footer(f, footer, app, app.channels.len());
+}
+
+/// rows the composer preview needs: EMOTE_H when the draft resolves at least
+/// one emote on a graphics tier, else 0 (plain text needs no preview — the
+/// composer already IS the text).
+fn preview_height(app: &App, mode: EmoteMode) -> u16 {
+    if app.mode != InputMode::Insert || app.channels.is_empty() || mode.square_cells().is_none() {
+        return 0;
+    }
+    let text = app.line.text();
+    if text.is_empty() {
+        return 0;
+    }
+    let set = &app.emotes[app.focus];
+    if segments(&text, set)
+        .iter()
+        .any(|s| matches!(s, Segment::Stack(_))) { EMOTE_H } else { 0 }
+}
+
+/// the draft as it will render — same layout path as a real chat row (first
+/// visual row; the preview strip is one emote-row tall).
+fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
+    let set = &app.emotes[app.focus];
+    let mut b = Rows::new(area.width);
+    b.prefix(Span::styled(" ❯ ", Style::default().fg(ACCENT)), 3);
+    let text = app.line.text();
+    layout_text(&mut b, &text, set, mode);
+    if let Some(row) = b.finish(None).into_iter().next() {
+        draw_planned(f, mode, area, area.y, row.line, &row.places, EMOTE_H);
+    }
 }
 
 /// the channel tab bar — horizontal row (top/bottom) or vertical list (left/right).
@@ -1044,77 +1288,107 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     }
 
     let cap = body.height as usize;
-    // plan visible messages newest-first, honouring per-message height. chat
-    // always follows live — there is no scrollback and no message cursor.
-    // one layout pass per message: the same walk that builds the spans also
-    // reports whether the row holds an image (its height) — messages are never
-    // tokenized twice per frame.
-    let mut plan: Vec<(Line, Vec<Place>, usize)> = Vec::new();
+    // plan visible messages newest-first, honouring per-message height (wrapped
+    // rows + emote rows). chat always follows live — no scrollback, no message
+    // cursor. layout stops the moment the pane is full: nothing outside the
+    // viewport is ever laid out or drawn.
+    let mut plan: Vec<Vec<RowPlan>> = Vec::new();
     let mut used = 0usize;
     for m in ch.messages.iter().rev() {
-        let (line, places, has_stack) = layout_message(m, set, mode, body.width);
-        let h = if has_stack { EMOTE_H as usize } else { 1 };
+        let mut rows = layout_message(m, set, mode, body.width, app.me.as_deref());
+        let h: usize = rows.iter().map(|r| r.h as usize).sum();
         if used + h > cap {
+            // the newest message alone can exceed the pane — keep its tail.
+            if used == 0 {
+                let mut acc = 0usize;
+                let keep_from = rows
+                    .iter()
+                    .rposition(|r| {
+                        acc += r.h as usize;
+                        acc > cap
+                    })
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                rows.drain(..keep_from);
+                used = rows.iter().map(|r| r.h as usize).sum();
+                plan.push(rows);
+            }
             break;
         }
         used += h;
-        plan.push((line, places, h));
+        plan.push(rows);
     }
     plan.reverse();
 
     let mut y = body.y + (cap - used) as u16; // bottom-anchor
-    for (line, places, h) in plan {
-        let text_row = y + (h as u16 - 1);
-        f.render_widget(
-            Paragraph::new(line),
-            Rect {
-                x: body.x,
-                y: text_row,
-                width: body.width,
-                height: 1,
-            },
-        );
-        for p in &places {
-            let x = body.x + p.col;
-            match mode {
-                EmoteMode::Term(store) => {
-                    if let Some(proto) = store.frame(&p.key) {
-                        f.render_widget(
-                            Image::new(proto),
-                            Rect {
-                                x,
-                                y,
-                                width: p.w,
-                                height: h as u16,
-                            },
-                        );
-                    }
-                }
-                EmoteMode::Fb(fb) => {
-                    // fill the reserved cells with NBSP — renders blank like a
-                    // space, but DIFFERS from the space that scrolls in behind
-                    // a departing emote. ratatui's diff then re-emits exactly
-                    // those cells and the console itself erases the stale
-                    // pixels before we blit. plain spaces diff as "unchanged",
-                    // the console never repaints them, and old emote pixels
-                    // smear across the screen during fast scroll.
-                    let pad = "\u{a0}".repeat(p.w as usize);
-                    let lines: Vec<Line> = (0..h).map(|_| Line::raw(pad.clone())).collect();
+    for rows in plan {
+        for row in rows {
+            draw_planned(f, mode, body, y, row.line, &row.places, row.h);
+            y += row.h;
+        }
+    }
+}
+
+/// draw one planned row: the text line on the bottom row of its block, then the
+/// reserved emote cells (image inline, or NBSP + framebuffer queue). shared by
+/// the chat body and the composer preview.
+fn draw_planned(
+    f: &mut Frame,
+    mode: EmoteMode,
+    area: Rect,
+    y: u16,
+    line: Line,
+    places: &[Place],
+    h: u16,
+) {
+    f.render_widget(
+        Paragraph::new(line),
+        Rect {
+            x: area.x,
+            y: y + h - 1,
+            width: area.width,
+            height: 1,
+        },
+    );
+    for p in places {
+        let x = area.x + p.col;
+        match mode {
+            EmoteMode::Term(store) => {
+                if let Some(proto) = store.frame(&p.key) {
                     f.render_widget(
-                        Paragraph::new(lines),
+                        Image::new(proto),
                         Rect {
                             x,
                             y,
                             width: p.w,
-                            height: h as u16,
+                            height: h,
                         },
                     );
-                    fb.push(x, y, &p.key);
                 }
-                EmoteMode::Text => {}
             }
+            EmoteMode::Fb(fb) => {
+                // fill the reserved cells with NBSP — renders blank like a
+                // space, but DIFFERS from the space that scrolls in behind
+                // a departing emote. ratatui's diff then re-emits exactly
+                // those cells and the console itself erases the stale
+                // pixels before we blit. plain spaces diff as "unchanged",
+                // the console never repaints them, and old emote pixels
+                // smear across the screen during fast scroll.
+                let pad = "\u{a0}".repeat(p.w as usize);
+                let lines: Vec<Line> = (0..h).map(|_| Line::raw(pad.clone())).collect();
+                f.render_widget(
+                    Paragraph::new(lines),
+                    Rect {
+                        x,
+                        y,
+                        width: p.w,
+                        height: h,
+                    },
+                );
+                fb.push(x, y, &p.key);
+            }
+            EmoteMode::Text => {}
         }
-        y += h as u16;
     }
 }
 
@@ -1186,33 +1460,15 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// walk a message's emote STACKS in order. a stack is a base emote plus any
-/// immediately-following zero-width (overlay) emotes; its key is the layer urls
-/// joined by '\n'. text breaks a stack. shared by layout, prefetch, and height.
+/// walk a message's emote STACKS in order, yielding each stack's cache key.
+/// core's [`segments`] owns the grammar — zero-width overlays, `w!`-style BTTV
+/// prefixes, `z!` forcing, FFZ effect words. shared by layout and prefetch.
 fn each_stack(text: &str, set: &EmoteSet, mut f: impl FnMut(&str)) {
-    let mut urls: Vec<String> = Vec::new();
-    let flush = |urls: &mut Vec<String>, f: &mut dyn FnMut(&str)| {
-        if !urls.is_empty() {
-            f(&urls.join("\n"));
-            urls.clear();
-        }
-    };
-    for tok in tokenize(text, set) {
-        match tok {
-            Token::Emote(name) => {
-                if let Some(e) = set.get(&name) {
-                    if e.zero_width && !urls.is_empty() {
-                        urls.push(e.url.clone()); // overlay onto the current base
-                    } else {
-                        flush(&mut urls, &mut f);
-                        urls.push(e.url.clone()); // new base
-                    }
-                }
-            }
-            Token::Text(_) => flush(&mut urls, &mut f),
+    for seg in segments(text, set) {
+        if let Segment::Stack(s) = seg {
+            f(&s.key());
         }
     }
-    flush(&mut urls, &mut f);
 }
 
 /// truncate a label to `w` display columns (approximate; ASCII-dominant labels).
@@ -1252,103 +1508,300 @@ struct Place {
     key: String,
 }
 
-/// lay a message onto one row: the text line (with blank cells where ready emote
-/// stacks go) plus the reserved emote slots. a base emote absorbs any following
-/// zero-width (overlay) emotes into one stack. an unloaded/text-mode emote falls
-/// back to its name. the third return is whether the row reserves image space —
-/// true from the moment the NAME resolves (loading placeholder included), so the
-/// row is already EMOTE_H tall when the picture arrives and nothing reflows.
+/// does `text` address `me` — as a word, with or without a leading `@` and
+/// trailing punctuation ("@Mellen," pings mellen).
+fn mentions(text: &str, me: &str) -> bool {
+    text.split_whitespace().any(|w| {
+        w.trim_start_matches('@')
+            .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')
+            .eq_ignore_ascii_case(me)
+    })
+}
+
+/// one-cell role badge: black glyph on the role's color. same black-on-color
+/// scheme as the active tab — square, dense, no brackets.
+fn badge_span(b: Badge) -> Span<'static> {
+    let bg = match b {
+        Badge::Broadcaster => 196, // red
+        Badge::Moderator => 40,    // green
+        Badge::Vip => 213,         // pink
+        Badge::Subscriber => 99,   // purple
+        Badge::Founder => 208,     // orange
+        Badge::Staff => 129,       // violet
+        Badge::Verified => 45,     // cyan
+        Badge::Og => 51,           // teal
+    };
+    Span::styled(
+        b.glyph().to_string(),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Indexed(bg))
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// continuation rows hang under the message body by this many columns.
+const WRAP_INDENT: u16 = 2;
+/// visual rows one message may occupy — bounds an emote/text wall so a single
+/// line can never eat the whole pane. twitch/kick cap text at 500 chars, which
+/// wraps well inside this on any sane width.
+const MAX_MSG_ROWS: usize = 8;
+
+/// one visual row of a laid-out message: its text line, its reserved emote
+/// slots, and its height (EMOTE_H when it holds an image, else 1).
+struct RowPlan {
+    line: Line<'static>,
+    places: Vec<Place>,
+    h: u16,
+}
+
+/// the wrapping layouter: words and emote stacks flow left to right and wrap
+/// onto indented continuation rows. shared by chat rows and the composer
+/// preview.
+struct Rows {
+    maxw: u16,
+    rows: Vec<RowPlan>,
+    spans: Vec<Span<'static>>,
+    places: Vec<Place>,
+    col: u16,
+    row_start: u16, // col where content on this row begins (prefix or indent)
+    has_stack: bool,
+    full: bool, // hit MAX_MSG_ROWS — stop consuming
+}
+
+impl Rows {
+    fn new(maxw: u16) -> Rows {
+        Rows {
+            maxw: maxw.max(WRAP_INDENT + 1),
+            rows: Vec::new(),
+            spans: Vec::new(),
+            places: Vec::new(),
+            col: 0,
+            row_start: 0,
+            has_stack: false,
+            full: false,
+        }
+    }
+
+    /// append a prefix span that never wraps (badges, username).
+    fn prefix(&mut self, span: Span<'static>, w: u16) {
+        self.spans.push(span);
+        self.col += w;
+        self.row_start = self.col.min(self.maxw);
+    }
+
+    fn at_row_start(&self) -> bool {
+        self.col == self.row_start
+    }
+
+    /// close the current visual row and open an indented continuation.
+    fn newline(&mut self) {
+        let h = if self.has_stack { EMOTE_H } else { 1 };
+        self.rows.push(RowPlan {
+            line: Line::from(std::mem::take(&mut self.spans)),
+            places: std::mem::take(&mut self.places),
+            h,
+        });
+        self.has_stack = false;
+        self.col = WRAP_INDENT;
+        self.row_start = WRAP_INDENT;
+        self.spans.push(Span::raw(" ".repeat(WRAP_INDENT as usize)));
+        if self.rows.len() >= MAX_MSG_ROWS {
+            self.full = true;
+        }
+    }
+
+    /// one word of styled text, wrapping first when it doesn't fit and
+    /// hard-splitting anything wider than a whole row (urls).
+    fn word(&mut self, w: &str, style: Style) {
+        if self.full {
+            return;
+        }
+        let ww = UnicodeWidthStr::width(w) as u16;
+        let lead = u16::from(!self.at_row_start());
+        if self.col + lead + ww > self.maxw && !self.at_row_start() {
+            self.newline();
+            if self.full {
+                return;
+            }
+        }
+        if self.col + ww <= self.maxw {
+            let s = if self.at_row_start() {
+                w.to_string()
+            } else {
+                format!(" {w}")
+            };
+            self.col += UnicodeWidthStr::width(s.as_str()) as u16;
+            self.spans.push(Span::styled(s, style));
+            return;
+        }
+        // wider than a full row: hard-split into row-width chunks.
+        let mut rest = w;
+        while !rest.is_empty() && !self.full {
+            let avail = self.maxw - self.col;
+            let chunk: String = {
+                let mut used = 0u16;
+                rest.chars()
+                    .take_while(|c| {
+                        used += UnicodeWidthChar::width(*c).unwrap_or(0) as u16;
+                        used <= avail
+                    })
+                    .collect()
+            };
+            if chunk.is_empty() {
+                break; // a glyph wider than the remaining row — drop it
+            }
+            rest = &rest[chunk.len()..];
+            self.col += UnicodeWidthStr::width(chunk.as_str()) as u16;
+            self.spans.push(Span::styled(chunk, style));
+            if !rest.is_empty() {
+                self.newline();
+            }
+        }
+    }
+
+    /// one emote stack: reserve its cells (image or placeholder), wrapping
+    /// when it doesn't fit; one too wide for any row falls back to its name.
+    fn stack(&mut self, s: heatsync_core::emote::Stack, mode: EmoteMode) {
+        if self.full {
+            return;
+        }
+        let key = s.key();
+        // a loaded emote knows its width; a loading one is laid out at the
+        // provisional square footprint (doubled for w!/ffzW) so nothing
+        // reflows when the image lands.
+        let sized = match mode.cells(&key) {
+            Some(w) => Some((w, true)),
+            None => mode
+                .square_cells()
+                .map(|w| (if s.wide() { (w * 2).min(8) } else { w }, false)),
+        };
+        let Some((w, ready)) = sized else {
+            // text tier — the name is just a word on the line.
+            return self.word(
+                &s.base,
+                Style::default()
+                    .fg(Color::Indexed(231))
+                    .add_modifier(Modifier::BOLD),
+            );
+        };
+        if self.col + w > self.maxw && !self.at_row_start() {
+            self.newline();
+            if self.full {
+                return;
+            }
+        }
+        if self.col + w > self.maxw {
+            return self.word(&s.base, Style::default().fg(Color::Indexed(231)));
+        }
+        self.has_stack = true;
+        if ready {
+            self.places.push(Place { col: self.col, w, key });
+            self.spans.push(Span::raw(" ".repeat(w as usize)));
+        } else {
+            // loading: hold the exact footprint and show what fits of the
+            // name, so the image swaps in place instead of shoving the line.
+            self.spans.push(Span::styled(
+                fit_exact(&s.base, w),
+                Style::default().fg(Color::Indexed(231)),
+            ));
+        }
+        self.col += w;
+    }
+
+    /// close out; `bg` (mention slab) applies to every row.
+    fn finish(mut self, bg: Option<Style>) -> Vec<RowPlan> {
+        if self.full {
+            // truncated: drop the empty continuation, mark the last real row.
+            if let Some(last) = self.rows.last_mut() {
+                last.line
+                    .spans
+                    .push(Span::styled("…", Style::default().fg(Color::Indexed(244))));
+            }
+        } else if !self.spans.is_empty() || self.rows.is_empty() {
+            let h = if self.has_stack { EMOTE_H } else { 1 };
+            self.rows.push(RowPlan {
+                line: Line::from(std::mem::take(&mut self.spans)),
+                places: std::mem::take(&mut self.places),
+                h,
+            });
+        }
+        if let Some(bg) = bg {
+            for r in &mut self.rows {
+                r.line = std::mem::take(&mut r.line).style(bg);
+            }
+        }
+        self.rows
+    }
+}
+
+/// flow `text`'s segments (words + emote stacks) into the layouter.
+fn layout_text(b: &mut Rows, text: &str, set: &EmoteSet, mode: EmoteMode) {
+    // message text is plain white — heat lives in the bar and tab numbers,
+    // never in the reading surface.
+    let text_hue = Style::default().fg(Color::Indexed(231));
+    for seg in segments(text, set) {
+        if b.full {
+            break;
+        }
+        match seg {
+            Segment::Text(t) => {
+                for w in t.split(' ') {
+                    b.word(w, text_hue);
+                }
+            }
+            Segment::Stack(s) => b.stack(s, mode),
+        }
+    }
+}
+
+/// lay a message out as wrapped visual rows: badges + user prefix on the
+/// first, indented continuations after, emote cells reserved wherever their
+/// stack lands.
 fn layout_message(
     m: &Message,
     set: &EmoteSet,
     mode: EmoteMode,
     maxw: u16,
-) -> (Line<'static>, Vec<Place>, bool) {
-    // message text is plain white — heat lives in the bar and tab numbers,
-    // never in the reading surface.
-    let text_hue = Color::Indexed(231);
+    me: Option<&str>,
+) -> Vec<RowPlan> {
     let user_color = m
         .color
         .as_deref()
         .and_then(parse_hex)
         .unwrap_or(Color::Indexed(244));
-    let mut spans = vec![
-        Span::styled(m.user.clone(), Style::default().fg(user_color)),
-        Span::styled(": ", Style::default().fg(Color::Indexed(244))),
-    ];
-    let mut col = UnicodeWidthStr::width(m.user.as_str()) as u16 + 2;
-    let mut places = Vec::new();
-    let mut has_stack = false;
-
-    let toks = tokenize(&m.text, set);
-    let mut i = 0;
-    while i < toks.len() {
-        if col >= maxw {
-            break;
-        }
-        match &toks[i] {
-            Token::Text(t) => {
-                col += UnicodeWidthStr::width(t.as_str()) as u16;
-                spans.push(Span::styled(t.clone(), Style::default().fg(text_hue)));
-                i += 1;
-            }
-            Token::Emote(name) => {
-                // gather the base emote + any trailing zero-width overlays.
-                let base_name = name.clone();
-                let mut urls: Vec<String> =
-                    set.get(name).map(|e| e.url.clone()).into_iter().collect();
-                i += 1;
-                while let Some(Token::Emote(n2)) = toks.get(i) {
-                    match set.get(n2) {
-                        Some(e2) if e2.zero_width => {
-                            urls.push(e2.url.clone());
-                            i += 1;
-                        }
-                        _ => break,
-                    }
-                }
-                let key = urls.join("\n");
-                // an emote that has finished loading knows its own width; one
-                // still loading is laid out at the provisional square footprint,
-                // so the line does not shift when its image arrives.
-                let w = match mode.cells(&key) {
-                    Some(w) => Some((w, true)),
-                    None => mode.square_cells().map(|w| (w, false)),
-                }
-                .filter(|(w, _)| col + w <= maxw && !urls.is_empty());
-                if let Some((w, ready)) = w {
-                    has_stack = true;
-                    if ready {
-                        places.push(Place { col, w, key });
-                        spans.push(Span::raw(" ".repeat(w as usize)));
-                    } else {
-                        // still loading: hold the exact same footprint and show
-                        // as much of the name as fits, so the image swaps in
-                        // place instead of shoving the line around.
-                        // white (231), not brand orange — emote names sit inside
-                        // chat text and need contrast, not accent spam.
-                        spans.push(Span::styled(
-                            fit_exact(&base_name, w),
-                            Style::default().fg(Color::Indexed(231)),
-                        ));
-                    }
-                    col += w;
-                } else {
-                    col += UnicodeWidthStr::width(base_name.as_str()) as u16;
-                    spans.push(Span::styled(
-                        base_name,
-                        Style::default()
-                            .fg(Color::Indexed(231))
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-            }
-        }
+    let mut b = Rows::new(maxw);
+    // role badges, capped — a badge wall must not eat the line.
+    for &bd in m.badges.iter().take(3) {
+        b.prefix(badge_span(bd), 1);
     }
-    (Line::from(spans), places, has_stack)
+    if !m.badges.is_empty() {
+        b.prefix(Span::raw(" "), 1);
+    }
+    let uw = UnicodeWidthStr::width(m.user.as_str()) as u16;
+    b.prefix(
+        Span::styled(m.user.clone(), Style::default().fg(user_color)),
+        uw,
+    );
+    // reply thread marker: who this message answers, dim, before the content.
+    if let Some(r) = &m.reply_to {
+        let tag = format!(" ↳{r}");
+        let tw = UnicodeWidthStr::width(tag.as_str()) as u16;
+        b.prefix(Span::styled(tag, Style::default().fg(Color::Indexed(244))), tw);
+    }
+    b.prefix(Span::styled(": ", Style::default().fg(Color::Indexed(244))), 2);
+    layout_text(&mut b, &m.text, set, mode);
+    // a line that pings you gets a quiet slab under it — semantic, not decor.
+    let bg = me
+        .is_some_and(|me| mentions(&m.text, me))
+        .then(|| Style::default().bg(Color::Indexed(236)));
+    b.finish(bg)
 }
 
-/// `#rrggbb` → nearest-ish terminal color (truecolor if the term supports it).
+/// `#rrggbb` → terminal color. truecolor terminals get the exact rgb; anything
+/// else (linux vt, old xterms, DEC hardware) gets the nearest xterm-256 index —
+/// emitting 24-bit escapes at a terminal that can't parse them turns user
+/// colors into garbage instead of an approximation.
 fn parse_hex(hex: &str) -> Option<Color> {
     let h = hex.strip_prefix('#')?;
     if h.len() != 6 {
@@ -1357,7 +1810,55 @@ fn parse_hex(hex: &str) -> Option<Color> {
     let r = u8::from_str_radix(&h[0..2], 16).ok()?;
     let g = u8::from_str_radix(&h[2..4], 16).ok()?;
     let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-    Some(Color::Rgb(r, g, b))
+    static TRUECOLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let tc = *TRUECOLOR.get_or_init(|| {
+        std::env::var("COLORTERM")
+            .map(|v| v.contains("truecolor") || v.contains("24bit"))
+            .unwrap_or(false)
+    });
+    Some(if tc {
+        Color::Rgb(r, g, b)
+    } else {
+        Color::Indexed(nearest_256(r, g, b))
+    })
+}
+
+/// nearest xterm-256 index for an rgb triple: best of the 6×6×6 color cube
+/// (16–231) and the gray ramp (232–255).
+fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
+    // cube levels are 0,95,135,175,215,255
+    let q = |v: u8| -> u8 {
+        if v < 48 {
+            0
+        } else if v < 115 {
+            1
+        } else {
+            ((v as u16 - 35) / 40) as u8
+        }
+    };
+    let lv = |i: u8| -> u8 {
+        if i == 0 {
+            0
+        } else {
+            55 + 40 * i
+        }
+    };
+    let (qr, qg, qb) = (q(r), q(g), q(b));
+    let cube = (16 + 36 * qr as u16 + 6 * qg as u16 + qb as u16) as u8;
+    let (cr, cg, cb) = (lv(qr), lv(qg), lv(qb));
+    // gray ramp levels are 8,18,…,238
+    let avg = ((r as u16 + g as u16 + b as u16) / 3) as i16;
+    let gi = (((avg - 3) / 10).clamp(0, 23)) as u8;
+    let gv = 8 + 10 * gi;
+    let d2 = |x: (u8, u8, u8), y: (u8, u8, u8)| -> i32 {
+        let d = |a: u8, b: u8| (a as i32 - b as i32).pow(2);
+        d(x.0, y.0) + d(x.1, y.1) + d(x.2, y.2)
+    };
+    if d2((r, g, b), (gv, gv, gv)) < d2((r, g, b), (cr, cg, cb)) {
+        232 + gi
+    } else {
+        cube
+    }
 }
 
 fn heat_bar(heat: f64, width: usize) -> Line<'static> {
@@ -1423,7 +1924,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))),
             Span::styled("\u{2588}", Style::default().fg(ACCENT)),
             Span::styled(
-                "   name or kick:name",
+                "   name · kick:name · yt:video",
                 Style::default().fg(Color::Indexed(244)),
             ),
         ];
@@ -1435,9 +1936,12 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         let ch = &app.channels[app.focus];
         // read-only only when there's genuinely no send path for this platform:
         // twitch needs the user's own token; kick can also relay via the ws.
-        let readonly = match ch.platform {
-            Platform::Twitch => app.twitch_tx.is_none(),
-            Platform::Kick => app.kick_tx.is_none() && app.out.is_none(),
+        // the mock feed echoes locally, so it always composes.
+        let readonly = match (&app.feed, ch.platform) {
+            (Feed::Mock(_), _) => false,
+            (_, Platform::Twitch) => app.twitch_tx.is_none(),
+            (_, Platform::Kick) => app.kick_tx.is_none() && app.out.is_none(),
+            (_, Platform::Youtube) => app.out.is_none(),
         };
         // the tag names the mode as well as the target, so `esc` never leaves
         // you guessing whether a keystroke will type or command.
@@ -1491,7 +1995,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 ));
             } else if app.line.is_empty() && !normal {
                 spans.push(Span::styled(
-                    "   /join <chan>  /part  /quit  — anything else goes to chat",
+                    "   tab completes emotes/@users  ·  /join /part /quit  ·  text goes to chat",
                     Style::default().fg(Color::Indexed(244)),
                 ));
             } else if normal {
@@ -1611,6 +2115,77 @@ mod fb_reserve_tests {
         assert_eq!(reserved.diff(&scrolled).len(), 3);
         // plain spaces would be invisible to the diff (the smear bug)
         assert!(scrolled.diff(&scrolled).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+
+    fn msg(text: &str) -> Message {
+        Message {
+            user: "u".into(),
+            text: text.into(),
+            color: None,
+            badges: Vec::new(),
+            reply_to: None,
+            heat: 0.0,
+        }
+    }
+
+    fn flat(rows: &[RowPlan]) -> Vec<String> {
+        rows.iter()
+            .map(|r| {
+                r.line
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn long_messages_wrap_onto_indented_rows() {
+        let set = EmoteSet::new();
+        let rows = layout_message(&msg("one two three four five"), &set, EmoteMode::Text, 12, None);
+        let got = flat(&rows);
+        assert!(got.len() > 1, "wrapped: {got:?}");
+        assert_eq!(got[0], "u: one two");
+        assert!(got[1].starts_with("  three"), "indented continuation: {got:?}");
+        // nothing exceeds the width
+        for r in &got {
+            assert!(UnicodeWidthStr::width(r.as_str()) <= 12, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_wider_than_the_row_hard_splits() {
+        let set = EmoteSet::new();
+        let rows = layout_message(&msg("https://example.com/really/long/url"), &set, EmoteMode::Text, 14, None);
+        let got = flat(&rows);
+        assert!(got.len() >= 3, "{got:?}");
+        for r in &got {
+            assert!(UnicodeWidthStr::width(r.as_str()) <= 14, "{r:?}");
+        }
+        assert_eq!(got.join("").replace(' ', ""), "u:https://example.com/really/long/url".replace(' ', ""));
+    }
+
+    #[test]
+    fn a_wall_is_capped_with_an_ellipsis() {
+        let set = EmoteSet::new();
+        let text = "word ".repeat(200);
+        let rows = layout_message(&msg(&text), &set, EmoteMode::Text, 20, None);
+        assert_eq!(rows.len(), MAX_MSG_ROWS);
+        assert!(flat(&rows).last().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn short_messages_stay_on_one_row() {
+        let set = EmoteSet::new();
+        let rows = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, None);
+        assert_eq!(flat(&rows), vec!["u: hi"]);
+        assert_eq!(rows[0].h, 1);
     }
 }
 

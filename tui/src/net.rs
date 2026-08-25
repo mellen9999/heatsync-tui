@@ -162,7 +162,15 @@ fn session(
                     *req += 1;
                     proto::send_kick(&channel, &text, *req)
                 }
-                // twitch has no send path — silently drop.
+                Outbound::Chat {
+                    platform: Platform::Youtube,
+                    channel,
+                    text,
+                } => {
+                    *req += 1;
+                    proto::send_youtube(&channel, &text, *req)
+                }
+                // twitch has no relay send path — silently drop.
                 Outbound::Chat {
                     platform: Platform::Twitch,
                     ..

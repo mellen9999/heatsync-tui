@@ -120,6 +120,10 @@ pub struct EmoteStore {
     // interior-mutable so frame() can run inside ratatui's immutable draw pass.
     budget_left: Cell<usize>,
     lru: Cell<u64>,
+    /// LRU watermark at the start of the previous frame — anything touched
+    /// since then was ON SCREEN, and eviction must never take it (reloading a
+    /// visible emote is exactly the name↔image flicker we removed).
+    frame_mark: Cell<u64>,
     live_frames: usize,
 }
 
@@ -204,6 +208,7 @@ impl EmoteStore {
             next_flip_ms: Cell::new(u64::MAX),
             budget_left: Cell::new(DRAW_BUDGET),
             lru: Cell::new(0),
+            frame_mark: Cell::new(0),
             live_frames: 0,
         })
     }
@@ -289,15 +294,20 @@ impl EmoteStore {
 
     /// trim least-recently-drawn emotes until the live frame count is back under
     /// budget. bounds our memory AND the number of images the terminal holds.
+    /// emotes drawn since the last frame are exempt — evicting one would force
+    /// a reload of something the user is looking at, which flashes its name
+    /// while the image rebuilds. the soft cap can therefore be exceeded by at
+    /// most one screenful.
     fn evict(&mut self) {
         if self.live_frames <= MAX_LIVE_FRAMES {
             return;
         }
+        let mark = self.frame_mark.get();
         let mut aged: Vec<(u64, String)> = self
             .cache
             .iter()
             .filter_map(|(k, e)| match e {
-                Entry::Ready(a) => Some((a.used.get(), k.clone())),
+                Entry::Ready(a) if a.used.get() < mark => Some((a.used.get(), k.clone())),
                 _ => None,
             })
             .collect();
@@ -313,11 +323,13 @@ impl EmoteStore {
     }
 
     /// start a draw: snapshot the animation clock and reset the blit budget. every
-    /// emote in this frame is then sampled at the same instant.
+    /// emote in this frame is then sampled at the same instant. the LRU watermark
+    /// taken here is what marks "touched since last frame" = on screen.
     pub fn begin_frame(&self) {
         self.now_ms.set(self.start.elapsed().as_millis() as u64);
         self.budget_left.set(DRAW_BUDGET);
         self.next_flip_ms.set(u64::MAX);
+        self.frame_mark.set(self.lru.get());
     }
 
     /// how long until the soonest-flipping emote DRAWN LAST FRAME changes frame.
@@ -719,16 +731,21 @@ fn loader(picker: Picker, jobs: Arc<Mutex<Receiver<Job>>>, done: Sender<Done>) {
 }
 
 /// fetch + decode + composite a stack into RGBA frames (base at the bottom,
-/// overlays on top), driven by the longest-animating layer. `key` is one or more
-/// image urls joined by '\n'; `min_px` is the pixel size the caller will render
-/// at, used to pick a CDN size tier that never needs upscaling. no encoding —
-/// shared by build(), the framebuffer tier, and the render-test harness. any
-/// fetch/decode failure → None.
+/// overlays on top), driven by the longest-animating layer, then apply any
+/// effects the key carries (`#codes` pseudo-layer — see core's stack keys).
+/// `key` is layer urls joined by '\n'; `min_px` is the pixel size the caller
+/// will render at, used to pick a CDN size tier that never needs upscaling. no
+/// encoding — shared by build(), the framebuffer tier, and the render-test
+/// harness. any fetch/decode failure → None.
 pub fn composite_frames(key: &str, min_px: u32) -> Option<Vec<(RgbaImage, u32)>> {
+    let (urls, fx) = heatsync_core::emote::split_key(key);
     let mut layers: Vec<decode::Decoded> = Vec::new();
-    for url in key.split('\n') {
+    for url in urls {
         let bytes = fetch_at(url, min_px)?;
         layers.push(decode::decode(&bytes).ok()?);
+    }
+    if layers.is_empty() {
+        return None;
     }
     // canvas = base (first layer) native size; overlays resize onto it.
     let (tw, th) = layers[0].frames.first()?.img.dimensions();
@@ -760,6 +777,7 @@ pub fn composite_frames(key: &str, min_px: u32) -> Option<Vec<(RgbaImage, u32)>>
         out.push((canvas, df.delay_ms));
         t += df.delay_ms.max(MIN_DELAY_MS) as u64;
     }
+    let out = super::fx::apply(out, &fx);
     if out.is_empty() {
         None
     } else {

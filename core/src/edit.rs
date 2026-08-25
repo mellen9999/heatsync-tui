@@ -160,6 +160,20 @@ impl Line {
         self.awaiting = None;
     }
 
+    /// replace `lo..hi` (char indices) with `s`, leaving the cursor after the
+    /// inserted text. undoable. this is the completion hook: tab swaps the word
+    /// under the cursor for a candidate without the editor knowing why.
+    pub fn replace_range(&mut self, lo: usize, hi: usize, s: &str) {
+        let hi = hi.min(self.text.len());
+        let lo = lo.min(hi);
+        self.snapshot();
+        let chars: Vec<char> = s.chars().collect();
+        let n = chars.len();
+        self.text.splice(lo..hi, chars);
+        self.cursor = lo + n;
+        self.clamp();
+    }
+
     fn snapshot(&mut self) {
         self.undo.push((self.text.clone(), self.cursor));
         if self.undo.len() > 100 {
