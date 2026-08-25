@@ -2,6 +2,7 @@
 //! bytes for the TUI, and the archive/corpus reads for the CLI subcommands.
 
 use std::io::Read;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use heatsync_core::emote::{EmoteSet, EmoteSetResponse};
@@ -20,14 +21,20 @@ fn platform_q(p: Platform) -> &'static str {
     }
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(12))
-        // the archive search endpoint gates non-browser UAs (anti-scrape); we're
-        // first-party, so identify as heatsync-tui behind a Mozilla token so the
-        // guard passes. proper fix later: server-side allowlist this UA.
-        .user_agent("Mozilla/5.0 (heatsync-tui/0.1; +https://heatsync.org)")
-        .build()
+/// one shared agent for the whole process — its connection pool reuses TLS
+/// sessions, so a burst of 30 emote fetches from one CDN pays one handshake,
+/// not thirty. thread-safe; the loader pool and emote-set threads all share it.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(12))
+            // the archive search endpoint gates non-browser UAs (anti-scrape); we're
+            // first-party, so identify as heatsync-tui behind a Mozilla token so the
+            // guard passes. proper fix later: server-side allowlist this UA.
+            .user_agent("Mozilla/5.0 (heatsync-tui/0.1; +https://heatsync.org)")
+            .build()
+    })
 }
 
 /// channel emote set (7tv/bttv/ffz precedence, deduped server-side).

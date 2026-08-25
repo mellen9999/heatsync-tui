@@ -19,7 +19,9 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -96,10 +98,11 @@ pub struct EmoteStore {
     proto: ProtocolType, // the detected inline-graphics protocol (for the tier readout)
     /// inside tmux the attached client can change at any time — detach from
     /// foot, reattach over mosh from a phone — and our frames are encoded for
-    /// the protocol probed at startup. re-checked on a TTL (see `usable`).
+    /// the protocol probed at startup. a watcher THREAD re-asks tmux every 2s
+    /// and stores the answer here; the render thread only ever reads the flag,
+    /// so the subprocess spawn can never hitch a frame.
     tmux: bool,
-    outer_ok: Cell<bool>,
-    outer_at: Cell<Instant>,
+    outer_ok: Arc<AtomicBool>,
     /// footprint of a 1:1 emote in cells. the layout reserves this BEFORE an
     /// emote finishes loading, so nothing reflows when the image lands.
     square_w: u16,
@@ -110,6 +113,10 @@ pub struct EmoteStore {
     /// animation clock snapshotted once per draw, so every emote in a frame is
     /// sampled at the SAME instant (deterministic frame, exact flip scheduling).
     now_ms: Cell<u64>,
+    /// soonest ms-to-flip among the animated emotes ACTUALLY DRAWN this frame,
+    /// recorded by frame() as a free by-product of picking the frame index. this
+    /// is what the event loop sleeps on — off-screen animations never wake it.
+    next_flip_ms: Cell<u64>,
     // interior-mutable so frame() can run inside ratatui's immutable draw pass.
     budget_left: Cell<usize>,
     lru: Cell<u64>,
@@ -154,19 +161,47 @@ impl EmoteStore {
         let square_w = width_cells(1.0, cw, ch);
         let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Done>();
-        // one loader thread: fetch + decode + scale + encode with a cloned picker.
-        thread::spawn(move || loader(picker, jobs_rx, done_tx));
+        // a small loader pool: fetch + decode + scale + encode off the render
+        // thread. joining a channel drops ~30 jobs at once; one thread built
+        // them serially and emotes trickled in — a few threads (network-bound
+        // work) make the whole set land near-simultaneously. capped low so a
+        // passive-cooled box never spins every core on decode.
+        let jobs_rx = Arc::new(Mutex::new(jobs_rx));
+        let workers = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 4);
+        for _ in 0..workers {
+            let rx = Arc::clone(&jobs_rx);
+            let tx = done_tx.clone();
+            let p = picker.clone();
+            thread::spawn(move || loader(p, rx, tx));
+        }
+        let tmux = std::env::var_os("TMUX").is_some();
+        let outer_ok = Arc::new(AtomicBool::new(true));
+        if tmux {
+            // the attached-client watcher. asking tmux means fork+exec — done on
+            // the render thread that was a guaranteed frame hitch every TTL.
+            let flag = Arc::clone(&outer_ok);
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_secs(2));
+                // no client attached → keep the last answer (nobody is looking).
+                if let Some(p) = tmux_outer_protocol_now() {
+                    flag.store(p == Some(proto), Ordering::Relaxed);
+                }
+            });
+        }
         Some(EmoteStore {
             proto,
-            tmux: std::env::var_os("TMUX").is_some(),
-            outer_ok: Cell::new(true),
-            outer_at: Cell::new(Instant::now()),
+            tmux,
+            outer_ok,
             square_w,
             cache: HashMap::new(),
             jobs: jobs_tx,
             done: done_rx,
             start: Instant::now(),
             now_ms: Cell::new(0),
+            next_flip_ms: Cell::new(u64::MAX),
             budget_left: Cell::new(DRAW_BUDGET),
             lru: Cell::new(0),
             live_frames: 0,
@@ -185,21 +220,12 @@ impl EmoteStore {
     /// tmux the session outlives any one client: started from foot, later
     /// reattached over mosh from termux, the sixel/kitty escapes we emit reach
     /// a terminal that silently drops them and every emote is a blank hole.
-    /// re-ask tmux for the attached client on a short TTL and report false
-    /// while the outer terminal can't render the protocol our frames are
-    /// encoded in — the caller then draws the text tier (emote names) instead.
+    /// the watcher thread re-asks tmux every 2s and reports false while the
+    /// outer terminal can't render the protocol our frames are encoded in —
+    /// the caller then draws the text tier (emote names) instead. this read is
+    /// a single atomic load: nothing here can stall a frame.
     pub fn usable(&self) -> bool {
-        if !self.tmux {
-            return true;
-        }
-        if self.outer_at.get().elapsed() >= Duration::from_secs(2) {
-            self.outer_at.set(Instant::now());
-            // no client attached → keep the last answer (nobody is looking).
-            if let Some(p) = tmux_outer_protocol_now() {
-                self.outer_ok.set(p == Some(self.proto));
-            }
-        }
-        self.outer_ok.get()
+        !self.tmux || self.outer_ok.load(Ordering::Relaxed)
     }
 
     /// a short label for the detected graphics protocol (startup tier readout).
@@ -291,21 +317,15 @@ impl EmoteStore {
     pub fn begin_frame(&self) {
         self.now_ms.set(self.start.elapsed().as_millis() as u64);
         self.budget_left.set(DRAW_BUDGET);
+        self.next_flip_ms.set(u64::MAX);
     }
 
-    /// how long until the soonest-flipping loaded emote changes frame. the event
-    /// loop sleeps exactly this long, so animations run at their authored fps
-    /// instead of a fixed cadence — and idle views never wake up at all.
+    /// how long until the soonest-flipping emote DRAWN LAST FRAME changes frame.
+    /// the event loop sleeps exactly this long, so on-screen animations run at
+    /// their authored fps — while animated emotes in unfocused channels (still
+    /// cached, never drawn) schedule nothing and cost nothing.
     pub fn next_flip_in(&self) -> Option<Duration> {
-        let now = self.start.elapsed().as_millis() as u64;
-        let mut soonest = u64::MAX;
-        for e in self.cache.values() {
-            if let Entry::Ready(a) = e {
-                if a.frames.len() > 1 {
-                    soonest = soonest.min(frame_at(&a.frames, now, a.total_ms).1);
-                }
-            }
-        }
+        let soonest = self.next_flip_ms.get();
         (soonest != u64::MAX).then(|| Duration::from_millis(soonest.max(1)))
     }
 
@@ -334,10 +354,16 @@ impl EmoteStore {
         } else {
             let left = self.budget_left.get();
             if left == 0 {
+                // frozen, not skipped: retry at the fps floor so a burst that
+                // exhausts the budget can't park animations on the data tick.
+                self.next_flip_ms
+                    .set(self.next_flip_ms.get().min(MIN_DELAY_MS as u64));
                 a.shown.get().min(a.frames.len() - 1)
             } else {
                 self.budget_left.set(left - 1);
-                frame_at(&a.frames, self.now_ms.get(), a.total_ms).0
+                let (idx, flip_in) = frame_at(&a.frames, self.now_ms.get(), a.total_ms);
+                self.next_flip_ms.set(self.next_flip_ms.get().min(flip_in));
+                idx
             }
         };
         a.shown.set(idx);
@@ -532,14 +558,28 @@ pub(crate) fn stabilize_palette(frames: &mut [RgbaImage]) {
     if sample.is_empty() {
         return;
     }
-    let nq = color_quant::NeuQuant::new(1, PALETTE_COLORS as usize, &sample);
+    // samplefac 10: NeuQuant learns from a 1-in-10 pixel sample — visually
+    // indistinguishable on 32-64px emotes, an order of magnitude faster than
+    // scanning every pixel of every frame. what matters for the anti-flash
+    // property is only that ALL frames map through the SAME palette.
+    let nq = color_quant::NeuQuant::new(10, PALETTE_COLORS as usize, &sample);
     let map = nq.color_map_rgba();
+    // memoize color→palette lookups: index_of is a search per call, and an
+    // animation repeats the same few hundred distinct colors across every
+    // frame. one lookup per distinct color instead of one per pixel.
+    let mut memo: HashMap<[u8; 4], [u8; 3]> = HashMap::new();
     for f in frames.iter_mut() {
         for px in f.pixels_mut() {
-            let i = nq.index_of(&px.0) * 4;
-            if i + 2 < map.len() {
-                px.0 = [map[i], map[i + 1], map[i + 2], px[3]];
-            }
+            let key = px.0;
+            let rgb = *memo.entry(key).or_insert_with(|| {
+                let i = nq.index_of(&key) * 4;
+                if i + 2 < map.len() {
+                    [map[i], map[i + 1], map[i + 2]]
+                } else {
+                    [key[0], key[1], key[2]]
+                }
+            });
+            px.0 = [rgb[0], rgb[1], rgb[2], key[3]];
         }
     }
 }
@@ -650,12 +690,21 @@ pub(crate) fn subsample(frames: Vec<(RgbaImage, u32)>, max: usize) -> Vec<(RgbaI
         .collect()
 }
 
-fn loader(picker: Picker, jobs: Receiver<Job>, done: Sender<Done>) {
+fn loader(picker: Picker, jobs: Arc<Mutex<Receiver<Job>>>, done: Sender<Done>) {
     // sixel drops the alpha channel (to_rgb8) so a transparent pixel falls back to
     // its raw rgb — often a colored fringe or box. flatten onto black first so
     // emotes sit cleanly on a dark terminal. kitty/iterm2 keep true transparency.
     let flatten = picker.protocol_type() == ProtocolType::Sixel;
-    for job in jobs {
+    loop {
+        // hold the lock only while receiving: the holder blocks on recv, takes
+        // one job, releases, and works — its siblings then take the next jobs.
+        let job = match jobs.lock() {
+            Ok(rx) => match rx.recv() {
+                Ok(j) => j,
+                Err(_) => return, // store dropped → app closed
+            },
+            Err(_) => return,
+        };
         let built = build(&picker, &job.key, flatten);
         if done
             .send(Done {
