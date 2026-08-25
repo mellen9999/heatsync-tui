@@ -94,6 +94,12 @@ struct Built {
 
 pub struct EmoteStore {
     proto: ProtocolType, // the detected inline-graphics protocol (for the tier readout)
+    /// inside tmux the attached client can change at any time — detach from
+    /// foot, reattach over mosh from a phone — and our frames are encoded for
+    /// the protocol probed at startup. re-checked on a TTL (see `usable`).
+    tmux: bool,
+    outer_ok: Cell<bool>,
+    outer_at: Cell<Instant>,
     /// footprint of a 1:1 emote in cells. the layout reserves this BEFORE an
     /// emote finishes loading, so nothing reflows when the image lands.
     square_w: u16,
@@ -152,6 +158,9 @@ impl EmoteStore {
         thread::spawn(move || loader(picker, jobs_rx, done_tx));
         Some(EmoteStore {
             proto,
+            tmux: std::env::var_os("TMUX").is_some(),
+            outer_ok: Cell::new(true),
+            outer_at: Cell::new(Instant::now()),
             square_w,
             cache: HashMap::new(),
             jobs: jobs_tx,
@@ -169,6 +178,28 @@ impl EmoteStore {
     /// (and every sixel below from being re-emitted) as images arrive.
     pub fn square_cells(&self) -> u16 {
         self.square_w
+    }
+
+    /// can the terminal that is on screen RIGHT NOW display our frames?
+    /// outside tmux the terminal can't change under us — always true. inside
+    /// tmux the session outlives any one client: started from foot, later
+    /// reattached over mosh from termux, the sixel/kitty escapes we emit reach
+    /// a terminal that silently drops them and every emote is a blank hole.
+    /// re-ask tmux for the attached client on a short TTL and report false
+    /// while the outer terminal can't render the protocol our frames are
+    /// encoded in — the caller then draws the text tier (emote names) instead.
+    pub fn usable(&self) -> bool {
+        if !self.tmux {
+            return true;
+        }
+        if self.outer_at.get().elapsed() >= Duration::from_secs(2) {
+            self.outer_at.set(Instant::now());
+            // no client attached → keep the last answer (nobody is looking).
+            if let Some(p) = tmux_outer_protocol_now() {
+                self.outer_ok.set(p == Some(self.proto));
+            }
+        }
+        self.outer_ok.get()
     }
 
     /// a short label for the detected graphics protocol (startup tier readout).
@@ -336,6 +367,14 @@ fn cell_pixels() -> Option<(u16, u16)> {
 /// None → the outer terminal isn't a known graphics-capable one → text tier.
 /// this is how we get inline emotes in tmux without a stdin-stealing query.
 fn tmux_outer_protocol() -> Option<ProtocolType> {
+    tmux_outer_protocol_now().flatten()
+}
+
+/// like [`tmux_outer_protocol`], but keeps "couldn't ask tmux / no client
+/// attached" (outer None) apart from "a client is attached and it has no
+/// graphics" (Some(None)) — the runtime re-check must not flip the tier on a
+/// momentary detach.
+fn tmux_outer_protocol_now() -> Option<Option<ProtocolType>> {
     let out = std::process::Command::new("tmux")
         .args(["display-message", "-p", "#{client_termname}"])
         .output()
@@ -346,13 +385,15 @@ fn tmux_outer_protocol() -> Option<ProtocolType> {
     let term = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
     // prefer kitty (flicker-free, in-place image updates) wherever the outer
     // terminal supports it; sixel only where that's the terminal's best option.
-    if term.contains("kitty") || term.contains("ghostty") || term.contains("wezterm") {
-        Some(ProtocolType::Kitty)
-    } else if term.starts_with("foot") || term.contains("mlterm") || term.contains("contour") {
-        Some(ProtocolType::Sixel)
-    } else {
-        None
-    }
+    Some(
+        if term.contains("kitty") || term.contains("ghostty") || term.contains("wezterm") {
+            Some(ProtocolType::Kitty)
+        } else if term.starts_with("foot") || term.contains("mlterm") || term.contains("contour") {
+            Some(ProtocolType::Sixel)
+        } else {
+            None
+        },
+    )
 }
 
 /// heuristic: is this terminal known to support (and answer a query for) an

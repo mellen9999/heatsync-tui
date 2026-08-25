@@ -1,9 +1,10 @@
 //! heatsync tui — heat-sorted live multichat. `heatsync [channels…]` opens the
 //! grid (default demo set); `--mock` runs the offline synthetic feed; `log`,
 //! `search`, `hot` are headless corpus subcommands.
-//! keys are vi: j/k move the cursor, h/l (or gt/gT) change channel, gg/G ends,
-//! ctrl-d/u/f/b page, counts work (5j), v/V select, y yanks, / and ? search with
-//! n/N, i composes, o joins, m manages, q quits.
+//! keys are vi: j/k move the cursor (on a vertical tab bar they walk the
+//! channel list instead), h/l (or gt/gT) change channel, gg/G ends,
+//! ctrl-d/u/f/b page, counts work (5j), v/V select, y yanks, / and ? search
+//! with n/N, i composes, o joins, m manages, q quits.
 
 #[allow(dead_code)]
 mod cli;
@@ -452,9 +453,9 @@ enum Flow {
 }
 
 /// dispatch a keypress by mode. Normal = navigation; Insert = compose a message;
-/// Join = type a channel to open, Search = type a `/` pattern. j/k are always
-/// cursor motion and h/l always change channel, whatever the tab bar's position
-/// — the same keys shouldn't mean different things depending on a layout option.
+/// Join = type a channel to open, Search = type a `/` pattern. h/l always change
+/// channel; j/k are cursor motion, except on a vertical tab bar where (in
+/// normal mode) they walk the channel list the eye is looking at.
 fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
         return Flow::Quit;
@@ -510,7 +511,8 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                         app.mode = InputMode::Normal;
                     }
                 }
-                KeyCode::Char('a') | KeyCode::Char('n') | KeyCode::Char('o') => {
+                // o joins and x closes here too — same keys as normal mode.
+                KeyCode::Char('a') | KeyCode::Char('o') => {
                     app.mode = InputMode::Join;
                     app.input.clear();
                 }
@@ -599,9 +601,17 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         return Flow::Continue;
     }
 
+    // with a vertical tab bar the list on screen IS the channel list, so in
+    // normal mode j/k walk it — that's what the eye expects a vertical list to
+    // do. visual mode keeps j/k as cursor motion (a selection is being
+    // extended), and the up/down arrows scroll chat in every orientation.
+    let jk_tabs = app.tab_pos.is_vertical() && app.mode == InputMode::Normal;
+
     match k.code {
         KeyCode::Char('q') => return Flow::Quit,
         // motions — j is down the pane (newer), k is up it (older)
+        KeyCode::Char('j') if jk_tabs => return tab_and_continue(app, 1),
+        KeyCode::Char('k') if jk_tabs => return tab_and_continue(app, -1),
         KeyCode::Char('j') | KeyCode::Down => {
             let n = app.vi.take_count();
             app.vi.down(n)
@@ -615,8 +625,7 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             app.vi.g_pending = true;
             return Flow::Continue;
         }
-        // channel switching is h/l (and gt/gT) in every tab-bar orientation —
-        // j/k are cursor motion, the way they are everywhere else in vi.
+        // h/l (and gt/gT, tab/shift-tab) switch channels in every orientation.
         KeyCode::Char('h') | KeyCode::Left | KeyCode::BackTab => return tab_and_continue(app, -1),
         KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => return tab_and_continue(app, 1),
         // visual selection
@@ -687,10 +696,14 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
 }
 
 fn tab_and_continue(app: &mut App, delta: i32) -> Flow {
-    if delta > 0 {
-        next_tab(app)
-    } else {
-        prev_tab(app)
+    // honour a pending count (3j on a vertical bar = three tabs down) — and
+    // always consume it, so it can't leak into the next motion.
+    for _ in 0..app.vi.take_count() {
+        if delta > 0 {
+            next_tab(app)
+        } else {
+            prev_tab(app)
+        }
     }
     Flow::Continue
 }
@@ -1096,12 +1109,15 @@ fn advance(app: &mut App) -> bool {
 const TAB_COL_W: u16 = 16;
 
 fn emote_mode(app: &App) -> EmoteMode<'_> {
-    if let Some(s) = &app.store {
-        EmoteMode::Term(s)
-    } else if let Some(f) = &app.fb {
-        EmoteMode::Fb(f)
-    } else {
-        EmoteMode::Text
+    match (&app.store, &app.fb) {
+        // a tmux session outlives any one client: reattached over mosh or from
+        // termux, the graphics escapes probed at startup would just vanish and
+        // every emote would be a blank hole. usable() re-checks the attached
+        // client on a TTL, so those frames draw emote names instead — and the
+        // images come straight back when a graphics terminal reattaches.
+        (Some(s), _) if s.usable() => EmoteMode::Term(s),
+        (None, Some(f)) => EmoteMode::Fb(f),
+        _ => EmoteMode::Text,
     }
 }
 
@@ -1579,15 +1595,18 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
     ])
 }
 
+/// one `key label` footer hint: brand-colored key, dim label. every hint bar
+/// shows exactly ONE key per action — aliases stay out of the footer.
+fn hint(k: &'static str, d: &'static str) -> [Span<'static>; 2] {
+    [
+        Span::styled(k, Style::default().fg(BRAND)),
+        Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244))),
+    ]
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // Manage mode → rover-style key hints.
     if app.mode == InputMode::Manage {
-        let hint = |k: &'static str, d: &'static str| {
-            [
-                Span::styled(k, Style::default().fg(BRAND)),
-                Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244))),
-            ]
-        };
         let mut spans = vec![
             Span::styled(
                 " manage ",
@@ -1698,7 +1717,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 ));
             } else if normal {
                 spans.push(Span::styled(
-                    "   hjkw0$ move  dcy ops  kj history  esc leave",
+                    "   kj history  esc leave",
                     Style::default().fg(Color::Indexed(244)),
                 ));
             }
@@ -1736,12 +1755,6 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // Visual mode → selection size + what you can do with it.
     if app.mode == InputMode::Visual {
         let n = app.vi.selection().map_or(1, |(lo, hi)| hi - lo + 1);
-        let hint = |k: &'static str, d: &'static str| {
-            [
-                Span::styled(k, Style::default().fg(BRAND)),
-                Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244))),
-            ]
-        };
         let mut spans = vec![
             Span::styled(
                 " visual ",
@@ -1792,26 +1805,24 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             Style::default().fg(Color::Indexed(214)),
         ));
     }
-    spans.extend([
-        Span::styled("  hl ", Style::default().fg(BRAND)),
-        Span::raw("chan  "),
-        Span::styled("jk ", Style::default().fg(BRAND)),
-        Span::raw("move  "),
-        Span::styled("v ", Style::default().fg(BRAND)),
-        Span::raw("select  "),
-        Span::styled("y ", Style::default().fg(BRAND)),
-        Span::raw("yank  "),
-        Span::styled("/ ", Style::default().fg(BRAND)),
-        Span::raw("find  "),
-        Span::styled("i ", Style::default().fg(BRAND)),
-        Span::raw("say  "),
-        Span::styled("o ", Style::default().fg(BRAND)),
-        Span::raw("join  "),
-        Span::styled("m ", Style::default().fg(BRAND)),
-        Span::raw("manage  "),
-        Span::styled("q ", Style::default().fg(BRAND)),
-        Span::raw("quit  "),
-    ]);
+    // essentials only, one key per action — v/y// are stock vi and get their
+    // own bar once entered; the full set fits a phone-width terminal. the chan
+    // key tracks the bar's orientation (vertical list → j/k walks it).
+    spans.push(Span::raw("  "));
+    if app.tab_pos.is_vertical() {
+        spans.extend(hint("jk", "chan"));
+    } else {
+        spans.extend(hint("hl", "chan"));
+        spans.extend(hint("jk", "scroll"));
+    }
+    for pair in [
+        hint("i", "say"),
+        hint("o", "join"),
+        hint("m", "manage"),
+        hint("q", "quit"),
+    ] {
+        spans.extend(pair);
+    }
     // a pending count or `g` echoes at the bottom, the way vi shows what it is
     // still waiting on.
     let pending = match (app.vi.count, app.vi.g_pending) {
