@@ -50,6 +50,14 @@ impl EmoteSet {
         set
     }
 
+    /// fold another set in, first-wins — a merged (multi-platform) tab pools
+    /// its sources' emotes into one lookup.
+    pub fn merge(&mut self, other: EmoteSet) {
+        for (k, v) in other.map {
+            self.map.entry(k).or_insert(v);
+        }
+    }
+
     pub fn get(&self, name: &str) -> Option<&Emote> {
         self.map.get(name)
     }

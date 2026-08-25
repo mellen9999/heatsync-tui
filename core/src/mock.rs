@@ -154,6 +154,7 @@ impl Driver {
                     };
                     ch.record(
                         Message {
+                            platform: ch.platform,
                             user,
                             text,
                             color: None,

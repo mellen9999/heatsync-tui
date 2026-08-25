@@ -143,6 +143,7 @@ pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_co
         .map(|r| {
             let user = sanitize::clean(r.display_name.as_deref().unwrap_or(&r.username));
             heatsync_core::Message {
+                platform,
                 user: if user.is_empty() {
                     sanitize::clean(&r.username)
                 } else {

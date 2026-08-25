@@ -52,9 +52,9 @@ impl TabPos {
 
 pub struct Config {
     pub tab_pos: TabPos,
-    /// open channel tabs, in order — restored on next launch (unless CLI args
-    /// override). empty = fall back to the built-in demo set.
-    pub channels: Vec<(Platform, String)>,
+    /// open tabs, in order — restored on next launch (unless CLI args
+    /// override). each tab is one or more `+`-merged (platform, channel) subs.
+    pub channels: Vec<Vec<(Platform, String)>>,
 }
 
 /// serialize a channel as `twitch:name` / `kick:name` / `yt:videoid`.
@@ -186,7 +186,11 @@ pub fn load() -> Config {
                             }
                         }
                         "channels" => {
-                            cfg.channels = v.split(',').filter_map(parse_chan).collect();
+                            cfg.channels = v
+                                .split(',')
+                                .map(|tab| tab.split('+').filter_map(parse_chan).collect())
+                                .filter(|t: &Vec<_>| !t.is_empty())
+                                .collect();
                         }
                         _ => {}
                     }
@@ -231,7 +235,12 @@ pub fn save(cfg: &Config) {
             let joined = cfg
                 .channels
                 .iter()
-                .map(|(p, n)| chan_str(*p, n))
+                .map(|tab| {
+                    tab.iter()
+                        .map(|(p, n)| chan_str(*p, n))
+                        .collect::<Vec<_>>()
+                        .join("+")
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             out.push_str(&format!("channels={joined}\n"));

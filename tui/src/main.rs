@@ -258,21 +258,23 @@ fn main() -> io::Result<()> {
     res
 }
 
-/// parse channel args (`name`, `twitch:name`, `kick:name`), fetch emote sets,
-/// and start the live feed. prints a one-line loading note before raw mode.
-fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
+/// parse channel args (`name`, `twitch:name`, `kick:name`, `yt:id`, and
+/// `a+kick:a+yt:x` merged tabs), fetch emote sets, and start the live feed.
+/// prints a one-line loading note before raw mode.
+fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> App {
     // precedence: explicit CLI args → persisted tabs → empty (a clean "press o to
     // join" state; no hardcoded demo channels). first run starts blank; whatever
     // you open persists, so the next launch restores it.
-    let subs: Vec<Sub> = if !chan_args.is_empty() {
-        chan_args.iter().map(|a| parse_sub(a)).collect()
+    let tabs: Vec<Vec<Sub>> = if !chan_args.is_empty() {
+        chan_args.iter().map(|a| parse_tab(a)).collect()
     } else {
         saved
     };
+    let tabs: Vec<Vec<Sub>> = tabs.into_iter().filter(|t| !t.is_empty()).collect();
 
     eprintln!(
         "heatsync: fetching emotes + connecting to {} channels…",
-        subs.len()
+        tabs.len()
     );
     // pick the emote tier now, while we're still a normal terminal:
     //   1. a graphics-capable emulator (sixel/kitty) → EmoteStore
@@ -303,20 +305,26 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Sub>) -> App {
     let (hist_tx, hist_rx) = std::sync::mpsc::channel();
     let mut channels = Vec::new();
     let mut emotes = Vec::new();
-    for (platform, name) in &subs {
-        channels.push(Channel::new(name, *platform, 200));
+    for tab in &tabs {
+        let (platform, name) = &tab[0];
+        let mut ch = Channel::new(name, *platform, 200);
+        ch.extra = tab[1..].to_vec();
+        channels.push(ch);
         emotes.push(EmoteSet::new());
-        // youtube has no emote API, and its archive is keyed by broadcaster
-        // name (we only know the video id) — both fetches would be dead calls.
-        if *platform != Platform::Youtube {
-            spawn_emote_fetch(&emote_tx, *platform, name.clone());
-            spawn_history(&hist_tx, *platform, name.clone());
+        for (p, n) in tab {
+            // youtube has no emote API, and its archive is keyed by broadcaster
+            // name (we only know the video id) — both fetches would be dead calls.
+            if *p != Platform::Youtube {
+                spawn_emote_fetch(&emote_tx, *p, n.clone());
+                spawn_history(&hist_tx, *p, n.clone());
+            }
         }
     }
 
     let token = std::env::var("HEATSYNC_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
+    let subs: Vec<Sub> = tabs.into_iter().flatten().collect();
     let (rx, out) = net::spawn(subs, token);
     // direct-to-platform sending if the user supplied their own platform tokens.
     let auth = config::load_auth();
@@ -391,10 +399,7 @@ fn drain_history(app: &mut App) {
         ..
     } = app;
     while let Ok((platform, name, msgs)) = hist_rx.try_recv() {
-        if let Some(i) = channels
-            .iter()
-            .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
-        {
+        if let Some(i) = channels.iter().position(|c| c.matches(platform, &name)) {
             channels[i].backfill(msgs);
             // focused channel only — background history warms up via the tick
             // sweep when it's actually looked at.
@@ -422,11 +427,10 @@ fn drain_emotes(app: &mut App) {
         ..
     } = app;
     while let Ok((platform, name, set)) = emote_rx.try_recv() {
-        if let Some(i) = channels
-            .iter()
-            .position(|c| c.platform == platform && c.name.eq_ignore_ascii_case(&name))
-        {
-            emotes[i] = set;
+        if let Some(i) = channels.iter().position(|c| c.matches(platform, &name)) {
+            // merge, first-wins — a merged tab pools its sources' sets, and a
+            // single-sub tab starts empty so merge equals assignment.
+            emotes[i].merge(set);
             // rescan only the channel on screen — a background channel's
             // backlog is warmed by the tick sweep if and when it's focused.
             if i == *focus {
@@ -447,12 +451,26 @@ fn save_state(app: &App) {
     let channels = app
         .channels
         .iter()
-        .map(|c| (c.platform, c.name.clone()))
+        .map(|c| c.subs().map(|(p, n)| (p, n.to_string())).collect())
         .collect();
     config::save(&config::Config {
         tab_pos: app.tab_pos,
         channels,
     });
+}
+
+/// one tab spec: `+`-joined subs merge into a single interleaved tab
+/// (`nl_kripp+kick:nl_kripp+yt:VIDEOID`).
+fn parse_tab(tok: &str) -> Vec<Sub> {
+    let mut subs: Vec<Sub> = Vec::new();
+    for part in tok.split('+').filter(|s| !s.trim().is_empty()) {
+        let s = parse_sub(part.trim());
+        if !s.1.is_empty() && !subs.iter().any(|(p, n)| *p == s.0 && n.eq_ignore_ascii_case(&s.1))
+        {
+            subs.push(s);
+        }
+    }
+    subs
 }
 
 fn parse_sub(tok: &str) -> Sub {
@@ -746,12 +764,13 @@ fn join_channel(app: &mut App) {
     open_channel(app, &tok);
 }
 
-/// open (or focus, if already open) a channel by `name` / `kick:name`.
+/// open (or focus, if already open) a tab by `name` / `kick:name` / `yt:id`,
+/// or a `+`-joined merge of several.
 fn open_channel(app: &mut App, tok: &str) {
-    if tok.is_empty() {
+    let subs = parse_tab(tok);
+    let Some((platform, name)) = subs.first().cloned() else {
         return;
-    }
-    let (platform, name) = parse_sub(tok);
+    };
     if let Some(i) = app
         .channels
         .iter()
@@ -760,18 +779,23 @@ fn open_channel(app: &mut App, tok: &str) {
         app.focus = i; // already open → just switch to it
         return;
     }
-    if let Some(out) = &app.out {
-        let _ = out.send(net::Outbound::Join {
-            platform,
-            channel: name.clone(),
-        });
+    let mut ch = Channel::new(&name, platform, 200);
+    ch.extra = subs[1..].to_vec();
+    for (p, n) in ch.subs() {
+        let n = n.to_string();
+        if let Some(out) = &app.out {
+            let _ = out.send(net::Outbound::Join {
+                platform: p,
+                channel: n.clone(),
+            });
+        }
+        if p != Platform::Youtube {
+            spawn_emote_fetch(&app.emote_tx, p, n.clone());
+            spawn_history(&app.hist_tx, p, n);
+        }
     }
-    app.channels.push(Channel::new(&name, platform, 200));
+    app.channels.push(ch);
     app.emotes.push(EmoteSet::new()); // populated async — see spawn_emote_fetch
-    if platform != Platform::Youtube {
-        spawn_emote_fetch(&app.emote_tx, platform, name.clone());
-        spawn_history(&app.hist_tx, platform, name);
-    }
     app.focus = app.channels.len() - 1;
     save_state(app);
 }
@@ -782,16 +806,7 @@ fn manage_delete(app: &mut App) {
         return;
     }
     let i = app.manage_cursor.min(app.channels.len() - 1);
-    let (platform, name) = {
-        let c = &app.channels[i];
-        (c.platform, c.name.clone())
-    };
-    if let Some(out) = &app.out {
-        let _ = out.send(net::Outbound::Part {
-            platform,
-            channel: name,
-        });
-    }
+    part_subs(&app.out, &app.channels[i]);
     app.channels.remove(i);
     app.emotes.remove(i);
     let last = app.channels.len().saturating_sub(1);
@@ -844,20 +859,23 @@ fn part_channel(app: &mut App, which: Option<&str>) {
     close_channel(app);
 }
 
+/// unsubscribe every source a tab merges.
+fn part_subs(out: &Option<net::Tx>, ch: &Channel) {
+    if let Some(out) = out {
+        for (p, n) in ch.subs() {
+            let _ = out.send(net::Outbound::Part {
+                platform: p,
+                channel: n.to_string(),
+            });
+        }
+    }
+}
+
 fn close_channel(app: &mut App) {
     if app.channels.is_empty() {
         return;
     }
-    let (platform, name) = {
-        let c = &app.channels[app.focus];
-        (c.platform, c.name.clone())
-    };
-    if let Some(out) = &app.out {
-        let _ = out.send(net::Outbound::Part {
-            platform,
-            channel: name,
-        });
-    }
+    part_subs(&app.out, &app.channels[app.focus]);
     app.channels.remove(app.focus);
     app.emotes.remove(app.focus);
     app.focus = app.focus.min(app.channels.len().saturating_sub(1));
@@ -898,6 +916,7 @@ fn send_focused(app: &mut App) -> Flow {
         let now = ch.last_ms;
         ch.record(
             Message {
+                platform: ch.platform,
                 user: "you".into(),
                 text,
                 color: Some("#ff8700".into()),
@@ -1034,9 +1053,10 @@ fn drain_feed(app: &mut App) {
     while let Ok(ev) = rx.try_recv() {
         match ev {
             ChatEvent::Line(l) => {
-                if let Some(i) = channels.iter().position(|c| {
-                    c.platform == l.platform && c.name.eq_ignore_ascii_case(&l.channel)
-                }) {
+                if let Some(i) = channels
+                    .iter()
+                    .position(|c| c.matches(l.platform, &l.channel))
+                {
                     // fetch starts the instant the line lands — but only for
                     // the channel on screen. prefetching every background
                     // channel's emotes burned network + decode for images
@@ -1047,6 +1067,7 @@ fn drain_feed(app: &mut App) {
                     }
                     channels[i].record(
                         Message {
+                            platform: l.platform,
                             user: l.user,
                             text: l.content,
                             color: l.color,
@@ -1242,12 +1263,20 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         }
     };
 
+    // merged tabs read `name+2` — the sources are one channel to the eye.
+    let plus = |ch: &Channel| {
+        if ch.merged() {
+            format!("+{}", ch.extra.len())
+        } else {
+            String::new()
+        }
+    };
     if app.tab_pos.is_vertical() {
         for (i, ch) in app.channels.iter().enumerate() {
             if i as u16 >= area.height {
                 break;
             }
-            let label = fit(format!(" {} {:.0} ", ch.name, ch.heat), area.width);
+            let label = fit(format!(" {}{} {:.0} ", ch.name, plus(ch), ch.heat), area.width);
             let row = Rect {
                 x: area.x,
                 y: area.y + i as u16,
@@ -1263,7 +1292,13 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         let mut spans = Vec::new();
         for (i, ch) in app.channels.iter().enumerate() {
             spans.push(Span::styled(
-                format!(" {}·{} {:.0} ", ch.name, ch.platform.tag(), ch.heat),
+                format!(
+                    " {}·{}{} {:.0} ",
+                    ch.name,
+                    ch.platform.tag(),
+                    plus(ch),
+                    ch.heat
+                ),
                 tab_style(i, ch.heat),
             ));
             spans.push(Span::raw(" "));
@@ -1295,7 +1330,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let mut plan: Vec<Vec<RowPlan>> = Vec::new();
     let mut used = 0usize;
     for m in ch.messages.iter().rev() {
-        let mut rows = layout_message(m, set, mode, body.width, app.me.as_deref());
+        let mut rows = layout_message(m, set, mode, body.width, app.me.as_deref(), ch.merged());
         let h: usize = rows.iter().map(|r| r.h as usize).sum();
         if used + h > cap {
             // the newest message alone can exceed the pane — keep its tail.
@@ -1440,10 +1475,15 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
         };
         let cursor = if sel { "❯" } else { " " };
         let active = if i == app.focus { "●" } else { " " };
+        let tags = ch
+            .subs()
+            .map(|(p, _)| p.tag())
+            .collect::<Vec<_>>()
+            .join("+");
         let label = format!(
             " {cursor} {active} {}·{}   {:>6.0}   {} msg",
             ch.name,
-            ch.platform.tag(),
+            tags,
             ch.heat,
             ch.messages.len(),
         );
@@ -1515,6 +1555,15 @@ fn mentions(text: &str, me: &str) -> bool {
         w.trim_start_matches('@')
             .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')
             .eq_ignore_ascii_case(me)
+    })
+}
+
+/// a platform's brand hue in the 256 palette — the merged-tab line marker.
+fn platform_color(p: Platform) -> Color {
+    Color::Indexed(match p {
+        Platform::Twitch => 99,   // twitch purple
+        Platform::Kick => 82,     // kick green
+        Platform::Youtube => 196, // youtube red
     })
 }
 
@@ -1764,6 +1813,7 @@ fn layout_message(
     mode: EmoteMode,
     maxw: u16,
     me: Option<&str>,
+    tag_platform: bool,
 ) -> Vec<RowPlan> {
     let user_color = m
         .color
@@ -1771,6 +1821,13 @@ fn layout_message(
         .and_then(parse_hex)
         .unwrap_or(Color::Indexed(244));
     let mut b = Rows::new(maxw);
+    // merged tab: a one-cell bar in the platform's hue marks each line's origin.
+    if tag_platform {
+        b.prefix(
+            Span::styled("▎", Style::default().fg(platform_color(m.platform))),
+            1,
+        );
+    }
     // role badges, capped — a badge wall must not eat the line.
     for &bd in m.badges.iter().take(3) {
         b.prefix(badge_span(bd), 1);
@@ -2124,6 +2181,7 @@ mod wrap_tests {
 
     fn msg(text: &str) -> Message {
         Message {
+            platform: Platform::Twitch,
             user: "u".into(),
             text: text.into(),
             color: None,
@@ -2148,7 +2206,7 @@ mod wrap_tests {
     #[test]
     fn long_messages_wrap_onto_indented_rows() {
         let set = EmoteSet::new();
-        let rows = layout_message(&msg("one two three four five"), &set, EmoteMode::Text, 12, None);
+        let rows = layout_message(&msg("one two three four five"), &set, EmoteMode::Text, 12, None, false);
         let got = flat(&rows);
         assert!(got.len() > 1, "wrapped: {got:?}");
         assert_eq!(got[0], "u: one two");
@@ -2162,7 +2220,7 @@ mod wrap_tests {
     #[test]
     fn a_word_wider_than_the_row_hard_splits() {
         let set = EmoteSet::new();
-        let rows = layout_message(&msg("https://example.com/really/long/url"), &set, EmoteMode::Text, 14, None);
+        let rows = layout_message(&msg("https://example.com/really/long/url"), &set, EmoteMode::Text, 14, None, false);
         let got = flat(&rows);
         assert!(got.len() >= 3, "{got:?}");
         for r in &got {
@@ -2175,7 +2233,7 @@ mod wrap_tests {
     fn a_wall_is_capped_with_an_ellipsis() {
         let set = EmoteSet::new();
         let text = "word ".repeat(200);
-        let rows = layout_message(&msg(&text), &set, EmoteMode::Text, 20, None);
+        let rows = layout_message(&msg(&text), &set, EmoteMode::Text, 20, None, false);
         assert_eq!(rows.len(), MAX_MSG_ROWS);
         assert!(flat(&rows).last().unwrap().ends_with('…'));
     }
@@ -2183,7 +2241,7 @@ mod wrap_tests {
     #[test]
     fn short_messages_stay_on_one_row() {
         let set = EmoteSet::new();
-        let rows = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, None);
+        let rows = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, None, false);
         assert_eq!(flat(&rows), vec!["u: hi"]);
         assert_eq!(rows[0].h, 1);
     }

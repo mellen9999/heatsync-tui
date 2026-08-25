@@ -95,6 +95,9 @@ impl Badge {
 /// chat color (hex) if the platform sent one.
 #[derive(Clone, Debug)]
 pub struct Message {
+    /// where this line came from — a merged tab interleaves platforms, and
+    /// each line keeps its origin for display.
+    pub platform: Platform,
     pub user: String,
     pub text: String,
     pub color: Option<String>,
@@ -110,7 +113,11 @@ pub struct Message {
 #[derive(Clone, Debug)]
 pub struct Channel {
     pub name: String,
+    /// primary source — sends target it, and it leads the tab label.
     pub platform: Platform,
+    /// further sources merged into this tab (a `+`-joined channel). their
+    /// lines interleave into the one ring in arrival order.
+    pub extra: Vec<(Platform, String)>,
     pub heat: f64,
     /// wall-clock ms of the last heat update — decay is computed against it.
     pub last_ms: u64,
@@ -123,11 +130,29 @@ impl Channel {
         Channel {
             name: name.to_string(),
             platform,
+            extra: Vec::new(),
             heat: 0.0,
             last_ms: 0,
             messages: VecDeque::with_capacity(cap),
             cap,
         }
+    }
+
+    /// every source feeding this tab, primary first.
+    pub fn subs(&self) -> impl Iterator<Item = (Platform, &str)> {
+        std::iter::once((self.platform, self.name.as_str()))
+            .chain(self.extra.iter().map(|(p, n)| (*p, n.as_str())))
+    }
+
+    /// does a line for (platform, channel) belong to this tab?
+    pub fn matches(&self, platform: Platform, name: &str) -> bool {
+        self.subs()
+            .any(|(p, n)| p == platform && n.eq_ignore_ascii_case(name))
+    }
+
+    /// is this a merged (multi-source) tab?
+    pub fn merged(&self) -> bool {
+        !self.extra.is_empty()
     }
 
     /// advance heat decay to `now_ms` without adding anything (idle cooling).
@@ -180,6 +205,7 @@ mod channel_tests {
 
     fn msg(user: &str, text: &str) -> Message {
         Message {
+            platform: Platform::Twitch,
             user: user.into(),
             text: text.into(),
             color: None,
@@ -211,6 +237,22 @@ mod channel_tests {
         let got: Vec<&str> = ch.messages.iter().map(|m| m.text.as_str()).collect();
         // newest history survives, oldest is dropped
         assert_eq!(got, vec!["h3", "h4", "now"]);
+    }
+
+    #[test]
+    fn merged_tab_matches_every_sub_case_insensitively() {
+        let mut ch = Channel::new("xqc", Platform::Twitch, 10);
+        ch.extra = vec![
+            (Platform::Kick, "xqc".into()),
+            (Platform::Youtube, "Vid_123".into()),
+        ];
+        assert!(ch.merged());
+        assert!(ch.matches(Platform::Twitch, "XQC"));
+        assert!(ch.matches(Platform::Kick, "xqc"));
+        assert!(ch.matches(Platform::Youtube, "vid_123"));
+        assert!(!ch.matches(Platform::Kick, "other"));
+        assert_eq!(ch.subs().count(), 3);
+        assert!(!Channel::new("xqc", Platform::Twitch, 10).merged());
     }
 
     #[test]
