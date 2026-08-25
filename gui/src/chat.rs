@@ -21,6 +21,8 @@ use egui::{Align, Color32, FontId, Layout, Rect, RichText, ScrollArea, Ui, Vec2}
 use heatsync_core::emote::{EmoteSet, Segment};
 
 use crate::emote::Cache;
+use std::cell::Cell;
+
 use crate::paint::{self, Paint};
 
 pub struct Message {
@@ -180,6 +182,12 @@ pub struct View {
     pub font: f32,
     /// rows actually emitted last frame — the virtualisation proof
     pub drawn_last_frame: usize,
+    /// Shortest repaint interval the rows drawn THIS frame actually need, or
+    /// `None` if nothing on screen animates.
+    ///
+    /// A `Cell` because it is written from `&self` draw helpers, and it is
+    /// output rather than state — same role as `drawn_last_frame`.
+    tick_ms: Cell<Option<u32>>,
 }
 
 impl Default for View {
@@ -189,12 +197,31 @@ impl Default for View {
             emote_px: 28.0,
             font: 14.0,
             drawn_last_frame: 0,
+            tick_ms: Cell::new(None),
         }
     }
 }
 
 impl View {
+    /// The shortest repaint interval the last frame's *visible* content needs.
+    ///
+    /// This used to be asked of the whole emote cache and of every message in
+    /// the backlog, which meant one fast emote anywhere in a channel's 7TV set
+    /// pinned the repaint rate forever, and a paint on a message scrolled far
+    /// away kept the window ticking at 33ms. Both are answers only the drawn
+    /// rows can give, and the drawn rows are ~24 of them.
+    pub fn tick_ms(&self) -> Option<u32> {
+        self.tick_ms.get()
+    }
+
+    /// Fold one animating thing's cadence into this frame's requirement.
+    fn needs_tick(&self, ms: u32) {
+        self.tick_ms
+            .set(Some(self.tick_ms.get().map_or(ms, |cur| cur.min(ms))));
+    }
+
     pub fn show(&mut self, ui: &mut Ui, msgs: &[Message], cache: &Cache, t_ms: u64) {
+        self.tick_ms.set(None);
         let avail = ui.available_width();
         self.heights.set_width(avail);
         self.heights.ensure(msgs.len());
@@ -255,7 +282,12 @@ impl View {
             );
 
             match &m.paint {
-                Some(p) => paint::username(ui, &m.user, p, self.font, t_ms),
+                Some(p) => {
+                    if p.speed != 0.0 {
+                        self.needs_tick(paint::TICK_MS);
+                    }
+                    paint::username(ui, &m.user, p, self.font, t_ms)
+                }
                 None => {
                     ui.label(
                         RichText::new(&m.user)
@@ -300,6 +332,11 @@ impl View {
             );
             return;
         };
+
+        // Only a stack that is actually drawn gets a say in the repaint rate.
+        if let Some(ms) = anim.tick_ms() {
+            self.needs_tick(ms);
+        }
 
         let h = self.emote_px;
         let w = (h * anim.aspect) * if anim.wide { 2.0 } else { 1.0 };

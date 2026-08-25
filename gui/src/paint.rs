@@ -17,6 +17,16 @@
 
 use egui::{text::LayoutJob, Color32, FontId, TextFormat, Ui};
 
+/// Repaint interval for an animating name paint — ~30/s.
+///
+/// A paint's gradient is continuous, so unlike a gif it has no natural frame
+/// delay of its own; 30fps is the cap we choose for it.
+///
+/// It lives here rather than in the app loop because it is a property of how a
+/// paint animates, and the view needs it to report what the visible rows
+/// require.
+pub const TICK_MS: u32 = 33;
+
 #[derive(Clone, Debug)]
 pub struct Paint {
     /// Two or more colour stops, evenly spaced across the name.

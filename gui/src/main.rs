@@ -29,10 +29,6 @@ use paint::Paint;
 
 const MSGS: usize = 10_000;
 
-/// A paint's gradient is continuous, so it has no natural frame delay of its
-/// own — 30fps is the cap we choose for it.
-const PAINT_TICK_MS: u32 = 33;
-
 /// Enough frames for the height cache to settle and a second animation frame to
 /// land, so the smoke test proves a steady state rather than one lucky paint.
 const SMOKE_FRAMES: u32 = 30;
@@ -245,16 +241,12 @@ impl eframe::App for App {
         // soonest repaint either needs — and nothing at all when the window is
         // off screen or nothing is animating. See cadence.rs for why that
         // matters more than it sounds.
-        let animating_paint = self
-            .msgs
-            .iter()
-            .any(|m| m.paint.as_ref().is_some_and(|p| p.speed != 0.0));
-        let tick = match (self.cache.tick_ms(), animating_paint) {
-            (Some(t), true) => Some(t.min(PAINT_TICK_MS)),
-            (Some(t), false) => Some(t),
-            (None, true) => Some(PAINT_TICK_MS),
-            (None, false) => None,
-        };
+        // What the VISIBLE rows need — not what the cache holds and not what
+        // the backlog contains. Asking the whole cache meant one fast emote
+        // anywhere in a channel's 7TV set pinned the repaint rate even while
+        // scrolled far off screen, and the paint check swept all 10,000
+        // messages every frame to answer a question only ~24 drawn rows can.
+        let tick = self.view.tick_ms();
         let vis = ctx.input(|i| {
             let vp = i.viewport();
             cadence::Visibility {

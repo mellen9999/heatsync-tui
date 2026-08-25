@@ -83,13 +83,6 @@ impl Cache {
         self.stacks.len()
     }
 
-    /// Shortest frame delay across every loaded stack, or `None` when nothing
-    /// loaded animates. The window repaints on this rather than on a fixed
-    /// clock, so a channel with only static emotes costs no frames at all.
-    pub fn tick_ms(&self) -> Option<u32> {
-        self.stacks.values().filter_map(Animation::tick_ms).min()
-    }
-
     /// Upload a stack's layers. `layers[i]` is that layer's frames as
     /// (rgba, w, h, delay_ms).
     pub fn insert(&mut self, ctx: &Context, key: &str, wide: bool, layers: Vec<Vec<RawFrame>>) {

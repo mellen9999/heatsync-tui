@@ -174,3 +174,129 @@ fn an_empty_backlog_renders_without_panicking() {
     let h = harness(Vec::new(), WIDE);
     assert_eq!(rows_on_screen(&h), 0);
 }
+
+/// The repaint rate must follow what is ON SCREEN, not what is loaded.
+///
+/// This is the whole reason the tick moved out of `Cache` and off the message
+/// list: a channel's 7TV set is thousands of emotes, and asking the cache for
+/// its shortest frame delay meant one fast emote pinned the window's repaint
+/// rate forever — even scrolled ten thousand messages away from it. Same for a
+/// name paint on a message long since off screen.
+mod cadence_follows_the_screen {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    const ANIM_DELAY_MS: u32 = 40;
+
+    /// The cache is keyed by a stack's URLs, not by the emote's name, so a
+    /// hardcoded "KEKW" silently misses and `stack()` takes its not-loaded
+    /// path. Ask the parser for the key the renderer will actually look up.
+    fn kekw_key() -> String {
+        let s = set();
+        heatsync_core::emote::segments("KEKW", &s)
+            .into_iter()
+            .find_map(|seg| match seg {
+                heatsync_core::emote::Segment::Stack(st) => Some(st.key()),
+                _ => None,
+            })
+            .expect("KEKW should parse as an emote stack")
+    }
+
+    /// A cache holding one genuinely animated two-frame stack for `KEKW`.
+    ///
+    /// The first version of these tests used `Cache::default()`, which is
+    /// empty — so `stack()` took its not-loaded fallback and the emote path
+    /// under test never ran. Every assertion passed for the wrong reason, and a
+    /// mutation pinning the clock unconditionally went undetected.
+    fn animated_cache(ctx: &egui::Context) -> Cache {
+        let mut cache = Cache::default();
+        let px = vec![255u8; 4]; // 1x1 rgba
+        cache.insert(
+            ctx,
+            &kekw_key(),
+            false,
+            vec![vec![
+                (px.clone(), 1, 1, ANIM_DELAY_MS),
+                (px, 1, 1, ANIM_DELAY_MS),
+            ]],
+        );
+        cache
+    }
+
+    /// Drive the view to a settled state and report the cadence it ended up
+    /// asking for.
+    ///
+    /// Read AFTER `run()`, never inside the frame closure. The list sticks to
+    /// the bottom and measures row heights as it goes, so the first pass or two
+    /// are drawn against estimates and show the wrong rows — asserting inside
+    /// the closure asserts against that transient.
+    fn settled_tick(messages: Vec<Message>) -> Option<u32> {
+        let seen = Rc::new(Cell::new(None));
+        let out = Rc::clone(&seen);
+        let mut view = View::default();
+        let mut h = Harness::builder().with_size(WIDE).build_ui(move |ui| {
+            let cache = animated_cache(ui.ctx());
+            view.show(ui, &messages, &cache, 0);
+            out.set(view.tick_ms());
+        });
+        h.run();
+        seen.get()
+    }
+
+    fn plain(n: usize) -> Vec<Message> {
+        let s = set();
+        (0..n)
+            .map(|i| Message::parse(&format!("user{i:05}"), None, "plain text", &s, 1.0))
+            .collect()
+    }
+
+    #[test]
+    fn a_visible_animated_emote_asks_for_its_own_frame_delay() {
+        let s = set();
+        let messages = vec![Message::parse("mellen", None, "KEKW", &s, 1.0)];
+        assert_eq!(
+            settled_tick(messages),
+            Some(ANIM_DELAY_MS),
+            "a drawn animated emote should ask for its own frame delay"
+        );
+    }
+
+    #[test]
+    fn an_offscreen_animation_does_not_drive_repaints() {
+        // The list sticks to the bottom, so the OLDEST message is the one
+        // virtualisation leaves undrawn. The emote is loaded and animating —
+        // just not visible — which is exactly the case that used to pin the
+        // repaint clock through the whole-cache scan.
+        let s = set();
+        let mut messages = plain(500);
+        messages[0] = Message::parse("user00000", None, "KEKW", &s, 1.0);
+        assert_eq!(
+            settled_tick(messages),
+            None,
+            "an emote outside the viewport is still driving the repaint clock"
+        );
+    }
+
+    #[test]
+    fn a_visible_animated_paint_asks_for_its_own_cadence() {
+        let s = set();
+        let paint = Paint::animated(vec![egui::Color32::RED, egui::Color32::BLUE], 0.5);
+        let messages = vec![Message::parse("mellen", Some(paint), "hi", &s, 3.0)];
+        assert_eq!(
+            settled_tick(messages),
+            Some(crate::paint::TICK_MS),
+            "a painted name on screen should ask for the paint cadence"
+        );
+    }
+
+    #[test]
+    fn a_still_screen_asks_for_nothing() {
+        // Animation loaded in the cache, none of it on screen.
+        assert_eq!(
+            settled_tick(plain(3)),
+            None,
+            "a still screen must not repaint at all"
+        );
+    }
+}
