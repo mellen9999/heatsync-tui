@@ -2,13 +2,26 @@
 name = "heatsync-tui"
 version = "0.1.0"
 edition = "2021"
+description = "heat-sorted live multichat in the terminal — twitch + kick, real emotes, vim keys"
+license = "MIT"
+repository = "https://github.com/mellen9999/heatsync-tui"
+homepage = "https://heatsync.org"
+keywords = ["twitch", "kick", "chat", "streaming", "tui"]
+categories = ["command-line-utilities"]
 
+# The binary is `heatsync-tui`, not `heatsync`. An unrelated MIT project of the
+# same name ships `heatsync-bin` on the AUR, and it declares both
+# `provides: [heatsync]` and `conflicts: [heatsync]` — so installing /usr/bin/heatsync
+# would make pacman refuse to have both on a machine. Ours predates theirs by
+# ~19 months via the domain, but a file conflict makes US look like the squatter
+# on the one shelf where a user meets us first.
 [[bin]]
-name = "heatsync"
+name = "heatsync-tui"
 path = "src/main.rs"
 
 [dependencies]
-heatsync-core = { path = "../core" }
+# crates.io rejects a bare `path` dep — the version is what it publishes against.
+heatsync-core = { path = "../core", version = "0.1.0" }
 ratatui = "0.29"
 crossterm = "0.28"
 # animated emote decode — pure-Rust, no libwebp/libgif C deps. lean feature set.
