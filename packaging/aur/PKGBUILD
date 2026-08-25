@@ -12,6 +12,9 @@ pkgdesc='heat-sorted live multichat in the terminal — twitch + kick, real emot
 arch=('x86_64' 'aarch64')
 url='https://github.com/mellen9999/heatsync-tui'
 license=('MIT')
+# ring's C/asm objects break under makepkg's default LTO — undefined
+# ring_core_* symbols at link. Standard fix for ring-dependent Rust crates.
+options=('!lto')
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::https://static.crates.io/crates/$pkgname/$pkgname-$pkgver.crate")
