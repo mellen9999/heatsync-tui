@@ -208,8 +208,29 @@ Numbers, not impressions. Re-measure before claiming any of them moved.
 | `heatsync-gui` release binary | 7.18 MB |
 | dependency crates — gui / tui / core | 162 / 154 / 12 |
 | frame cost, 10k-message backlog | 0.46 ms |
-| resident memory | 88 MB |
+| font atlas texture | **2,048 KB** |
+| emote textures (5 stacks) | **192 KB** |
+| resident memory, CI linux under llvmpipe | **127 MB** |
 | Chatterino, for reference | 40–60 MB installed |
+
+The last three come from the smoke run itself and are printed by every CI job on
+every platform, so they cannot drift quietly. Two things they settle:
+
+- **Texture memory is not where the footprint goes.** Fonts and emotes together
+  are 2.2 MB of a 127 MB resident set. Chasing emote texture size would have
+  been chasing 0.15% of it.
+- **The font atlas is ten times the emote textures.** That is the same
+  `default_fonts` measured at 1.35 MB of binary above — it costs on both axes,
+  which strengthens the case for trimming it and does not change the reason not
+  to yet (emoji coverage in a chat client).
+
+**Correction:** this document previously recorded 88 MB resident, carried over
+from a desktop run. The measured figure is 127 MB, and it is not directly
+comparable either — CI renders through llvmpipe, whose software framebuffers
+are part of that number and would not exist on a real GPU. The honest statement
+is that resident memory on a GPU-less linux runner is 127 MB and the desktop
+figure has not been re-measured since it started being printed. Do not quote
+either number as *the* footprint until heatpc gives a real-driver reading.
 
 ## Still open
 

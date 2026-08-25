@@ -69,7 +69,8 @@ What does matter, and what actually decided it:
   one per emote stack gets correct inline layout for free. That is the single
   capability the alternatives lack.
 - **The real footprint levers are dependency count and the font atlas**, not the
-  toolkit's paint model. `eframe` is already `default-features = false`; the
+  toolkit's paint model. Now measured, and the split is lopsided: the font atlas
+  is **2,048 KB** against **192 KB** of emote textures. Ten to one. `eframe` is already `default-features = false`; the
   remaining weight is `default_fonts` (Ubuntu + emoji, compiled in) and the
   `image` codecs, which are genuinely needed for gif/webp emotes.
 
@@ -88,6 +89,7 @@ rather than a condition buried in the frame loop.
 | `heatsync-tui` dependency crates | 154 |
 | `heatsync-core` dependency crates | **12** |
 | frame cost, 10k-message backlog | **0.46 ms** |
+| font atlas / emote textures | **2,048 KB / 192 KB** |
 
 Release profile is already at its size floor: `lto = true`, `opt-level = "z"`,
 `strip = true`, `codegen-units = 1`, `panic = "abort"`.
