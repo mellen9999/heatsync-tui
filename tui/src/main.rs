@@ -39,7 +39,10 @@ use ratatui::{Frame, Terminal};
 use ratatui_image::Image;
 use unicode_width::UnicodeWidthStr;
 
-const BRAND: Color = Color::Indexed(208);
+/// chrome accent: white — active/selected is black-on-white, hint keys are
+/// bright white. color in the ui comes only from semantics (heat tiers, user
+/// colors, live/warn dots), never decoration.
+const ACCENT: Color = Color::Indexed(231);
 
 /// feed source: offline synthetic, or the live relay thread.
 enum Feed {
@@ -895,7 +898,7 @@ fn ui(f: &mut Frame, app: &App) {
                     "  no channels — press ",
                     Style::default().fg(Color::Indexed(244)),
                 ),
-                Span::styled("o", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
+                Span::styled("o", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                 Span::styled(" to join one", Style::default().fg(Color::Indexed(244))),
             ])),
             main,
@@ -937,7 +940,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         if i == app.focus {
             Style::default()
                 .fg(Color::Black)
-                .bg(BRAND)
+                .bg(ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Indexed(Tier::of(heat).xterm()))
@@ -1075,7 +1078,7 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
                 " channels ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(BRAND)
+                    .bg(ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1106,7 +1109,7 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
         let style = if sel {
             Style::default()
                 .fg(Color::Black)
-                .bg(BRAND)
+                .bg(ACCENT)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(hue)
@@ -1334,7 +1337,7 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
 /// shows exactly ONE key per action — aliases stay out of the footer.
 fn hint(k: &'static str, d: &'static str) -> [Span<'static>; 2] {
     [
-        Span::styled(k, Style::default().fg(BRAND)),
+        Span::styled(k, Style::default().fg(ACCENT)),
         Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244))),
     ]
 }
@@ -1347,7 +1350,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 " manage ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(BRAND)
+                    .bg(ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
@@ -1372,12 +1375,12 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 " join ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(BRAND)
+                    .bg(ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" ❯ ", Style::default().fg(BRAND)),
+            Span::styled(" ❯ ", Style::default().fg(ACCENT)),
             Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))),
-            Span::styled("\u{2588}", Style::default().fg(BRAND)),
+            Span::styled("\u{2588}", Style::default().fg(ACCENT)),
             Span::styled(
                 "   name or kick:name",
                 Style::default().fg(Color::Indexed(244)),
@@ -1405,11 +1408,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         };
         let tag = Style::default()
             .fg(Color::Black)
-            .bg(BRAND)
+            .bg(ACCENT)
             .add_modifier(Modifier::BOLD);
         let mut spans = vec![
             Span::styled(prompt, tag),
-            Span::styled(" ❯ ", Style::default().fg(BRAND)),
+            Span::styled(" ❯ ", Style::default().fg(ACCENT)),
         ];
         if readonly {
             spans.push(Span::styled(
@@ -1435,7 +1438,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             if !app.line.pending().is_empty() {
                 spans.push(Span::styled(
                     format!("  {}", app.line.pending()),
-                    Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ));
             }
             // a command's reply (usage, "not open: x") has to be visible from
@@ -1474,7 +1477,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         " heatsync ",
         Style::default()
             .fg(Color::Black)
-            .bg(BRAND)
+            .bg(ACCENT)
             .add_modifier(Modifier::BOLD),
     )];
     // a message (search miss, send error) takes the front of the line the way
