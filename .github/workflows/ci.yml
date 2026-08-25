@@ -11,6 +11,9 @@ env:
 jobs:
   test:
     strategy:
+      # Never fail-fast: a windows-only or macos-only break is exactly the kind
+      # of thing worth seeing in full rather than having its siblings cancelled.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -20,7 +23,53 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+
+      # Linux runners are headless. The gui smoke step below opens a real
+      # window, so it needs a virtual display and the usual windowing libs.
+      - name: Linux windowing deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libxkbcommon-x11-0 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+            libgl1-mesa-dri libegl1 libgles2
+
       - run: cargo fmt --check
       - run: cargo clippy --workspace -- -D warnings
+
+      # Unit + e2e. The gui e2e drives the real widget tree through
+      # egui_kittest/AccessKit, which needs no gpu and so runs everywhere.
       - run: cargo test --workspace
+
       - run: cargo build --release
+
+      # The one thing the e2e above cannot cover: actually creating a window and
+      # painting through glow. Windows is the primary target and OpenGL drivers
+      # are where it differs most, so this is the step that stops "compiles on
+      # windows" being mistaken for "runs on windows".
+      #
+      # Wrapped in an external timeout on purpose. A window that never maps
+      # leaves eframe not calling the app at all, so no in-process deadline can
+      # fire — only killing it from outside is a guard that cannot be evaded.
+      - name: GUI smoke (opens a window, renders, exits)
+        if: runner.os == 'Linux'
+        run: timeout 120 xvfb-run -a ./target/release/heatsync-gui --smoke
+
+      - name: GUI smoke (opens a window, renders, exits)
+        if: runner.os == 'macOS'
+        run: timeout 120 ./target/release/heatsync-gui --smoke
+
+      - name: GUI smoke (opens a window, renders, exits)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\target\release\heatsync-gui.exe `
+                 -ArgumentList '--smoke' -PassThru -NoNewWindow `
+                 -RedirectStandardOutput smoke.log -RedirectStandardError smoke.err
+          if (-not $p.WaitForExit(120000)) {
+            $p.Kill()
+            Write-Error "gui smoke timed out: the window never rendered"
+            exit 1
+          }
+          Get-Content smoke.log, smoke.err -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }

@@ -13,7 +13,9 @@
 //! actually measured.
 
 mod bench;
+mod cadence;
 mod chat;
+mod e2e;
 mod emote;
 mod paint;
 
@@ -26,6 +28,23 @@ use chat::{Message, View};
 use paint::Paint;
 
 const MSGS: usize = 10_000;
+
+/// A paint's gradient is continuous, so it has no natural frame delay of its
+/// own — 30fps is the cap we choose for it.
+const PAINT_TICK_MS: u32 = 33;
+
+/// Enough frames for the height cache to settle and a second animation frame to
+/// land, so the smoke test proves a steady state rather than one lucky paint.
+const SMOKE_FRAMES: u32 = 30;
+
+/// A smoke run that cannot finish must fail, not hang.
+///
+/// This catches the case where eframe still drives the app but never paints.
+/// It does NOT catch a window that never maps at all — observed under a
+/// tag-based compositor, where eframe stops calling the app entirely and no
+/// in-process guard can fire. CI therefore wraps this in an external timeout,
+/// which is the guard that actually cannot be evaded.
+const SMOKE_DEADLINE: Duration = Duration::from_secs(30);
 
 fn emote_set() -> EmoteSet {
     let mk = |name: &str, zero_width: bool, animated: bool| Emote {
@@ -97,6 +116,12 @@ fn build(set: &EmoteSet) -> Vec<Message> {
 }
 
 struct App {
+    /// Exit after this many frames — the windowed smoke test, which is the only
+    /// thing that exercises glow, winit and the real swapchain. Everything else
+    /// (the kittest e2e) drives the widget tree with no window at all.
+    smoke_frames: Option<u32>,
+    /// Close is not instantaneous, so the verdict is latched to print once.
+    smoke_done: bool,
     msgs: Vec<Message>,
     cache: emote::Cache,
     view: View,
@@ -109,9 +134,11 @@ struct App {
 }
 
 impl App {
-    fn new(stats: bool) -> App {
+    fn new(stats: bool, smoke_frames: Option<u32>) -> App {
         let set = emote_set();
         App {
+            smoke_frames,
+            smoke_done: false,
             msgs: build(&set),
             cache: emote::Cache::default(),
             view: View::default(),
@@ -163,6 +190,25 @@ fn upload_emotes(ctx: &egui::Context, cache: &mut emote::Cache) {
 }
 
 impl eframe::App for App {
+    /// Runs before every `ui()`, and *also* while eframe considers the window
+    /// hidden — when no ui pass happens at all. That makes it the only place a
+    /// smoke run can notice it is getting no frames and fail instead of hang.
+    fn logic(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        if self.smoke_frames.is_some() && self.started.elapsed() > SMOKE_DEADLINE {
+            eprintln!(
+                "[smoke] FAILED: {} frames in {:?} — the window never rendered. \
+                 Visible={:?} focused={:?}. On a headless runner this needs a \
+                 display (xvfb); under a tag-based compositor the window may \
+                 have opened on an inactive tag.",
+                self.frames,
+                SMOKE_DEADLINE,
+                ctx.input(|i| i.viewport().visible()),
+                ctx.input(|i| i.viewport().focused),
+            );
+            std::process::exit(1);
+        }
+    }
+
     // egui 0.36 hands the app a Ui rather than a Context, and panels are shown
     // inside it. The Context is still reachable through `ui.ctx()`.
     fn ui(&mut self, ui: &mut egui::Ui, _f: &mut eframe::Frame) {
@@ -195,22 +241,48 @@ impl eframe::App for App {
             self.view.show(ui, &self.msgs, &self.cache, t_ms);
         });
 
-        // Animated emotes and animated paints both need a clock, but only the
-        // ones actually on screen. Ask for the soonest repaint either needs
-        // rather than spinning at a fixed rate — a channel whose emotes are all
-        // static, with no animated paint in view, then costs no frames at all.
+        // Animated emotes and animated paints both need a clock. Ask for the
+        // soonest repaint either needs — and nothing at all when the window is
+        // off screen or nothing is animating. See cadence.rs for why that
+        // matters more than it sounds.
         let animating_paint = self
             .msgs
             .iter()
             .any(|m| m.paint.as_ref().is_some_and(|p| p.speed != 0.0));
         let tick = match (self.cache.tick_ms(), animating_paint) {
-            (Some(t), true) => Some(t.min(33)),
+            (Some(t), true) => Some(t.min(PAINT_TICK_MS)),
             (Some(t), false) => Some(t),
-            (None, true) => Some(33),
+            (None, true) => Some(PAINT_TICK_MS),
             (None, false) => None,
         };
-        if let Some(ms) = tick {
-            ctx.request_repaint_after(Duration::from_millis(ms as u64));
+        let vis = ctx.input(|i| {
+            let vp = i.viewport();
+            cadence::Visibility {
+                visible: vp.visible(),
+                focused: vp.focused,
+            }
+        });
+        if let Some(delay) = cadence::repaint_delay(vis, tick) {
+            ctx.request_repaint_after(delay);
+        }
+
+        if let Some(budget) = self.smoke_frames {
+            if !self.smoke_done && self.frames + 1 >= budget {
+                self.smoke_done = true;
+                println!(
+                    "[smoke] rendered {} frames, {} rows of {} msgs, {} emote stacks — ok",
+                    self.frames + 1,
+                    self.view.drawn_last_frame,
+                    self.msgs.len(),
+                    self.cache.len()
+                );
+                assert!(
+                    self.view.drawn_last_frame > 0,
+                    "[smoke] a window opened but drew no rows"
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            ctx.request_repaint();
         }
 
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
@@ -265,12 +337,18 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     let stats = std::env::args().any(|a| a == "--stats");
+    // --smoke opens a real window, renders a few frames through glow, and
+    // exits. It is the only check that covers windowing and the gpu path, so
+    // it is what CI runs on each platform.
+    let smoke = std::env::args()
+        .any(|a| a == "--smoke")
+        .then_some(SMOKE_FRAMES);
     eframe::run_native(
         "heatsync",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 720.0]),
             ..Default::default()
         },
-        Box::new(move |_cc| Ok(Box::new(App::new(stats)))),
+        Box::new(move |_cc| Ok(Box::new(App::new(stats, smoke)))),
     )
 }

@@ -11,10 +11,11 @@
 //! 2. **Virtualising rows that are not a uniform height.** A wrapped message
 //!    has no known height until it is laid out at the current width, so
 //!    `ScrollArea::show_rows` (uniform only) cannot be used. Instead heights
-//!    are measured once, cached, and kept as a running prefix sum; unmeasured
-//!    rows are estimated at one line and corrected the first time they are
-//!    actually drawn. The cache is dropped whenever the wrap width changes,
-//!    because every height in it was measured against the old width.
+//!    are measured as rows are drawn, cached, and kept as a running prefix sum.
+//!    Rows never drawn are estimated from the running mean of those that have
+//!    been — see [`Heights`] for why a fixed estimate is not good enough. The
+//!    cache is dropped whenever the wrap width changes, because every height in
+//!    it was measured against the old width.
 
 use egui::{Align, Color32, FontId, Layout, Rect, RichText, ScrollArea, Ui, Vec2};
 use heatsync_core::emote::{EmoteSet, Segment};
@@ -47,17 +48,34 @@ impl Message {
 }
 
 /// Height cache + the width it was measured at.
+///
+/// A wrapped message has no height until it is laid out, and only the rows on
+/// screen ever get laid out — with a ten-thousand message backlog the vast
+/// majority are never measured at all. So every row that has not been measured
+/// has to be *estimated*, and the quality of that estimate is the quality of
+/// the scrollbar.
+///
+/// A fixed estimate is not good enough: it makes the total height independent
+/// of the wrap width, so a narrow window and a wide one claim the same content
+/// height even though a narrow one wraps every message taller. Instead the
+/// estimate is **the running mean of the rows actually measured at this
+/// width**, which converges on the truth as the user scrolls and is already
+/// correct on the first frame after a screenful has been laid out.
 #[derive(Default)]
 pub struct Heights {
     width: f32,
+    /// `NaN` marks a row that has never been laid out at this width.
     rows: Vec<f32>,
+    measured_sum: f32,
+    measured_count: usize,
     /// running prefix sum; `sum[i]` is the top of row `i`
     sum: Vec<f32>,
     dirty: bool,
 }
 
 impl Heights {
-    const ESTIMATE: f32 = 20.0;
+    /// Only used before anything at all has been measured — one line of text.
+    const SEED_ESTIMATE: f32 = 20.0;
 
     /// Every cached height was measured against one wrap width. If the window
     /// resized they are all wrong, so the cache is dropped rather than
@@ -65,7 +83,11 @@ impl Heights {
     pub fn set_width(&mut self, w: f32) {
         if (self.width - w).abs() > 0.5 {
             self.width = w;
+            let n = self.rows.len();
             self.rows.clear();
+            self.rows.resize(n, f32::NAN);
+            self.measured_sum = 0.0;
+            self.measured_count = 0;
             self.sum.clear();
             self.dirty = true;
         }
@@ -73,25 +95,54 @@ impl Heights {
 
     pub fn ensure(&mut self, n: usize) {
         if self.rows.len() < n {
-            self.rows.resize(n, Self::ESTIMATE);
+            self.rows.resize(n, f32::NAN);
             self.dirty = true;
+        }
+    }
+
+    /// Height to assume for a row nothing has laid out yet.
+    pub fn estimate(&self) -> f32 {
+        if self.measured_count == 0 {
+            Self::SEED_ESTIMATE
+        } else {
+            self.measured_sum / self.measured_count as f32
+        }
+    }
+
+    /// What this row is worth right now: its measurement, or the estimate.
+    pub fn height_of(&self, i: usize) -> f32 {
+        match self.rows.get(i) {
+            Some(h) if h.is_finite() => *h,
+            _ => self.estimate(),
         }
     }
 
     pub fn record(&mut self, i: usize, h: f32) {
-        if i < self.rows.len() && (self.rows[i] - h).abs() > 0.5 {
-            self.rows[i] = h;
-            self.dirty = true;
+        let Some(slot) = self.rows.get_mut(i) else {
+            return;
+        };
+        let was = *slot;
+        if was.is_finite() {
+            if (was - h).abs() <= 0.5 {
+                return; // unchanged
+            }
+            self.measured_sum += h - was;
+        } else {
+            self.measured_sum += h;
+            self.measured_count += 1;
         }
+        *slot = h;
+        self.dirty = true;
     }
 
     fn rebuild(&mut self) {
+        let est = self.estimate();
         self.sum.clear();
         self.sum.reserve(self.rows.len() + 1);
         let mut acc = 0.0;
         self.sum.push(0.0);
         for h in &self.rows {
-            acc += h;
+            acc += if h.is_finite() { *h } else { est };
             self.sum.push(acc);
         }
         self.dirty = false;
@@ -172,7 +223,7 @@ impl View {
                     }
                     let row_rect = Rect::from_min_size(
                         egui::pos2(ui.min_rect().min.x, y),
-                        Vec2::new(avail, self.heights.rows[i]),
+                        Vec2::new(avail, self.heights.height_of(i)),
                     );
                     let h = ui
                         .scope_builder(
@@ -293,10 +344,10 @@ mod tests {
         h.set_width(400.0);
         h.ensure(3);
         h.record(0, 55.0);
-        assert_eq!(h.rows[0], 55.0);
+        assert_eq!(h.height_of(0), 55.0);
         h.set_width(700.0);
-        assert!(
-            h.rows.is_empty(),
+        assert_eq!(
+            h.measured_count, 0,
             "heights measured at 400px cannot be reused at 700px"
         );
     }
@@ -309,7 +360,8 @@ mod tests {
         h.record(0, 44.0);
         h.set_width(400.2);
         assert_eq!(
-            h.rows[0], 44.0,
+            h.height_of(0),
+            44.0,
             "a 0.2px jitter must not invalidate everything"
         );
     }
@@ -319,7 +371,7 @@ mod tests {
         let mut h = Heights::default();
         h.set_width(500.0);
         h.ensure(4);
-        assert_eq!(h.total(), Heights::ESTIMATE * 4.0);
+        assert_eq!(h.total(), Heights::SEED_ESTIMATE * 4.0);
     }
 
     #[test]
@@ -328,7 +380,71 @@ mod tests {
         h.set_width(500.0);
         h.ensure(3);
         h.record(1, 60.0);
-        assert_eq!(h.total(), Heights::ESTIMATE * 2.0 + 60.0);
+        // one row measured at 60 -> the two unmeasured rows now estimate 60 too
+        assert_eq!(h.total(), 180.0);
+    }
+
+    #[test]
+    fn an_unmeasured_row_borrows_the_mean_of_the_measured_ones() {
+        let mut h = Heights::default();
+        h.set_width(500.0);
+        h.ensure(10);
+        assert_eq!(h.estimate(), Heights::SEED_ESTIMATE, "nothing measured yet");
+        h.record(0, 40.0);
+        h.record(1, 60.0);
+        assert_eq!(h.estimate(), 50.0);
+        assert_eq!(h.height_of(9), 50.0, "an undrawn row uses the mean");
+        assert_eq!(h.height_of(0), 40.0, "a drawn row keeps its measurement");
+    }
+
+    #[test]
+    fn the_estimate_tracks_a_row_being_re_measured() {
+        let mut h = Heights::default();
+        h.set_width(500.0);
+        h.ensure(4);
+        h.record(0, 40.0);
+        assert_eq!(h.estimate(), 40.0);
+        // same row, new height (content changed) — mean must follow, not double-count
+        h.record(0, 80.0);
+        assert_eq!(h.estimate(), 80.0);
+        assert_eq!(h.measured_count, 1);
+    }
+
+    #[test]
+    fn total_height_responds_to_width_because_the_estimate_does() {
+        // The bug an e2e test caught: with a fixed estimate a narrow window and
+        // a wide one claimed the same content height, so the same number of
+        // rows fit either way and the scrollbar lied on a long backlog.
+        let mut wide = Heights::default();
+        wide.set_width(1200.0);
+        wide.ensure(1000);
+        wide.record(0, 20.0);
+
+        let mut narrow = Heights::default();
+        narrow.set_width(320.0);
+        narrow.ensure(1000);
+        narrow.record(0, 60.0); // same message wraps three lines when narrow
+
+        assert!(
+            narrow.total() > wide.total(),
+            "a narrow window holds taller rows, so its content must be taller: \
+             narrow {} vs wide {}",
+            narrow.total(),
+            wide.total()
+        );
+    }
+
+    #[test]
+    fn a_width_change_forgets_the_measurements_but_keeps_the_row_count() {
+        let mut h = Heights::default();
+        h.set_width(400.0);
+        h.ensure(5);
+        h.record(0, 90.0);
+        assert_eq!(h.measured_count, 1);
+        h.set_width(900.0);
+        assert_eq!(h.measured_count, 0, "measurements are width-specific");
+        assert_eq!(h.estimate(), Heights::SEED_ESTIMATE);
+        assert_eq!(h.total(), Heights::SEED_ESTIMATE * 5.0, "still five rows");
     }
 
     #[test]

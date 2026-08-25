@@ -21,3 +21,8 @@ heatsync-core = { path = "../core", version = "0.1.0" }
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.36"
 image = { version = "0.25", default-features = false, features = ["gif", "webp", "png", "jpeg"] }
+
+[dev-dependencies]
+# AccessKit-based, so assertions read the accessibility tree rather than pixels
+# — no gpu, which is what makes this runnable on all three CI runners.
+egui_kittest = "0.36"
