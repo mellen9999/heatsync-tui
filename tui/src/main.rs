@@ -562,6 +562,9 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     // views stay lazy (redraw only on the tick or a keypress).
     let tick = Duration::from_millis(200);
     let mut last = Instant::now();
+    // see the frame loop below: synchronized output is a win everywhere EXCEPT
+    // inside tmux, where it costs us every emote on screen.
+    let sync = std::env::var_os("TMUX").is_none();
     // smoothed cost of one draw. animations run at their authored rate, but never
     // faster than the terminal can actually paint — if a draw starts costing real
     // time (a slow pty, a screenful of sixels), the cadence stretches to match
@@ -596,13 +599,22 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         }
         let drew_at = Instant::now();
         // synchronized output (DECSET 2026): the terminal holds presentation
-        // until the frame is complete. without it every sixel/kitty blit shows
-        // as it streams — on an animation-heavy channel that reads as flicker
-        // and a cursor darting to each emote. foot/kitty/wezterm and tmux ≥3.4
-        // honour it; terminals that don't simply ignore the mode.
-        crossterm::execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
+        // until the frame is complete, so a frame's blits land at once instead
+        // of streaming in as visible tearing. foot/kitty/wezterm honour it.
+        //
+        // NOT inside tmux. tmux doesn't pass the mode through — it implements
+        // it, and its implementation repaints the WHOLE pane when the frame
+        // ends. our emotes reach the terminal as passthrough, which tmux cannot
+        // see, so that repaint paints tmux's own blank cells straight over
+        // every image we just drew. wrapping frames in it inside tmux means no
+        // emote ever survives the frame it was drawn in.
+        if sync {
+            crossterm::execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
+        }
         let drew = terminal.draw(|f| ui(f, &app));
-        crossterm::execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
+        if sync {
+            crossterm::execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
+        }
         drew?;
         // exponential moving average — one slow frame shouldn't throttle us, a
         // sustained slow terminal should.
