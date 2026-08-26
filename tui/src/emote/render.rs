@@ -175,13 +175,16 @@ impl EmoteStore {
             .map(|n| n.get())
             .unwrap_or(2)
             .clamp(2, 4);
+        let tmux = std::env::var_os("TMUX").is_some();
+        // sixel through tmux needs its passthrough wrapper re-escaped before it
+        // is a legal escape sequence at all — see fix_tmux_passthrough.
+        let fix_passthrough = tmux && proto == ProtocolType::Sixel;
         for _ in 0..workers {
             let rx = Arc::clone(&jobs_rx);
             let tx = done_tx.clone();
             let p = picker.clone();
-            thread::spawn(move || loader(p, rx, tx));
+            thread::spawn(move || loader(p, rx, tx, fix_passthrough));
         }
-        let tmux = std::env::var_os("TMUX").is_some();
         let outer_ok = Arc::new(AtomicBool::new(true));
         if tmux {
             // the attached-client watcher. asking tmux means fork+exec — done on
@@ -432,6 +435,39 @@ fn tmux_outer_protocol_now() -> Option<Option<ProtocolType>> {
             None
         },
     )
+}
+
+/// re-escape ratatui-image's tmux passthrough wrapper. THIS is the flicker.
+///
+/// passthrough is `ESC Ptmux;` + payload + `ESC \`, and every ESC inside the
+/// payload must be DOUBLED — tmux halves them again and forwards the result to
+/// the outer terminal, ending the sequence at the first undoubled `ESC \`.
+/// ratatui-image 8.1.1 only doubles the sixel's LEADING escape; the `ESC \`
+/// that terminates the sixel itself is left single. so tmux ends the
+/// passthrough on the sixel's own terminator and forwards a sixel with NO
+/// string terminator. foot then sits in sixel-parsing state consuming whatever
+/// tmux writes next — our chat text — as image data, until the next emote's
+/// stray terminator finally closes it. text disappears into images, images land
+/// a frame late: that's the flicker.
+///
+/// so unwrap what the crate built and re-wrap it correctly. anything that
+/// doesn't match the crate's exact shape is left untouched, so a future encoder
+/// change degrades to today's behaviour instead of emitting a mangled escape.
+fn fix_tmux_passthrough(proto: &mut Protocol) {
+    let Protocol::Sixel(s) = proto else {
+        return;
+    };
+    if !s.is_tmux {
+        return;
+    }
+    let Some(sixel) = s
+        .data
+        .strip_prefix("\x1bPtmux;\x1b\x1b")
+        .and_then(|d| d.strip_suffix("\x1b\\"))
+    else {
+        return;
+    };
+    s.data = format!("\x1bPtmux;{}\x1b\\", sixel.replace('\x1b', "\x1b\x1b"));
 }
 
 /// heuristic: is this terminal known to support (and answer a query for) an
@@ -702,7 +738,7 @@ pub(crate) fn subsample(frames: Vec<(RgbaImage, u32)>, max: usize) -> Vec<(RgbaI
         .collect()
 }
 
-fn loader(picker: Picker, jobs: Arc<Mutex<Receiver<Job>>>, done: Sender<Done>) {
+fn loader(picker: Picker, jobs: Arc<Mutex<Receiver<Job>>>, done: Sender<Done>, fix_passthrough: bool) {
     // sixel drops the alpha channel (to_rgb8) so a transparent pixel falls back to
     // its raw rgb — often a colored fringe or box. flatten onto black first so
     // emotes sit cleanly on a dark terminal. kitty/iterm2 keep true transparency.
@@ -717,7 +753,7 @@ fn loader(picker: Picker, jobs: Arc<Mutex<Receiver<Job>>>, done: Sender<Done>) {
             },
             Err(_) => return,
         };
-        let built = build(&picker, &job.key, flatten);
+        let built = build(&picker, &job.key, flatten, fix_passthrough);
         if done
             .send(Done {
                 key: job.key,
@@ -788,7 +824,7 @@ pub fn composite_frames(key: &str, min_px: u32) -> Option<Vec<(RgbaImage, u32)>>
 /// composite a stack (see [`composite_frames`]), scale every frame to exactly its
 /// cell block, share one palette across the animation, and encode to the
 /// terminal's inline-graphics protocol. any failure → None.
-fn build(picker: &Picker, key: &str, flatten: bool) -> Option<Built> {
+fn build(picker: &Picker, key: &str, flatten: bool, fix_passthrough: bool) -> Option<Built> {
     let (cw, ch) = picker.font_size();
     let block_h = EMOTE_H as u32 * ch.max(1) as u32;
     let frames = subsample(composite_frames(key, block_h)?, MAX_FRAMES);
@@ -816,9 +852,12 @@ fn build(picker: &Picker, key: &str, flatten: bool) -> Option<Built> {
         // the canvas is ALREADY exactly `size` in pixels, so this encodes without
         // resizing and the protocol's footprint is exactly `size` — no letterbox,
         // no surprise cell count.
-        let proto = picker
+        let mut proto = picker
             .new_protocol(DynamicImage::ImageRgba8(canvas), size, Resize::Fit(None))
             .ok()?;
+        if fix_passthrough {
+            fix_tmux_passthrough(&mut proto);
+        }
         let delay_ms = (*delay_ms).max(MIN_DELAY_MS);
         total_ms += delay_ms as u64;
         out.push(FrameProto { proto, delay_ms });
@@ -838,6 +877,78 @@ fn build(picker: &Picker, key: &str, flatten: bool) -> Option<Built> {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    /// what tmux forwards to the outer terminal: strip the wrapper, halve every
+    /// doubled ESC, and stop at the first ESC that ISN'T doubled (that one ends
+    /// the passthrough). this is tmux's own rule — the test asserts against it
+    /// rather than against our formatting.
+    fn tmux_forwards(data: &str) -> String {
+        let body = data
+            .strip_prefix("\x1bPtmux;")
+            .expect("passthrough prefix")
+            .strip_suffix("\x1b\\")
+            .expect("passthrough terminator");
+        let mut out = String::new();
+        let mut it = body.chars();
+        while let Some(c) = it.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            // a lone ESC (not doubled) terminates the passthrough early.
+            match it.next() {
+                Some('\x1b') => out.push('\x1b'),
+                _ => break,
+            }
+        }
+        out
+    }
+
+    /// the whole bug in one assertion: what tmux hands the outer terminal must
+    /// be the COMPLETE sixel, terminator included. before the fix the crate's
+    /// wrapper leaked the sixel's own `ESC \` as the passthrough terminator, so
+    /// foot got an unterminated sixel and swallowed the chat text after it.
+    #[test]
+    fn passthrough_forwards_a_complete_terminated_sixel() {
+        use ratatui_image::protocol::sixel::Sixel;
+        let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, Rgba([255, 135, 0, 255])));
+        let area = Rect::new(0, 0, 2, 2);
+        let plain = Sixel::new(img.clone(), area, false).expect("encode");
+        assert!(plain.data.ends_with("\x1b\\"), "sixel is ST-terminated");
+
+        // the crate's own tmux output loses the terminator.
+        let raw_wrap = Sixel::new(img.clone(), area, true).expect("encode");
+        assert!(!tmux_forwards(&raw_wrap.data).ends_with("\x1b\\"));
+
+        let mut fixed = Protocol::Sixel(Sixel::new(img, area, true).expect("encode"));
+        fix_tmux_passthrough(&mut fixed);
+        let Protocol::Sixel(s) = &fixed else {
+            unreachable!()
+        };
+        assert_eq!(tmux_forwards(&s.data), plain.data);
+        assert!(s.is_tmux, "still passthrough — tmux stays blind by design");
+    }
+
+    /// a sixel that was never wrapped (outside tmux, or a wrapper shape we
+    /// don't recognise) must pass through untouched, never half-rewritten.
+    #[test]
+    fn fix_leaves_unwrapped_sixel_alone() {
+        use ratatui_image::protocol::sixel::Sixel;
+        let mut p = Protocol::Sixel(Sixel {
+            data: "\x1bP0;1;0q#0;2;100;50;0#0~~\x1b\\".into(),
+            area: Rect::new(0, 0, 2, 2),
+            is_tmux: false,
+        });
+        let Protocol::Sixel(orig) = &p else {
+            unreachable!()
+        };
+        let orig = orig.data.clone();
+        fix_tmux_passthrough(&mut p);
+        let Protocol::Sixel(after) = &p else {
+            unreachable!()
+        };
+        assert_eq!(after.data, orig);
+    }
 
     #[test]
     fn alpha_over_opaque_replaces() {
