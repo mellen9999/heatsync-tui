@@ -56,18 +56,26 @@ enum Feed {
 }
 
 /// modes: switch channels in Normal, type a message in Insert, type a channel
-/// to join in Join, or manage channels rover-style in Manage.
+/// to join in Join, or manage channels rover-style in Manage. SlotPick/SlotEdit
+/// are Manage sub-modes: pick one of the t/k/y source slots, then retype it.
 #[derive(Clone, Copy, PartialEq)]
 enum InputMode {
     Normal,
     Insert,
     Join,
     Manage,
+    /// e pressed in Manage — waiting for t/k/y to choose which slot to edit.
+    SlotPick,
+    /// typing a new name for one platform slot of the row under the cursor.
+    SlotEdit(Platform),
 }
 
 struct App {
     channels: Vec<Channel>,
     emotes: Vec<EmoteSet>, // index-aligned with channels
+    /// the pooled global set (twitch + unlocked + bttv/ffz/7tv globals),
+    /// merged under every channel set — channel emotes of the same name win.
+    globals: EmoteSet,
     focus: usize,
     paused: bool,
     feed: Feed,
@@ -217,6 +225,7 @@ fn main() -> io::Result<()> {
             emotes: (0..mock::channels().len())
                 .map(|_| EmoteSet::new())
                 .collect(),
+            globals: EmoteSet::new(),
             focus: 0,
             paused: false,
             feed: Feed::Mock(mock::Driver::new()),
@@ -334,9 +343,11 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         (Some(u), Some(o)) => Some(twitch::spawn(u, o)),
         _ => None,
     };
+    spawn_global_emotes(&emote_tx);
     App {
         channels,
         emotes,
+        globals: EmoteSet::new(),
         focus: 0,
         paused: false,
         feed: Feed::Live {
@@ -371,6 +382,18 @@ fn spawn_emote_fetch(tx: &Sender<(Platform, String, EmoteSet)>, platform: Platfo
     std::thread::spawn(move || {
         let set = http::emote_set(&name, platform).unwrap_or_default();
         let _ = tx.send((platform, name, set));
+    });
+}
+
+/// fetch the pooled global emote set once at startup, delivered over the same
+/// channel as per-channel sets under an empty name (no real sub is ever "").
+fn spawn_global_emotes(tx: &Sender<(Platform, String, EmoteSet)>) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let set = http::global_emotes().unwrap_or_default();
+        if !set.is_empty() {
+            let _ = tx.send((Platform::Twitch, String::new(), set));
+        }
     });
 }
 
@@ -420,25 +443,42 @@ fn drain_emotes(app: &mut App) {
     let App {
         channels,
         emotes,
+        globals,
         store,
         fb,
         emote_rx,
         focus,
         ..
     } = app;
+    let mut dirty = false;
     while let Ok((platform, name, set)) = emote_rx.try_recv() {
+        // the empty name is the global set (see spawn_global_emotes): keep it
+        // for tabs opened later, and pool it into every open tab now.
+        if name.is_empty() {
+            *globals = set;
+            for es in emotes.iter_mut() {
+                es.merge(globals.clone());
+            }
+            dirty = true;
+            continue;
+        }
         if let Some(i) = channels.iter().position(|c| c.matches(platform, &name)) {
-            // merge, first-wins — a merged tab pools its sources' sets, and a
-            // single-sub tab starts empty so merge equals assignment.
+            // merge — a merged tab pools its sources' sets; channel emotes
+            // replace any global of the same name whichever landed first.
             emotes[i].merge(set);
             // rescan only the channel on screen — a background channel's
             // backlog is warmed by the tick sweep if and when it's focused.
             if i == *focus {
-                let from = channels[i].messages.len().saturating_sub(60);
-                for m in channels[i].messages.iter().skip(from) {
-                    request_stacks(store, fb, &emotes[i], &m.text);
-                }
+                dirty = true;
             }
+        }
+    }
+    // one rescan of the visible backlog no matter how many sets landed.
+    if dirty && !channels.is_empty() {
+        let i = (*focus).min(channels.len() - 1);
+        let from = channels[i].messages.len().saturating_sub(60);
+        for m in channels[i].messages.iter().skip(from) {
+            request_stacks(store, fb, &emotes[i], &m.text);
         }
     }
 }
@@ -653,8 +693,8 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             KeyCode::Char(c) => app.input.push(c),
             _ => {}
         },
-        // rover-style channel manager: j/k move, enter open, a add, d leave,
-        // K/J reorder, esc back.
+        // rover-style channel manager: j/k move, enter open, a add, x leave,
+        // e edit slots, K/J reorder, esc back.
         InputMode::Manage => {
             let last = app.channels.len().saturating_sub(1);
             match k.code {
@@ -673,17 +713,44 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                         app.mode = InputMode::Normal;
                     }
                 }
-                // o joins and x closes here too — same keys as normal mode.
+                // o joins here too — same key as normal mode.
                 KeyCode::Char('a') | KeyCode::Char('o') => {
                     app.mode = InputMode::Join;
                     app.input.clear();
                 }
-                KeyCode::Char('d') | KeyCode::Char('x') => manage_delete(app),
+                KeyCode::Char('x') => manage_delete(app),
+                KeyCode::Char('e') => {
+                    if !app.channels.is_empty() {
+                        app.mode = InputMode::SlotPick;
+                        app.status = None;
+                    }
+                }
                 KeyCode::Char('K') => manage_move(app, -1),
                 KeyCode::Char('J') => manage_move(app, 1),
                 _ => {}
             }
         }
+        // which of the row's t/k/y source slots to edit.
+        InputMode::SlotPick => match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => app.mode = InputMode::Manage,
+            KeyCode::Char('t') => slot_open(app, Platform::Twitch),
+            KeyCode::Char('k') => slot_open(app, Platform::Kick),
+            KeyCode::Char('y') => slot_open(app, Platform::Youtube),
+            _ => {}
+        },
+        // retype one slot's name; enter applies, empty clears, esc backs out.
+        InputMode::SlotEdit(p) => match k.code {
+            KeyCode::Esc => {
+                app.mode = InputMode::SlotPick;
+                app.input.clear();
+            }
+            KeyCode::Enter => slot_apply(app, p),
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            KeyCode::Char(c) => app.input.push(c),
+            _ => {}
+        },
         InputMode::Normal => return normal_key(app, k),
     }
     Flow::Continue
@@ -776,19 +843,6 @@ fn open_channel(app: &mut App, tok: &str) {
     let Some((platform, name)) = subs.first().cloned() else {
         return;
     };
-    // subscribe one source and start its fetches (shared by open and upgrade).
-    let start_sub = |app: &App, p: Platform, n: &str| {
-        if let Some(out) = &app.out {
-            let _ = out.send(net::Outbound::Join {
-                platform: p,
-                channel: n.to_string(),
-            });
-        }
-        if p != Platform::Youtube {
-            spawn_emote_fetch(&app.emote_tx, p, n.to_string());
-            spawn_history(&app.hist_tx, p, n.to_string());
-        }
-    };
     // a tab already carrying the primary sub upgrades in place: any sources it
     // doesn't have yet merge into it — `kick:a` open, then `kick:a+yt:x`
     // typed, and the existing tab becomes the merge instead of a dead focus.
@@ -815,8 +869,124 @@ fn open_channel(app: &mut App, tok: &str) {
         start_sub(app, p, n);
     }
     app.channels.push(ch);
-    app.emotes.push(EmoteSet::new()); // populated async — see spawn_emote_fetch
+    // seeded with globals now; channel sets merge in async (spawn_emote_fetch).
+    app.emotes.push(app.globals.clone());
     app.focus = app.channels.len() - 1;
+    save_state(app);
+}
+
+/// subscribe one source over the live WS and start its emote + history fetches
+/// (shared by open, merge-upgrade, and slot edits).
+fn start_sub(app: &App, p: Platform, n: &str) {
+    if let Some(out) = &app.out {
+        let _ = out.send(net::Outbound::Join {
+            platform: p,
+            channel: n.to_string(),
+        });
+    }
+    if p != Platform::Youtube {
+        spawn_emote_fetch(&app.emote_tx, p, n.to_string());
+        spawn_history(&app.hist_tx, p, n.to_string());
+    }
+}
+
+/// the first source of platform `p` feeding `ch` — what the t/k/y slot shows.
+fn slot_of(ch: &Channel, p: Platform) -> Option<String> {
+    ch.subs().find(|(q, _)| *q == p).map(|(_, n)| n.to_string())
+}
+
+/// begin editing one platform slot of the row under the Manage cursor,
+/// prefilled with its current name so a tweak doesn't mean retyping.
+fn slot_open(app: &mut App, p: Platform) {
+    if app.channels.is_empty() {
+        app.mode = InputMode::Manage;
+        return;
+    }
+    let i = app.manage_cursor.min(app.channels.len() - 1);
+    app.input = slot_of(&app.channels[i], p).unwrap_or_default();
+    app.mode = InputMode::SlotEdit(p);
+}
+
+/// apply a slot edit: empty input clears the slot, a new name swaps the
+/// subscription in place, a name on an empty slot merges it in. the last
+/// remaining source can't be cleared — that's what x (leave) is for.
+fn slot_apply(app: &mut App, p: Platform) {
+    let raw = app.input.trim().to_string();
+    app.input.clear();
+    app.mode = InputMode::Manage;
+    if app.channels.is_empty() {
+        return;
+    }
+    // a pasted youtube url still means its video id, same as the join prompt.
+    let new = match p {
+        Platform::Youtube if !raw.is_empty() => yt_video_id(&raw),
+        _ => raw,
+    };
+    let i = app.manage_cursor.min(app.channels.len() - 1);
+    let old = slot_of(&app.channels[i], p);
+    if old
+        .as_deref()
+        .is_some_and(|o| o.eq_ignore_ascii_case(&new))
+    {
+        return; // unchanged
+    }
+    if new.is_empty() {
+        let Some(old) = old else { return };
+        let ch = &mut app.channels[i];
+        if ch.extra.is_empty() {
+            app.status = Some("last source — x leaves the tab".to_string());
+            return;
+        }
+        if ch.platform == p {
+            // clearing the primary promotes the next source to lead the tab.
+            let (np, nn) = ch.extra.remove(0);
+            ch.platform = np;
+            ch.name = nn;
+        } else if let Some(j) = ch.extra.iter().position(|(q, _)| *q == p) {
+            ch.extra.remove(j);
+        }
+        if let Some(out) = &app.out {
+            let _ = out.send(net::Outbound::Part {
+                platform: p,
+                channel: old,
+            });
+        }
+        save_state(app);
+        return;
+    }
+    // duplicate guards: same source twice in one tab, or open in another tab
+    // (inbound lines route to the first matching tab — a dupe would shadow it).
+    if app.channels[i].matches(p, &new) {
+        app.status = Some(format!("{}:{new} already in this tab", p.tag()));
+        return;
+    }
+    if app
+        .channels
+        .iter()
+        .enumerate()
+        .any(|(j, c)| j != i && c.matches(p, &new))
+    {
+        app.status = Some(format!("{}:{new} is open in another tab", p.tag()));
+        return;
+    }
+    match old {
+        Some(old) => {
+            if let Some(out) = &app.out {
+                let _ = out.send(net::Outbound::Part {
+                    platform: p,
+                    channel: old,
+                });
+            }
+            let ch = &mut app.channels[i];
+            if ch.platform == p {
+                ch.name = new.clone();
+            } else if let Some(j) = ch.extra.iter().position(|(q, _)| *q == p) {
+                ch.extra[j].1 = new.clone();
+            }
+        }
+        None => app.channels[i].extra.push((p, new.clone())),
+    }
+    start_sub(app, p, &new);
     save_state(app);
 }
 
@@ -1209,7 +1379,10 @@ fn ui(f: &mut Frame, app: &App) {
         draw_preview(f, preview, app, mode);
     }
 
-    if app.mode == InputMode::Manage {
+    if matches!(
+        app.mode,
+        InputMode::Manage | InputMode::SlotPick | InputMode::SlotEdit(_)
+    ) {
         draw_manage(f, main, app);
         draw_footer(f, footer, app, app.channels.len());
         return;
@@ -2026,28 +2199,69 @@ fn hint(k: &'static str, d: &'static str) -> [Span<'static>; 2] {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
+    let tag = Style::default()
+        .fg(Color::Black)
+        .bg(ACCENT)
+        .add_modifier(Modifier::BOLD);
     // Manage mode → rover-style key hints.
     if app.mode == InputMode::Manage {
-        let mut spans = vec![
-            Span::styled(
-                " manage ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-        ];
+        let mut spans = vec![Span::styled(" manage ", tag), Span::raw("  ")];
         for pair in [
             hint("jk", "move"),
             hint("enter", "open"),
             hint("a", "add"),
-            hint("d", "leave"),
+            hint("e", "edit"),
+            hint("x", "leave"),
             hint("JK", "reorder"),
             hint("esc", "back"),
         ] {
             spans.extend(pair);
         }
+        if let Some(msg) = &app.status {
+            spans.push(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(Color::Indexed(214)),
+            ));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+    // SlotPick → show the cursor row's three slots, pick one with t/k/y.
+    if app.mode == InputMode::SlotPick {
+        let mut spans = vec![Span::styled(" edit ", tag), Span::raw("  ")];
+        if let Some(ch) = app.channels.get(app.manage_cursor) {
+            for (key, p) in [
+                ("t", Platform::Twitch),
+                ("k", Platform::Kick),
+                ("y", Platform::Youtube),
+            ] {
+                spans.push(Span::styled(key, Style::default().fg(ACCENT)));
+                spans.push(Span::styled(
+                    format!(
+                        " {}:{}  ",
+                        p.tag(),
+                        slot_of(ch, p).unwrap_or_else(|| "—".to_string())
+                    ),
+                    Style::default().fg(Color::Indexed(244)),
+                ));
+            }
+        }
+        spans.extend(hint("esc", "back"));
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+    // SlotEdit → type the slot's new name, join-prompt style.
+    if let InputMode::SlotEdit(p) = app.mode {
+        let spans = vec![
+            Span::styled(format!(" edit {} ", p.tag()), tag),
+            Span::styled(" ❯ ", Style::default().fg(ACCENT)),
+            Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))),
+            Span::styled("\u{2588}", Style::default().fg(ACCENT)),
+            Span::styled(
+                "   enter apply · empty clears · esc back",
+                Style::default().fg(Color::Indexed(244)),
+            ),
+        ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
@@ -2362,6 +2576,7 @@ mod stack_tests {
             id: name.into(),
             animated: false,
             zero_width: zw,
+            global: false,
         }
     }
 
