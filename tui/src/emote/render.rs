@@ -453,6 +453,17 @@ fn tmux_outer_protocol_now() -> Option<Option<ProtocolType>> {
 /// so unwrap what the crate built and re-wrap it correctly. anything that
 /// doesn't match the crate's exact shape is left untouched, so a future encoder
 /// change degrades to today's behaviour instead of emitting a mangled escape.
+///
+/// the sixel is also prefixed with an ERASE of its own cell block, because a
+/// second thing goes wrong under tmux. while an emote loads, the layout parks
+/// the truncated name in the cells it reserved; the frame it turns ready, the
+/// layout writes spaces there instead — but ratatui-image marks every cell of
+/// an image `skip`, so ratatui never EMITS those spaces and the name is never
+/// erased. in a bare terminal the pixels simply cover the stale glyphs. tmux is
+/// not a bare terminal: passthrough pixels are invisible to it, its own screen
+/// still holds the name, and it repaints that name over the emote. erasing the
+/// block from inside the same string fixes the ordering for good — one cursor
+/// save, `ECH` per row, restore, then the pixels land on cleared cells.
 fn fix_tmux_passthrough(proto: &mut Protocol) {
     let Protocol::Sixel(s) = proto else {
         return;
@@ -467,7 +478,30 @@ fn fix_tmux_passthrough(proto: &mut Protocol) {
     else {
         return;
     };
-    s.data = format!("\x1bPtmux;{}\x1b\\", sixel.replace('\x1b', "\x1b\x1b"));
+    s.data = format!(
+        "{}\x1bPtmux;{}\x1b\\",
+        erase_block(s.area.width, s.area.height),
+        sixel.replace('\x1b', "\x1b\x1b")
+    );
+}
+
+/// blank a `w`x`h` cell block at the cursor and leave the cursor exactly where
+/// it started. DECSC/DECRC rather than cursor-up: at the bottom of the screen a
+/// cursor-down is clamped and the matching cursor-up would land a row high,
+/// dropping the image one row off its cells.
+fn erase_block(w: u16, h: u16) -> String {
+    if w == 0 || h == 0 {
+        return String::new();
+    }
+    let mut out = String::from("\x1b7"); // DECSC — save cursor
+    for row in 0..h {
+        out.push_str(&format!("\x1b[{w}X")); // ECH — erase w cells, cursor stays
+        if row + 1 < h {
+            out.push_str("\x1b[B"); // CUD — next row of the block
+        }
+    }
+    out.push_str("\x1b8"); // DECRC — restore cursor
+    out
 }
 
 /// heuristic: is this terminal known to support (and answer a query for) an
@@ -883,9 +917,8 @@ mod tests {
     /// the passthrough). this is tmux's own rule — the test asserts against it
     /// rather than against our formatting.
     fn tmux_forwards(data: &str) -> String {
-        let body = data
-            .strip_prefix("\x1bPtmux;")
-            .expect("passthrough prefix")
+        let at = data.find("\x1bPtmux;").expect("passthrough prefix");
+        let body = data[at + "\x1bPtmux;".len()..]
             .strip_suffix("\x1b\\")
             .expect("passthrough terminator");
         let mut out = String::new();
@@ -927,6 +960,21 @@ mod tests {
         };
         assert_eq!(tmux_forwards(&s.data), plain.data);
         assert!(s.is_tmux, "still passthrough — tmux stays blind by design");
+
+        // and the pixels must land on cells we cleared first, or tmux keeps
+        // repainting the loading placeholder over the emote.
+        let head = &s.data[..s.data.find("\x1bPtmux;").unwrap()];
+        assert_eq!(head, "\x1b7\x1b[2X\x1b[B\x1b[2X\x1b8");
+    }
+
+    /// the erase must cover every row of the block and put the cursor back
+    /// where it was, or the sixel paints at the wrong place.
+    #[test]
+    fn erase_block_clears_each_row_and_restores_the_cursor() {
+        assert_eq!(erase_block(4, 1), "\x1b7\x1b[4X\x1b8");
+        assert_eq!(erase_block(3, 3), "\x1b7\x1b[3X\x1b[B\x1b[3X\x1b[B\x1b[3X\x1b8");
+        assert_eq!(erase_block(0, 2), "");
+        assert_eq!(erase_block(2, 0), "");
     }
 
     /// a sixel that was never wrapped (outside tmux, or a wrapper shape we
