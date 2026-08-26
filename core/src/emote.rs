@@ -20,6 +20,10 @@ pub struct Emote {
     pub animated: bool,
     #[serde(rename = "zeroWidth", default)]
     pub zero_width: bool,
+    /// came from the pooled global set (/api/emotes) rather than a channel's
+    /// own set — channel emotes of the same name override it. never serialized.
+    #[serde(skip)]
+    pub global: bool,
 }
 
 /// the /api/channel/:c/emotes envelope (only the bits we need).
@@ -51,10 +55,28 @@ impl EmoteSet {
     }
 
     /// fold another set in, first-wins — a merged (multi-platform) tab pools
-    /// its sources' emotes into one lookup.
+    /// its sources' emotes into one lookup. the one exception: a channel emote
+    /// always replaces a pooled GLOBAL of the same name, whichever arrived
+    /// first — globals fetch in parallel with channel sets, so arrival order
+    /// can't be the precedence rule.
     pub fn merge(&mut self, other: EmoteSet) {
         for (k, v) in other.map {
-            self.map.entry(k).or_insert(v);
+            match self.map.get(&k) {
+                Some(cur) if cur.global && !v.global => {
+                    self.map.insert(k, v);
+                }
+                Some(_) => {}
+                None => {
+                    self.map.insert(k, v);
+                }
+            }
+        }
+    }
+
+    /// stamp every entry as coming from the pooled global set.
+    pub fn mark_global(&mut self) {
+        for e in self.map.values_mut() {
+            e.global = true;
         }
     }
 
@@ -339,7 +361,30 @@ mod tests {
             id: name.into(),
             animated: false,
             zero_width: false,
+            global: false,
         }
+    }
+
+    #[test]
+    fn channel_emote_overrides_global_regardless_of_arrival_order() {
+        // globals landed first
+        let mut set = EmoteSet::new();
+        let mut globals = EmoteSet::from_list([e("Kappa")]);
+        globals.mark_global();
+        set.merge(globals.clone());
+        set.merge(EmoteSet::from_list([Emote {
+            provider: "bttv".into(),
+            ..e("Kappa")
+        }]));
+        assert_eq!(set.get("Kappa").unwrap().provider, "bttv");
+        // channel set landed first
+        let mut set = EmoteSet::from_list([Emote {
+            provider: "bttv".into(),
+            ..e("Kappa")
+        }]);
+        set.merge(globals);
+        assert_eq!(set.get("Kappa").unwrap().provider, "bttv");
+        assert_eq!(set.len(), 1);
     }
 
     #[test]

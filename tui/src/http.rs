@@ -38,6 +38,20 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+/// the pooled global emote set (/api/emotes): twitch globals + event-unlocked
+/// emotes, and the bttv/ffz/7tv global sets — merged and deduped server-side.
+pub fn global_emotes() -> Option<EmoteSet> {
+    let resp: EmoteSetResponse = agent()
+        .get(&format!("{BASE}/api/emotes"))
+        .call()
+        .ok()?
+        .into_json()
+        .ok()?;
+    let mut set = EmoteSet::from_list(resp.emotes);
+    set.mark_global();
+    Some(set)
+}
+
 /// channel emote set (7tv/bttv/ffz precedence, deduped server-side).
 pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
     let url = format!(

@@ -50,6 +50,7 @@ fn emote_set() -> EmoteSet {
         id: name.to_string(),
         animated,
         zero_width,
+        global: false,
     };
     EmoteSet::from_list([
         mk("KEKW", false, true),

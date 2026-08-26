@@ -39,6 +39,7 @@ fn set() -> EmoteSet {
         id: "KEKW".into(),
         animated: false,
         zero_width: false,
+        global: false,
     }])
 }
 
