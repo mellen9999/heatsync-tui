@@ -262,7 +262,8 @@ mod tests {
 
     #[test]
     fn space_typed_spec_heals_into_merge() {
-        let got = parse_channels("kick:xqc+twitch:xqc,twitch:nl_kripp kick:nl_kripp yt:4tDC0sKhTnA");
+        let got =
+            parse_channels("kick:xqc+twitch:xqc,twitch:nl_kripp kick:nl_kripp yt:4tDC0sKhTnA");
         assert_eq!(
             got,
             vec![

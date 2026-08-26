@@ -619,6 +619,20 @@ pub(crate) fn flatten_onto_black(img: &mut RgbaImage) {
     }
 }
 
+/// pixels NeuQuant should see before it is allowed to start skipping any.
+const TRAIN_PX: usize = 20_000;
+
+/// NeuQuant's sampling factor: it learns the palette from a 1-in-N pixel
+/// sample, so N trades quality for speed. a FIXED factor is the trap — it reads
+/// as cheap on a photo and ruinous here, because an emote block is tiny (a 4x2
+/// cell block is ~1.4k pixels, so a two-frame animation at 1-in-10 trains a
+/// 200-colour palette on ~280 pixels and comes back banded and muddy). scale
+/// the factor to the pixel count instead: small emotes train on everything,
+/// long animations still get the order-of-magnitude skip they were given it for.
+fn train_factor(px: usize) -> i32 {
+    (px / TRAIN_PX).clamp(1, 10) as i32
+}
+
 /// collapse every frame of ONE emote onto a single shared palette.
 ///
 /// this is the anti-flash fix. sixel encoders pick a palette per image and
@@ -640,11 +654,11 @@ pub(crate) fn stabilize_palette(frames: &mut [RgbaImage]) {
     if sample.is_empty() {
         return;
     }
-    // samplefac 10: NeuQuant learns from a 1-in-10 pixel sample — visually
-    // indistinguishable on 32-64px emotes, an order of magnitude faster than
-    // scanning every pixel of every frame. what matters for the anti-flash
-    // property is only that ALL frames map through the SAME palette.
-    let nq = color_quant::NeuQuant::new(10, PALETTE_COLORS as usize, &sample);
+    let nq = color_quant::NeuQuant::new(
+        train_factor(sample.len() / 4),
+        PALETTE_COLORS as usize,
+        &sample,
+    );
     let map = nq.color_map_rgba();
     // memoize color→palette lookups: index_of is a search per call, and an
     // animation repeats the same few hundred distinct colors across every
@@ -772,7 +786,12 @@ pub(crate) fn subsample(frames: Vec<(RgbaImage, u32)>, max: usize) -> Vec<(RgbaI
         .collect()
 }
 
-fn loader(picker: Picker, jobs: Arc<Mutex<Receiver<Job>>>, done: Sender<Done>, fix_passthrough: bool) {
+fn loader(
+    picker: Picker,
+    jobs: Arc<Mutex<Receiver<Job>>>,
+    done: Sender<Done>,
+    fix_passthrough: bool,
+) {
     // sixel drops the alpha channel (to_rgb8) so a transparent pixel falls back to
     // its raw rgb — often a colored fringe or box. flatten onto black first so
     // emotes sit cleanly on a dark terminal. kitty/iterm2 keep true transparency.
@@ -967,12 +986,79 @@ mod tests {
         assert_eq!(head, "\x1b7\x1b[2X\x1b[B\x1b[2X\x1b8");
     }
 
+    /// two frames of a real emote block: a smooth gradient, which is exactly
+    /// what a starved palette turns into bands.
+    fn gradient_frames() -> Vec<RgbaImage> {
+        (0..2)
+            .map(|f| {
+                RgbaImage::from_fn(40, 36, |x, y| {
+                    let s = (f * 7) as u32;
+                    Rgba([
+                        ((x * 6 + s) % 256) as u8,
+                        ((y * 7 + s) % 256) as u8,
+                        ((x * 3 + y * 4 + s) % 256) as u8,
+                        255,
+                    ])
+                })
+            })
+            .collect()
+    }
+
+    /// mean per-channel error of quantising `frames` through one NeuQuant
+    /// palette trained at sampling factor `fac`.
+    fn quantise_err(frames: &[RgbaImage], fac: i32) -> f64 {
+        let mut sample: Vec<u8> = Vec::new();
+        for f in frames {
+            sample.extend_from_slice(f.as_raw());
+        }
+        let nq = color_quant::NeuQuant::new(fac, PALETTE_COLORS as usize, &sample);
+        let map = nq.color_map_rgba();
+        let (mut sum, mut n) = (0.0f64, 0.0f64);
+        for f in frames {
+            for px in f.pixels() {
+                let i = nq.index_of(&px.0) * 4;
+                for c in 0..3 {
+                    sum += (px.0[c] as f64 - map[i + c] as f64).abs();
+                    n += 1.0;
+                }
+            }
+        }
+        sum / n
+    }
+
+    #[test]
+    fn train_factor_never_starves_a_small_emote() {
+        assert_eq!(train_factor(1_440 * 2), 1); // two frames of a 4x2 cell block
+        assert_eq!(train_factor(43_000), 2);
+        assert_eq!(train_factor(5_000_000), 10); // capped — long animations stay fast
+    }
+
+    /// the regression this guards: a FIXED 1-in-10 sample trains the palette on
+    /// a few hundred pixels at emote size and the result is visibly worse. our
+    /// factor must stay close to full quality on frames this small.
+    #[test]
+    fn small_emotes_quantise_near_full_quality() {
+        let frames = gradient_frames();
+        let px = frames.iter().map(|f| f.as_raw().len() / 4).sum::<usize>();
+        let ours = quantise_err(&frames, train_factor(px));
+        let starved = quantise_err(&frames, 10);
+        let best = quantise_err(&frames, 1);
+        assert_eq!(ours, best, "an emote-sized stack must train on every pixel");
+        assert!(
+            ours < starved,
+            "ours {ours:.2} should beat the fixed 1-in-10 sample {starved:.2}"
+        );
+    }
+
     /// the erase must cover every row of the block and put the cursor back
     /// where it was, or the sixel paints at the wrong place.
     #[test]
     fn erase_block_clears_each_row_and_restores_the_cursor() {
         assert_eq!(erase_block(4, 1), "\x1b7\x1b[4X\x1b8");
-        assert_eq!(erase_block(3, 3), "\x1b7\x1b[3X\x1b[B\x1b[3X\x1b[B\x1b[3X\x1b8");
+        assert_eq!(
+            erase_block(3, 3),
+            "\x1b7\x1b[3X\x1b[B\x1b[3X\x1b[B\x1b[3X\x1b8"
+        );
         assert_eq!(erase_block(0, 2), "");
         assert_eq!(erase_block(2, 0), "");
     }

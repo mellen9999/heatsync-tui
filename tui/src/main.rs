@@ -510,7 +510,10 @@ fn parse_tab(tok: &str) -> Vec<Sub> {
         .filter(|s| !s.trim().is_empty())
     {
         let s = parse_sub(part.trim());
-        if !s.1.is_empty() && !subs.iter().any(|(p, n)| *p == s.0 && n.eq_ignore_ascii_case(&s.1))
+        if !s.1.is_empty()
+            && !subs
+                .iter()
+                .any(|(p, n)| *p == s.0 && n.eq_ignore_ascii_case(&s.1))
         {
             subs.push(s);
         }
@@ -521,7 +524,10 @@ fn parse_tab(tok: &str) -> Vec<Sub> {
 fn parse_sub(tok: &str) -> Sub {
     if let Some(rest) = tok.strip_prefix("kick:") {
         (Platform::Kick, rest.to_string())
-    } else if let Some(rest) = tok.strip_prefix("yt:").or_else(|| tok.strip_prefix("youtube:")) {
+    } else if let Some(rest) = tok
+        .strip_prefix("yt:")
+        .or_else(|| tok.strip_prefix("youtube:"))
+    {
         (Platform::Youtube, yt_video_id(rest))
     } else if tok.contains("youtube.com") || tok.contains("youtu.be") {
         (Platform::Youtube, yt_video_id(tok))
@@ -765,9 +771,11 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         KeyCode::Char('j') | KeyCode::Char('l') | KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
             tab_and_continue(app, 1)
         }
-        KeyCode::Char('k') | KeyCode::Char('h') | KeyCode::Up | KeyCode::Left | KeyCode::BackTab => {
-            tab_and_continue(app, -1)
-        }
+        KeyCode::Char('k')
+        | KeyCode::Char('h')
+        | KeyCode::Up
+        | KeyCode::Left
+        | KeyCode::BackTab => tab_and_continue(app, -1),
         KeyCode::Char('i') | KeyCode::Char('a') => {
             app.mode = InputMode::Insert;
             app.line.focus();
@@ -846,11 +854,7 @@ fn open_channel(app: &mut App, tok: &str) {
     // a tab already carrying the primary sub upgrades in place: any sources it
     // doesn't have yet merge into it — `kick:a` open, then `kick:a+yt:x`
     // typed, and the existing tab becomes the merge instead of a dead focus.
-    if let Some(i) = app
-        .channels
-        .iter()
-        .position(|c| c.matches(platform, &name))
-    {
+    if let Some(i) = app.channels.iter().position(|c| c.matches(platform, &name)) {
         let fresh: Vec<Sub> = subs
             .into_iter()
             .filter(|(p, n)| !app.channels[i].matches(*p, n))
@@ -924,10 +928,7 @@ fn slot_apply(app: &mut App, p: Platform) {
     };
     let i = app.manage_cursor.min(app.channels.len() - 1);
     let old = slot_of(&app.channels[i], p);
-    if old
-        .as_deref()
-        .is_some_and(|o| o.eq_ignore_ascii_case(&new))
-    {
+    if old.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(&new)) {
         return; // unchanged
     }
     if new.is_empty() {
@@ -1209,7 +1210,12 @@ fn complete_step(app: &mut App, dir: i32) {
 /// already cached or in flight is a no-op). the prefetch model: each incoming
 /// line is scanned ONCE as it arrives, plus a cheap focused-channel sweep on
 /// the tick — nothing rescans every channel's backlog anymore.
-fn request_stacks(store: &mut Option<EmoteStore>, fb: &Option<FbEmotes>, set: &EmoteSet, text: &str) {
+fn request_stacks(
+    store: &mut Option<EmoteStore>,
+    fb: &Option<FbEmotes>,
+    set: &EmoteSet,
+    text: &str,
+) {
     if set.is_empty() {
         return;
     }
@@ -1395,7 +1401,10 @@ fn ui(f: &mut Frame, app: &App) {
                     "  no channels — press ",
                     Style::default().fg(Color::Indexed(244)),
                 ),
-                Span::styled("o", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "o",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" to join one", Style::default().fg(Color::Indexed(244))),
             ])),
             main,
@@ -1445,7 +1454,12 @@ fn preview_height(app: &App, mode: EmoteMode) -> u16 {
     let set = &app.emotes[app.focus];
     if segments(&text, set)
         .iter()
-        .any(|s| matches!(s, Segment::Stack(_))) { EMOTE_H } else { 0 }
+        .any(|s| matches!(s, Segment::Stack(_)))
+    {
+        EMOTE_H
+    } else {
+        0
+    }
 }
 
 /// the draft as it will render — same layout path as a real chat row (first
@@ -1487,7 +1501,10 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
             if i as u16 >= area.height {
                 break;
             }
-            let label = fit(format!(" {}{} {:.0} ", ch.name, plus(ch), ch.heat), area.width);
+            let label = fit(
+                format!(" {}{} {:.0} ", ch.name, plus(ch), ch.heat),
+                area.width,
+            );
             let row = Rect {
                 x: area.x,
                 y: area.y + i as u16,
@@ -1956,7 +1973,11 @@ impl Rows {
         }
         self.has_stack = true;
         if ready {
-            self.places.push(Place { col: self.col, w, key });
+            self.places.push(Place {
+                col: self.col,
+                w,
+                key,
+            });
             self.spans.push(Span::raw(" ".repeat(w as usize)));
         } else {
             // loading: hold the exact footprint and show what fits of the
@@ -2082,9 +2103,15 @@ fn layout_message(
     if let Some(r) = &m.reply_to {
         let tag = format!(" ↳{r}");
         let tw = UnicodeWidthStr::width(tag.as_str()) as u16;
-        b.prefix(Span::styled(tag, Style::default().fg(Color::Indexed(244))), tw);
+        b.prefix(
+            Span::styled(tag, Style::default().fg(Color::Indexed(244))),
+            tw,
+        );
     }
-    b.prefix(Span::styled(": ", Style::default().fg(Color::Indexed(244))), 2);
+    b.prefix(
+        Span::styled(": ", Style::default().fg(Color::Indexed(244))),
+        2,
+    );
     layout_text(&mut b, &m.text, set, mode);
     // a line that pings you gets a quiet slab under it — semantic, not decor.
     let bg = me
@@ -2463,8 +2490,14 @@ mod spec_tests {
             (Platform::Youtube, "4tDC0sKhTnA".to_string()),
         ];
         assert_eq!(parse_tab("nl_kripp+kick:nl_kripp+yt:4tDC0sKhTnA"), want);
-        assert_eq!(parse_tab("twitch:nl_kripp kick:nl_kripp yt:4tDC0sKhTnA"), want);
-        assert_eq!(parse_tab("  nl_kripp  +  kick:nl_kripp "), want[..2].to_vec());
+        assert_eq!(
+            parse_tab("twitch:nl_kripp kick:nl_kripp yt:4tDC0sKhTnA"),
+            want
+        );
+        assert_eq!(
+            parse_tab("  nl_kripp  +  kick:nl_kripp "),
+            want[..2].to_vec()
+        );
     }
 }
 
@@ -2522,11 +2555,21 @@ mod wrap_tests {
     #[test]
     fn long_messages_wrap_onto_indented_rows() {
         let set = EmoteSet::new();
-        let rows = layout_message(&msg("one two three four five"), &set, EmoteMode::Text, 12, None, false);
+        let rows = layout_message(
+            &msg("one two three four five"),
+            &set,
+            EmoteMode::Text,
+            12,
+            None,
+            false,
+        );
         let got = flat(&rows);
         assert!(got.len() > 1, "wrapped: {got:?}");
         assert_eq!(got[0], "u: one two");
-        assert!(got[1].starts_with("  three"), "indented continuation: {got:?}");
+        assert!(
+            got[1].starts_with("  three"),
+            "indented continuation: {got:?}"
+        );
         // nothing exceeds the width
         for r in &got {
             assert!(UnicodeWidthStr::width(r.as_str()) <= 12, "{r:?}");
@@ -2536,13 +2579,23 @@ mod wrap_tests {
     #[test]
     fn a_word_wider_than_the_row_hard_splits() {
         let set = EmoteSet::new();
-        let rows = layout_message(&msg("https://example.com/really/long/url"), &set, EmoteMode::Text, 14, None, false);
+        let rows = layout_message(
+            &msg("https://example.com/really/long/url"),
+            &set,
+            EmoteMode::Text,
+            14,
+            None,
+            false,
+        );
         let got = flat(&rows);
         assert!(got.len() >= 3, "{got:?}");
         for r in &got {
             assert!(UnicodeWidthStr::width(r.as_str()) <= 14, "{r:?}");
         }
-        assert_eq!(got.join("").replace(' ', ""), "u:https://example.com/really/long/url".replace(' ', ""));
+        assert_eq!(
+            got.join("").replace(' ', ""),
+            "u:https://example.com/really/long/url".replace(' ', "")
+        );
     }
 
     #[test]
