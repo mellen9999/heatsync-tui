@@ -67,6 +67,19 @@ fn chan_str(p: Platform, name: &str) -> String {
     format!("{pfx}:{name}")
 }
 
+/// comma-separated tabs; within a tab, '+' or whitespace both separate subs —
+/// heals configs saved from a space-typed join prompt.
+fn parse_channels(v: &str) -> Vec<Vec<(Platform, String)>> {
+    v.split(',')
+        .map(|tab| {
+            tab.split(|c: char| c == '+' || c.is_whitespace())
+                .filter_map(parse_chan)
+                .collect()
+        })
+        .filter(|t: &Vec<_>| !t.is_empty())
+        .collect()
+}
+
 /// parse one `twitch:name` / `kick:name` / `yt:id` / `name` token (bare = twitch).
 fn parse_chan(s: &str) -> Option<(Platform, String)> {
     let s = s.trim();
@@ -185,13 +198,7 @@ pub fn load() -> Config {
                                 cfg.tab_pos = tp;
                             }
                         }
-                        "channels" => {
-                            cfg.channels = v
-                                .split(',')
-                                .map(|tab| tab.split('+').filter_map(parse_chan).collect())
-                                .filter(|t: &Vec<_>| !t.is_empty())
-                                .collect();
-                        }
+                        "channels" => cfg.channels = parse_channels(v),
                         _ => {}
                     }
                 }
@@ -246,5 +253,29 @@ pub fn save(cfg: &Config) {
             out.push_str(&format!("channels={joined}\n"));
         }
         let _ = fs::write(&p, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_typed_spec_heals_into_merge() {
+        let got = parse_channels("kick:xqc+twitch:xqc,twitch:nl_kripp kick:nl_kripp yt:4tDC0sKhTnA");
+        assert_eq!(
+            got,
+            vec![
+                vec![
+                    (Platform::Kick, "xqc".to_string()),
+                    (Platform::Twitch, "xqc".to_string()),
+                ],
+                vec![
+                    (Platform::Twitch, "nl_kripp".to_string()),
+                    (Platform::Kick, "nl_kripp".to_string()),
+                    (Platform::Youtube, "4tDC0sKhTnA".to_string()),
+                ],
+            ]
+        );
     }
 }

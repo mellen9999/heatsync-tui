@@ -460,10 +460,15 @@ fn save_state(app: &App) {
 }
 
 /// one tab spec: `+`-joined subs merge into a single interleaved tab
-/// (`nl_kripp+kick:nl_kripp+yt:VIDEOID`).
+/// (`nl_kripp+kick:nl_kripp+yt:VIDEOID`). whitespace separates too — channel
+/// names never contain spaces, so `a kick:a` typed in the join prompt means
+/// the same merge.
 fn parse_tab(tok: &str) -> Vec<Sub> {
     let mut subs: Vec<Sub> = Vec::new();
-    for part in tok.split('+').filter(|s| !s.trim().is_empty()) {
+    for part in tok
+        .split(|c: char| c == '+' || c.is_whitespace())
+        .filter(|s| !s.trim().is_empty())
+    {
         let s = parse_sub(part.trim());
         if !s.1.is_empty() && !subs.iter().any(|(p, n)| *p == s.0 && n.eq_ignore_ascii_case(&s.1))
         {
@@ -2229,6 +2234,23 @@ mod placeholder_tests {
     fn placeholder_keeps_what_fits() {
         assert_eq!(fit_exact("pokiDance", 4), "poki");
         assert_eq!(fit_exact("Cat", 5), "Cat  ");
+    }
+}
+
+#[cfg(test)]
+mod spec_tests {
+    use super::*;
+
+    #[test]
+    fn plus_and_whitespace_both_merge() {
+        let want = vec![
+            (Platform::Twitch, "nl_kripp".to_string()),
+            (Platform::Kick, "nl_kripp".to_string()),
+            (Platform::Youtube, "4tDC0sKhTnA".to_string()),
+        ];
+        assert_eq!(parse_tab("nl_kripp+kick:nl_kripp+yt:4tDC0sKhTnA"), want);
+        assert_eq!(parse_tab("twitch:nl_kripp kick:nl_kripp yt:4tDC0sKhTnA"), want);
+        assert_eq!(parse_tab("  nl_kripp  +  kick:nl_kripp "), want[..2].to_vec());
     }
 }
 
