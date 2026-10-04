@@ -13,7 +13,6 @@ pub const MAGENTA: Color32 = Color32::from_rgb(0xff, 0x00, 0xff);
 pub const CYAN: Color32 = Color32::from_rgb(0x00, 0xff, 0xff);
 pub const WHITE: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
 
-
 /// secondary text (message body); primary text is `.strong()` white.
 pub const TEXT: Color32 = WHITE;
 /// an emote that has not loaded yet.
