@@ -13,6 +13,7 @@ mod http;
 mod key;
 mod kick;
 mod net;
+mod palette;
 mod twitch;
 
 // The editing model lives in core now, so a gui can share it. Imported under
@@ -33,7 +34,7 @@ use heatsync_core::heat::Tier;
 use heatsync_core::{mock, Badge, Channel, Message, Platform};
 use net::{ChatEvent, Sub};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
@@ -43,7 +44,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// chrome accent: white — active/selected is black-on-white, hint keys are
 /// bright white. color in the ui comes only from semantics (heat tiers, user
 /// colors, live/warn dots), never decoration.
-const ACCENT: Color = Color::Indexed(231);
 
 /// feed source: offline synthetic, or the live relay thread.
 enum Feed {
@@ -1411,13 +1411,13 @@ fn ui(f: &mut Frame, app: &App) {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     "  no channels — press ",
-                    Style::default().fg(Color::Indexed(244)),
+                    palette::DIM,
                 ),
                 Span::styled(
                     "o",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    palette::TEXT,
                 ),
-                Span::styled(" to join one", Style::default().fg(Color::Indexed(244))),
+                Span::styled(" to join one", palette::DIM),
             ])),
             main,
         );
@@ -1479,7 +1479,7 @@ fn preview_height(app: &App, mode: EmoteMode) -> u16 {
 fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let set = &app.emotes[app.focus];
     let mut b = Rows::new(area.width);
-    b.prefix(Span::styled(" ❯ ", Style::default().fg(ACCENT)), 3);
+    b.prefix(Span::styled(" ❯ ", palette::TEXT), 3);
     let text = app.line.text();
     layout_text(&mut b, &text, set, mode);
     if let Some(row) = b.finish(None).into_iter().next() {
@@ -1491,12 +1491,9 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
     let tab_style = |i: usize, heat: f64| {
         if i == app.focus {
-            Style::default()
-                .fg(Color::Black)
-                .bg(ACCENT)
-                .add_modifier(Modifier::BOLD)
+            palette::TAG
         } else {
-            Style::default().fg(Color::Indexed(Tier::of(heat).xterm()))
+            palette::heat(Tier::of(heat))
         }
     };
 
@@ -1675,14 +1672,11 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 " channels ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                palette::TAG,
             ),
             Span::styled(
                 format!("  {} open", app.channels.len()),
-                Style::default().fg(Color::Indexed(244)),
+                palette::DIM,
             ),
         ])),
         head,
@@ -1692,7 +1686,7 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  empty — press a to add a channel",
-                Style::default().fg(Color::Indexed(244)),
+                palette::DIM,
             ))),
             list,
         );
@@ -1704,14 +1698,10 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
             break;
         }
         let sel = i == app.manage_cursor;
-        let hue = Color::Indexed(Tier::of(ch.heat).xterm());
         let style = if sel {
-            Style::default()
-                .fg(Color::Black)
-                .bg(ACCENT)
-                .add_modifier(Modifier::BOLD)
+            palette::TAG
         } else {
-            Style::default().fg(hue)
+            palette::heat(Tier::of(ch.heat))
         };
         let cursor = if sel { "❯" } else { " " };
         let active = if i == app.focus { "●" } else { " " };
@@ -1798,35 +1788,10 @@ fn mentions(text: &str, me: &str) -> bool {
     })
 }
 
-/// a platform's brand hue in the 256 palette — the merged-tab line marker.
-fn platform_color(p: Platform) -> Color {
-    Color::Indexed(match p {
-        Platform::Twitch => 99,   // twitch purple
-        Platform::Kick => 82,     // kick green
-        Platform::Youtube => 196, // youtube red
-    })
-}
-
 /// one-cell role badge: black glyph on the role's color. same black-on-color
 /// scheme as the active tab — square, dense, no brackets.
 fn badge_span(b: Badge) -> Span<'static> {
-    let bg = match b {
-        Badge::Broadcaster => 196, // red
-        Badge::Moderator => 40,    // green
-        Badge::Vip => 213,         // pink
-        Badge::Subscriber => 99,   // purple
-        Badge::Founder => 208,     // orange
-        Badge::Staff => 129,       // violet
-        Badge::Verified => 45,     // cyan
-        Badge::Og => 51,           // teal
-    };
-    Span::styled(
-        b.glyph().to_string(),
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Indexed(bg))
-            .add_modifier(Modifier::BOLD),
-    )
+    Span::styled(b.glyph().to_string(), palette::badge(b))
 }
 
 /// continuation rows hang under the message body by this many columns.
@@ -1969,9 +1934,7 @@ impl Rows {
             // text tier — the name is just a word on the line.
             return self.word(
                 &s.base,
-                Style::default()
-                    .fg(Color::Indexed(231))
-                    .add_modifier(Modifier::BOLD),
+                palette::TEXT,
             );
         };
         if self.col + w > self.maxw && !self.at_row_start() {
@@ -1981,7 +1944,7 @@ impl Rows {
             }
         }
         if self.col + w > self.maxw {
-            return self.word(&s.base, Style::default().fg(Color::Indexed(231)));
+            return self.word(&s.base, palette::TEXT);
         }
         self.has_stack = true;
         if ready {
@@ -1996,7 +1959,7 @@ impl Rows {
             // name, so the image swaps in place instead of shoving the line.
             self.spans.push(Span::styled(
                 fit_exact(&s.base, w),
-                Style::default().fg(Color::Indexed(231)),
+                palette::TEXT,
             ));
         }
         self.col += w;
@@ -2009,7 +1972,7 @@ impl Rows {
             if let Some(last) = self.rows.last_mut() {
                 last.line
                     .spans
-                    .push(Span::styled("…", Style::default().fg(Color::Indexed(244))));
+                    .push(Span::styled("…", palette::DIM));
             }
         } else if !self.spans.is_empty() || self.rows.is_empty() {
             let h = if self.has_stack { EMOTE_H } else { 1 };
@@ -2032,7 +1995,7 @@ impl Rows {
 fn layout_text(b: &mut Rows, text: &str, set: &EmoteSet, mode: EmoteMode) {
     // message text is plain white — heat lives in the bar and tab numbers,
     // never in the reading surface.
-    let text_hue = Style::default().fg(Color::Indexed(231));
+    let text_hue = palette::TEXT;
     for seg in segments(text, set) {
         if b.full {
             break;
@@ -2063,20 +2026,19 @@ fn layout_message(
         .color
         .as_deref()
         .and_then(parse_hex)
-        .unwrap_or(Color::Indexed(244));
+        .unwrap_or(Color::White);
     let mut b = Rows::new(maxw);
     // merged tab: a one-cell bar in the platform's hue marks each line's origin.
     if tag_platform {
         b.prefix(
-            Span::styled("▎", Style::default().fg(platform_color(m.platform))),
+            Span::styled("▎", palette::platform(m.platform)),
             1,
         );
     }
     // an event line: glyph + actor + headline in the event's hue, then any
     // attached chat text (resub message, kicks message) laid out like chat.
     if let Some(n) = &m.note {
-        let (glyph, idx) = note_style(n.kind);
-        let hue = Style::default().fg(Color::Indexed(idx));
+        let (glyph, hue) = palette::note(n.kind);
         b.prefix(Span::styled(glyph, hue), 1);
         b.prefix(Span::raw(" "), 1);
         if !m.user.is_empty() {
@@ -2091,12 +2053,12 @@ fn layout_message(
             b.word(w, hue);
         }
         if !m.text.is_empty() {
-            b.word("·", Style::default().fg(Color::Indexed(244)));
+            b.word("·", palette::DIM);
             layout_text(&mut b, &m.text, set, mode);
         }
         let bg = me
             .is_some_and(|me| mentions(&m.text, me))
-            .then(|| Style::default().bg(Color::Indexed(236)));
+            .then(|| palette::SLAB);
         return b.finish(bg);
     }
     // role badges, capped — a badge wall must not eat the line.
@@ -2116,39 +2078,20 @@ fn layout_message(
         let tag = format!(" ↳{r}");
         let tw = UnicodeWidthStr::width(tag.as_str()) as u16;
         b.prefix(
-            Span::styled(tag, Style::default().fg(Color::Indexed(244))),
+            Span::styled(tag, palette::DIM),
             tw,
         );
     }
     b.prefix(
-        Span::styled(": ", Style::default().fg(Color::Indexed(244))),
+        Span::styled(": ", palette::DIM),
         2,
     );
     layout_text(&mut b, &m.text, set, mode);
     // a line that pings you gets a quiet slab under it — semantic, not decor.
     let bg = me
         .is_some_and(|me| mentions(&m.text, me))
-        .then(|| Style::default().bg(Color::Indexed(236)));
+        .then(|| palette::SLAB);
     b.finish(bg)
-}
-
-/// one-cell glyph + xterm-256 hue for each event kind. semantic: green=live,
-/// red=mod/danger, orange=money+hype (brand), dim=gone.
-fn note_style(k: heatsync_core::NoteKind) -> (&'static str, u8) {
-    use heatsync_core::NoteKind as K;
-    match k {
-        K::Sub => ("★", 220),
-        K::Gift => ("✦", 213),
-        K::Cheer => ("◆", 208),
-        K::Raid => ("⚑", 201),
-        K::Redeem => ("◇", 39),
-        K::Live => ("●", 40),
-        K::Offline => ("○", 244),
-        K::Category => ("→", 75),
-        K::Notice => ("»", 75),
-        K::Spike => ("▲", 208),
-        K::Mod => ("×", 196),
-    }
 }
 
 /// `#rrggbb` → terminal color. truecolor terminals get the exact rgb; anything
@@ -2218,12 +2161,12 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
     let width = width.max(1);
     let frac = (heat / heatsync_core::heat::MYTHIC).clamp(0.0, 1.0);
     let filled = (frac * width as f64).round() as usize;
-    let hue = Color::Indexed(heatsync_core::heat::color(heat));
+    let hue = palette::heat_fill(Tier::of(heat));
     Line::from(vec![
-        Span::styled("\u{2588}".repeat(filled), Style::default().fg(hue)),
+        Span::styled("\u{2588}".repeat(filled), hue),
         Span::styled(
             "\u{2591}".repeat(width - filled),
-            Style::default().fg(Color::Indexed(236)),
+            palette::TRACK,
         ),
     ])
 }
@@ -2232,16 +2175,13 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
 /// shows exactly ONE key per action — aliases stay out of the footer.
 fn hint(k: &'static str, d: &'static str) -> [Span<'static>; 2] {
     [
-        Span::styled(k, Style::default().fg(ACCENT)),
-        Span::styled(format!(" {d}  "), Style::default().fg(Color::Indexed(244))),
+        Span::styled(k, palette::TEXT),
+        Span::styled(format!(" {d}  "), palette::DIM),
     ]
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
-    let tag = Style::default()
-        .fg(Color::Black)
-        .bg(ACCENT)
-        .add_modifier(Modifier::BOLD);
+    let tag = palette::TAG;
     // Manage mode → rover-style key hints.
     if app.mode == InputMode::Manage {
         let mut spans = vec![Span::styled(" manage ", tag), Span::raw("  ")];
@@ -2259,7 +2199,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         if let Some(msg) = &app.status {
             spans.push(Span::styled(
                 format!(" {msg}"),
-                Style::default().fg(Color::Indexed(214)),
+                palette::WARN,
             ));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -2274,14 +2214,14 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 ("k", Platform::Kick),
                 ("y", Platform::Youtube),
             ] {
-                spans.push(Span::styled(key, Style::default().fg(ACCENT)));
+                spans.push(Span::styled(key, palette::TEXT));
                 spans.push(Span::styled(
                     format!(
                         " {}:{}  ",
                         p.tag(),
                         slot_of(ch, p).unwrap_or_else(|| "—".to_string())
                     ),
-                    Style::default().fg(Color::Indexed(244)),
+                    palette::DIM,
                 ));
             }
         }
@@ -2293,12 +2233,12 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     if let InputMode::SlotEdit(p) = app.mode {
         let spans = vec![
             Span::styled(format!(" edit {} ", p.tag()), tag),
-            Span::styled(" ❯ ", Style::default().fg(ACCENT)),
-            Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))),
-            Span::styled("\u{2588}", Style::default().fg(ACCENT)),
+            Span::styled(" ❯ ", palette::TEXT),
+            Span::styled(app.input.clone(), palette::TEXT),
+            Span::styled("\u{2588}", palette::TEXT),
             Span::styled(
                 "   enter apply · empty clears · esc back",
-                Style::default().fg(Color::Indexed(244)),
+                palette::DIM,
             ),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -2309,17 +2249,14 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         let spans = vec![
             Span::styled(
                 " join ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                palette::TAG,
             ),
-            Span::styled(" ❯ ", Style::default().fg(ACCENT)),
-            Span::styled(app.input.clone(), Style::default().fg(Color::Indexed(231))),
-            Span::styled("\u{2588}", Style::default().fg(ACCENT)),
+            Span::styled(" ❯ ", palette::TEXT),
+            Span::styled(app.input.clone(), palette::TEXT),
+            Span::styled("\u{2588}", palette::TEXT),
             Span::styled(
                 "   name · kick:name · yt:video",
-                Style::default().fg(Color::Indexed(244)),
+                palette::DIM,
             ),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -2345,18 +2282,15 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         } else {
             format!(" {}·{} ", ch.name, ch.platform.tag())
         };
-        let tag = Style::default()
-            .fg(Color::Black)
-            .bg(ACCENT)
-            .add_modifier(Modifier::BOLD);
+        let tag = palette::TAG;
         let mut spans = vec![
             Span::styled(prompt, tag),
-            Span::styled(" ❯ ", Style::default().fg(ACCENT)),
+            Span::styled(" ❯ ", palette::TEXT),
         ];
         if readonly {
             spans.push(Span::styled(
                 "read-only — no send token · esc",
-                Style::default().fg(Color::Indexed(214)),
+                palette::WARN,
             ));
         } else {
             // draw the line with a block cursor sitting ON a character in normal
@@ -2364,8 +2298,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             // the mode is readable without looking at the tag.
             let chars: Vec<char> = app.line.text().chars().collect();
             let at = app.line.cursor();
-            let body = Style::default().fg(Color::Indexed(231));
-            let block = Style::default().fg(Color::Black).bg(Color::White);
+            let body = palette::TEXT;
+            let block = palette::SEL;
             let take = |r: std::ops::Range<usize>| -> String { chars[r].iter().collect() };
             spans.push(Span::styled(take(0..at.min(chars.len())), body));
             if at < chars.len() {
@@ -2377,7 +2311,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             if !app.line.pending().is_empty() {
                 spans.push(Span::styled(
                     format!("  {}", app.line.pending()),
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    palette::TEXT,
                 ));
             }
             // a command's reply (usage, "not open: x") has to be visible from
@@ -2385,17 +2319,17 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             if let Some(msg) = &app.status {
                 spans.push(Span::styled(
                     format!("   {msg}"),
-                    Style::default().fg(Color::Indexed(214)),
+                    palette::WARN,
                 ));
             } else if app.line.is_empty() && !normal {
                 spans.push(Span::styled(
                     "   tab completes emotes/@users  ·  /join /part /quit  ·  text goes to chat",
-                    Style::default().fg(Color::Indexed(244)),
+                    palette::DIM,
                 ));
             } else if normal {
                 spans.push(Span::styled(
                     "   kj history  esc leave",
-                    Style::default().fg(Color::Indexed(244)),
+                    palette::DIM,
                 ));
             }
         }
@@ -2404,20 +2338,17 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     }
 
     let (dot, dot_color, state) = match &app.feed {
-        Feed::Mock(_) => ("\u{25cb} ", Color::Indexed(244), "mock".to_string()),
+        Feed::Mock(_) => ("\u{25cb} ", palette::DIM, "mock".to_string()),
         Feed::Live {
             connected: true, ..
-        } => ("\u{25cf} ", Color::Indexed(46), "live".to_string()),
+        } => ("\u{25cf} ", palette::LIVE, "live".to_string()),
         Feed::Live {
             connected: false, ..
-        } => ("\u{25cf} ", Color::Indexed(214), "connecting".to_string()),
+        } => ("\u{25cf} ", palette::WARN, "connecting".to_string()),
     };
     let mut spans = vec![Span::styled(
         " heatsync ",
-        Style::default()
-            .fg(Color::Black)
-            .bg(ACCENT)
-            .add_modifier(Modifier::BOLD),
+        palette::TAG,
     )];
     // a message (search miss, send error) takes the front of the line the way
     // vi's command line does — appended after the key hints it was simply
@@ -2425,7 +2356,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     if let Some(msg) = &app.status {
         spans.push(Span::styled(
             format!("  {msg}"),
-            Style::default().fg(Color::Indexed(214)),
+            palette::WARN,
         ));
     }
     // essentials only, one key per action — the full set fits a phone-width
@@ -2443,15 +2374,13 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     if app.paused {
         spans.push(Span::styled(
             "PAUSED  ",
-            Style::default()
-                .fg(Color::Indexed(214))
-                .add_modifier(Modifier::BOLD),
+            palette::WARN_BOLD,
         ));
     }
-    spans.push(Span::styled(dot, Style::default().fg(dot_color)));
+    spans.push(Span::styled(dot, dot_color));
     spans.push(Span::styled(
         format!("{state} · {n} ch"),
-        Style::default().fg(Color::Indexed(244)),
+        palette::DIM,
     ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

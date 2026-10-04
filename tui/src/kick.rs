@@ -146,7 +146,7 @@ fn wait_for_code(listener: &TcpListener, state: &str) -> Option<String> {
             _ => {}
         }
     }
-    let body = "<html><body style='font-family:monospace;background:#111;color:#ff8700'>heatsync: kick linked. you can close this tab.</body></html>";
+    let body = "<html><body style='font-family:monospace;background:#000;color:#fff'>heatsync: kick linked. you can close this tab.</body></html>";
     let _ = write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

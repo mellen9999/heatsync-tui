@@ -1,6 +1,46 @@
 //! the heat ramp — one decaying scalar → a stepped temperature color.
-//! mirrors client/config/colors.js (the ONE source of truth). terminal-native:
-//! we return the xterm-256 index, not css. the tui maps that to a cell color.
+//! terminal-native: a tier is an ANSI color name plus vt320 attributes, so it
+//! follows the user's terminal palette. each frontend maps `Look` to its toolkit.
+
+/// the 8 ansi colors, by name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hue {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+}
+
+/// a hue plus emphasis attributes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Look {
+    pub hue: Hue,
+    pub bold: bool,
+    pub reversed: bool,
+    pub blink: bool,
+}
+
+impl Look {
+    pub const fn new(hue: Hue) -> Look {
+        Look { hue, bold: false, reversed: false, blink: false }
+    }
+    pub const fn bold(mut self) -> Look {
+        self.bold = true;
+        self
+    }
+    pub const fn reversed(mut self) -> Look {
+        self.reversed = true;
+        self
+    }
+    pub const fn blink(mut self) -> Look {
+        self.blink = true;
+        self
+    }
+}
 
 /// tier thresholds, ascending. matches HEAT_THRESHOLDS in colors.js.
 pub const SPARK: f64 = 10.0;
@@ -48,22 +88,16 @@ impl Tier {
         }
     }
 
-    /// xterm-256 index nearest the css hex in colors.js.
-    /// zero #444=238 cold #585858=240 spark #ff5f00=202 warm #ff8700=208
-    /// hot #ffaf00=214 erupting #ffff00=226 mythic #ffffff=231
-    pub fn xterm(self) -> u8 {
+    /// how this tier reads on the 8-color palette: cold = plain white, then
+    /// white bold → yellow → yellow bold → red bold → red reversed + blink.
+    pub fn look(self) -> Look {
         match self {
-            // never below 244: the cold tiers are body text, and xterm 236-240 is
-            // dark grey — legible in a truecolor emulator, but the kernel console
-            // has 16 colors and folds them onto black, so every cold message went
-            // invisible on a tty. dim must still be readable.
-            Tier::Zero => 245,
-            Tier::Cold => 250,
-            Tier::Spark => 202,
-            Tier::Warm => 208,
-            Tier::Hot => 214,
-            Tier::Erupting => 226,
-            Tier::Mythic => 231,
+            Tier::Zero | Tier::Cold => Look::new(Hue::White),
+            Tier::Spark => Look::new(Hue::White).bold(),
+            Tier::Warm => Look::new(Hue::Yellow),
+            Tier::Hot => Look::new(Hue::Yellow).bold(),
+            Tier::Erupting => Look::new(Hue::Red).bold(),
+            Tier::Mythic => Look::new(Hue::Red).reversed().blink(),
         }
     }
 
@@ -76,9 +110,9 @@ impl Tier {
     }
 }
 
-/// convenience: heat → xterm color index.
-pub fn color(heat: f64) -> u8 {
-    Tier::of(heat).xterm()
+/// convenience: heat → look.
+pub fn look(heat: f64) -> Look {
+    Tier::of(heat).look()
 }
 
 #[cfg(test)]
@@ -97,6 +131,16 @@ mod tests {
         assert_eq!(Tier::of(1000.0), Tier::Erupting);
         assert_eq!(Tier::of(5000.0), Tier::Mythic);
         assert_eq!(Tier::of(999999.0), Tier::Mythic);
+    }
+
+    #[test]
+    fn ladder_escalates_and_blinks_only_at_the_top() {
+        assert_eq!(Tier::Cold.look(), Look::new(Hue::White));
+        assert_eq!(Tier::Erupting.look(), Look::new(Hue::Red).bold());
+        for t in [Tier::Zero, Tier::Cold, Tier::Spark, Tier::Warm, Tier::Hot, Tier::Erupting] {
+            assert!(!t.look().blink && !t.look().reversed);
+        }
+        assert!(Tier::Mythic.look().blink && Tier::Mythic.look().reversed);
     }
 
     #[test]
