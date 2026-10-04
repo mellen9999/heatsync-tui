@@ -41,10 +41,6 @@ use ratatui::{Frame, Terminal};
 use ratatui_image::Image;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// chrome accent: white — active/selected is black-on-white, hint keys are
-/// bright white. color in the ui comes only from semantics (heat tiers, user
-/// colors, live/warn dots), never decoration.
-
 /// feed source: offline synthetic, or the live relay thread.
 enum Feed {
     Mock(mock::Driver),
@@ -2058,7 +2054,7 @@ fn layout_message(
         }
         let bg = me
             .is_some_and(|me| mentions(&m.text, me))
-            .then(|| palette::SLAB);
+            .then_some(palette::SLAB);
         return b.finish(bg);
     }
     // role badges, capped — a badge wall must not eat the line.
@@ -2090,7 +2086,7 @@ fn layout_message(
     // a line that pings you gets a quiet slab under it — semantic, not decor.
     let bg = me
         .is_some_and(|me| mentions(&m.text, me))
-        .then(|| palette::SLAB);
+        .then_some(palette::SLAB);
     b.finish(bg)
 }
 

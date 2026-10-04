@@ -17,11 +17,11 @@ mod cadence;
 mod chat;
 mod e2e;
 mod emote;
+mod palette;
 mod paint;
 
 use std::time::{Duration, Instant};
 
-use egui::Color32;
 use heatsync_core::emote::{Emote, EmoteSet};
 
 use chat::{Message, View};
@@ -82,14 +82,14 @@ fn paints() -> Vec<Option<Paint>> {
         None,
         None,
         Some(Paint::still(vec![
-            Color32::from_rgb(0xff, 0x87, 0x00),
-            Color32::from_rgb(0xff, 0xd7, 0x00),
+            palette::YELLOW,
+            palette::WHITE,
         ])),
         Some(Paint::animated(
             vec![
-                Color32::from_rgb(0xff, 0x00, 0x5e),
-                Color32::from_rgb(0x7d, 0x00, 0xff),
-                Color32::from_rgb(0x00, 0xd9, 0xff),
+                palette::MAGENTA,
+                palette::CYAN,
+                palette::WHITE,
             ],
             0.35,
         )),
@@ -231,7 +231,7 @@ impl eframe::App for App {
                 ui.label(
                     egui::RichText::new("heatsync")
                         .strong()
-                        .color(Color32::from_rgb(0xff, 0x87, 0x00)),
+                        .color(palette::WHITE),
                 );
                 ui.separator();
                 ui.label(format!("{} msgs", self.msgs.len()));

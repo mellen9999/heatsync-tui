@@ -17,13 +17,14 @@
 //!    cache is dropped whenever the wrap width changes, because every height in
 //!    it was measured against the old width.
 
-use egui::{Align, Color32, FontId, Layout, Rect, RichText, ScrollArea, Ui, Vec2};
+use egui::{Align, FontId, Layout, Rect, RichText, ScrollArea, Ui, Vec2};
 use heatsync_core::emote::{EmoteSet, Segment};
 
 use crate::emote::Cache;
 use std::cell::Cell;
 
 use crate::paint::{self, Paint};
+use crate::palette;
 
 pub struct Message {
     pub user: String,
@@ -275,11 +276,11 @@ impl View {
             ui.spacing_mut().item_spacing.x = 4.0;
 
             // heat marker — a graded number, never an emoji (project rule)
-            ui.label(
+            ui.label(palette::dress(
                 RichText::new(format!("{:>3}", m.heat.round() as i64))
-                    .font(FontId::monospace(self.font))
-                    .color(heat_color(m.heat)),
-            );
+                    .font(FontId::monospace(self.font)),
+                palette::heat_look(m.heat),
+            ));
 
             match &m.paint {
                 Some(p) => {
@@ -293,7 +294,7 @@ impl View {
                         RichText::new(&m.user)
                             .font(FontId::proportional(self.font))
                             .strong()
-                            .color(Color32::from_rgb(0xff, 0x87, 0x00)),
+                            .color(palette::WHITE),
                     );
                 }
             }
@@ -307,7 +308,7 @@ impl View {
                             ui.label(
                                 RichText::new(w)
                                     .font(FontId::proportional(self.font))
-                                    .color(Color32::from_gray(0xdd)),
+                                    .color(palette::TEXT),
                             );
                         }
                     }
@@ -328,7 +329,7 @@ impl View {
             ui.label(
                 RichText::new(&s.base)
                     .font(FontId::proportional(self.font))
-                    .color(Color32::from_gray(0x88)),
+                    .color(palette::PENDING),
             );
             return;
         };
@@ -347,27 +348,6 @@ impl View {
                 egui::Image::new((tex.id(), rect.size())).paint_at(ui, rect);
             }
         }
-    }
-}
-
-/// Heat as a graded colour ramp — cold grey through the brand orange to white
-/// hot. Deliberately a colour on a number, not an emoji.
-pub fn heat_color(heat: f64) -> Color32 {
-    let t = (heat / 20.0).clamp(0.0, 1.0) as f32;
-    if t < 0.5 {
-        let k = t * 2.0;
-        Color32::from_rgb(
-            (0x60 as f32 + k * (0xff - 0x60) as f32) as u8,
-            (0x60 as f32 + k * (0x87 - 0x60) as f32) as u8,
-            (0x60 as f32 * (1.0 - k)) as u8,
-        )
-    } else {
-        let k = (t - 0.5) * 2.0;
-        Color32::from_rgb(
-            0xff,
-            (0x87 as f32 + k * (0xff - 0x87) as f32) as u8,
-            (k * 0xff as f32) as u8,
-        )
     }
 }
 
@@ -509,17 +489,5 @@ mod tests {
         assert_eq!(h.top_of(0), 0.0);
         assert_eq!(h.top_of(1), 12.0);
         assert_eq!(h.top_of(2), 42.0);
-    }
-
-    #[test]
-    fn heat_colour_is_a_ramp_not_a_step() {
-        let cold = heat_color(0.0);
-        let mid = heat_color(10.0);
-        let hot = heat_color(20.0);
-        assert_ne!(cold, mid);
-        assert_ne!(mid, hot);
-        assert_eq!(hot, Color32::from_rgb(0xff, 0xff, 0xff));
-        // clamps rather than wrapping past white
-        assert_eq!(heat_color(1000.0), hot);
     }
 }
