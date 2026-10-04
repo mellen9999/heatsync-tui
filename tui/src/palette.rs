@@ -7,8 +7,10 @@ use ratatui::style::{Color, Modifier, Style};
 
 /// secondary text.
 pub const DIM: Style = Style::new().fg(Color::White);
-/// primary text, keys, emphasis.
-pub const TEXT: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
+/// body text: chat messages, the input line.
+pub const TEXT: Style = Style::new().fg(Color::White);
+/// headers and key hints: bold.
+pub const HEAD: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
 /// selection / mode tags / cursor block: inverse video.
 pub const SEL: Style = Style::new().add_modifier(Modifier::REVERSED);
 pub const TAG: Style = Style::new().add_modifier(Modifier::REVERSED.union(Modifier::BOLD));

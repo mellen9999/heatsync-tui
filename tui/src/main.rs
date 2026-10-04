@@ -34,7 +34,7 @@ use heatsync_core::heat::Tier;
 use heatsync_core::{mock, Badge, Channel, Message, Platform};
 use net::{ChatEvent, Sub};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
@@ -1411,7 +1411,7 @@ fn ui(f: &mut Frame, app: &App) {
                 ),
                 Span::styled(
                     "o",
-                    palette::TEXT,
+                    palette::HEAD,
                 ),
                 Span::styled(" to join one", palette::DIM),
             ])),
@@ -2040,7 +2040,7 @@ fn layout_message(
         if !m.user.is_empty() {
             let uw = UnicodeWidthStr::width(m.user.as_str()) as u16;
             b.prefix(
-                Span::styled(m.user.clone(), Style::default().fg(user_color)),
+                Span::styled(m.user.clone(), Style::default().fg(user_color).add_modifier(Modifier::BOLD)),
                 uw,
             );
             b.prefix(Span::raw(" "), 1);
@@ -2066,7 +2066,7 @@ fn layout_message(
     }
     let uw = UnicodeWidthStr::width(m.user.as_str()) as u16;
     b.prefix(
-        Span::styled(m.user.clone(), Style::default().fg(user_color)),
+        Span::styled(m.user.clone(), Style::default().fg(user_color).add_modifier(Modifier::BOLD)),
         uw,
     );
     // reply thread marker: who this message answers, dim, before the content.
@@ -2171,7 +2171,7 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
 /// shows exactly ONE key per action — aliases stay out of the footer.
 fn hint(k: &'static str, d: &'static str) -> [Span<'static>; 2] {
     [
-        Span::styled(k, palette::TEXT),
+        Span::styled(k, palette::HEAD),
         Span::styled(format!(" {d}  "), palette::DIM),
     ]
 }
@@ -2210,7 +2210,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 ("k", Platform::Kick),
                 ("y", Platform::Youtube),
             ] {
-                spans.push(Span::styled(key, palette::TEXT));
+                spans.push(Span::styled(key, palette::HEAD));
                 spans.push(Span::styled(
                     format!(
                         " {}:{}  ",
@@ -2307,7 +2307,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             if !app.line.pending().is_empty() {
                 spans.push(Span::styled(
                     format!("  {}", app.line.pending()),
-                    palette::TEXT,
+                    palette::HEAD,
                 ));
             }
             // a command's reply (usage, "not open: x") has to be visible from
