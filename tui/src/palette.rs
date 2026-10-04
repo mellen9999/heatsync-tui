@@ -1,5 +1,6 @@
 //! the one place colors live: the 8 ansi names (so the user's terminal palette
-//! rules) plus vt320 attributes. nothing else in the tui names a color.
+//! rules) plus vt320 attributes. nothing else in the tui names a color. the one
+//! non-ansi exception allowed is the twitch marker (and a future [H] marker).
 
 use heatsync_core::heat::{Hue, Look, Tier};
 use heatsync_core::{Badge, NoteKind, Platform};
@@ -22,6 +23,9 @@ pub const WARN_BOLD: Style = Style::new().fg(Color::Yellow).add_modifier(Modifie
 pub const PING: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
 pub const TRACK: Style = Style::new().fg(Color::Blue);
 pub const LIVE: Style = Style::new().fg(Color::Green);
+
+/// twitch's brand purple — the only rgb color in the tui.
+pub const TWITCH: Color = Color::Rgb(169, 112, 255);
 
 fn color(h: Hue) -> Color {
     match h {
@@ -66,7 +70,7 @@ pub fn heat_fill(t: Tier) -> Style {
 /// the merged-tab line marker.
 pub fn platform(p: Platform) -> Style {
     Style::new().fg(match p {
-        Platform::Twitch => Color::Magenta,
+        Platform::Twitch => TWITCH,
         Platform::Kick => Color::Green,
         Platform::Youtube => Color::Red,
     })
