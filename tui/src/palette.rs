@@ -17,8 +17,9 @@ pub const TAG: Style = Style::new().add_modifier(Modifier::REVERSED.union(Modifi
 /// status messages, errors, pending.
 pub const WARN: Style = Style::new().fg(Color::Yellow);
 pub const WARN_BOLD: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-/// fill behind a line that pings you, and the empty heat-bar track.
-pub const SLAB: Style = Style::new().bg(Color::Blue);
+/// blue is text-on-black only, never a background: the ping bar and the
+/// empty heat-bar track.
+pub const PING: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
 pub const TRACK: Style = Style::new().fg(Color::Blue);
 pub const LIVE: Style = Style::new().fg(Color::Green);
 
@@ -78,7 +79,7 @@ pub fn badge(b: Badge) -> Style {
         Badge::Broadcaster => s.fg(Color::Black).bg(Color::Red),
         Badge::Moderator => s.fg(Color::Black).bg(Color::Green),
         Badge::Vip => s.fg(Color::Black).bg(Color::Magenta),
-        Badge::Subscriber => s.fg(Color::White).bg(Color::Blue),
+        Badge::Subscriber => Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
         Badge::Founder => s.fg(Color::Black).bg(Color::Yellow),
         Badge::Staff => s.fg(Color::Black).bg(Color::White),
         Badge::Verified => s.fg(Color::Black).bg(Color::Cyan),

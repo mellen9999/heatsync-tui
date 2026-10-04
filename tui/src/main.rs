@@ -1478,7 +1478,7 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     b.prefix(Span::styled(" ❯ ", palette::TEXT), 3);
     let text = app.line.text();
     layout_text(&mut b, &text, set, mode);
-    if let Some(row) = b.finish(None).into_iter().next() {
+    if let Some(row) = b.finish().into_iter().next() {
         draw_planned(f, mode, area, area.y, row.line, &row.places, EMOTE_H);
     }
 }
@@ -1961,8 +1961,8 @@ impl Rows {
         self.col += w;
     }
 
-    /// close out; `bg` (mention slab) applies to every row.
-    fn finish(mut self, bg: Option<Style>) -> Vec<RowPlan> {
+    /// close out the layout.
+    fn finish(mut self) -> Vec<RowPlan> {
         if self.full {
             // truncated: drop the empty continuation, mark the last real row.
             if let Some(last) = self.rows.last_mut() {
@@ -1977,11 +1977,6 @@ impl Rows {
                 places: std::mem::take(&mut self.places),
                 h,
             });
-        }
-        if let Some(bg) = bg {
-            for r in &mut self.rows {
-                r.line = std::mem::take(&mut r.line).style(bg);
-            }
         }
         self.rows
     }
@@ -2052,10 +2047,7 @@ fn layout_message(
             b.word("·", palette::DIM);
             layout_text(&mut b, &m.text, set, mode);
         }
-        let bg = me
-            .is_some_and(|me| mentions(&m.text, me))
-            .then_some(palette::SLAB);
-        return b.finish(bg);
+        return b.finish();
     }
     // role badges, capped — a badge wall must not eat the line.
     for &bd in m.badges.iter().take(3) {
@@ -2078,16 +2070,18 @@ fn layout_message(
             tw,
         );
     }
+    // a line that pings you swaps its ": " for a blue bar — semantic, not decor.
+    let pinged = me.is_some_and(|me| mentions(&m.text, me));
     b.prefix(
-        Span::styled(": ", palette::DIM),
+        if pinged {
+            Span::styled("▌ ", palette::PING)
+        } else {
+            Span::styled(": ", palette::DIM)
+        },
         2,
     );
     layout_text(&mut b, &m.text, set, mode);
-    // a line that pings you gets a quiet slab under it — semantic, not decor.
-    let bg = me
-        .is_some_and(|me| mentions(&m.text, me))
-        .then_some(palette::SLAB);
-    b.finish(bg)
+    b.finish()
 }
 
 /// `#rrggbb` → terminal color. truecolor terminals get the exact rgb; anything
