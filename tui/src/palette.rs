@@ -25,7 +25,7 @@ pub const TRACK: Style = Style::new().fg(Color::Blue);
 pub const LIVE: Style = Style::new().fg(Color::Green);
 
 /// twitch's brand purple — the only rgb color in the tui.
-pub const TWITCH: Color = Color::Rgb(169, 112, 255);
+pub const TWITCH: Color = Color::Rgb(200, 168, 255);
 
 fn color(h: Hue) -> Color {
     match h {
