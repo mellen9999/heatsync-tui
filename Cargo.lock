@@ -1229,6 +1229,7 @@ dependencies = [
  "framebuffer",
  "heatsync-core",
  "image",
+ "libc",
  "ratatui",
  "ratatui-image",
  "serde",

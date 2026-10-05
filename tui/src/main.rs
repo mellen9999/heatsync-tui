@@ -12,6 +12,7 @@ mod drawlog;
 mod emote;
 mod hsauth;
 mod http;
+mod intr;
 mod key;
 mod kick;
 mod modcmd;
@@ -190,6 +191,7 @@ OPTIONS:
 ";
 
 fn main() -> io::Result<()> {
+    intr::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("log") => return cli::log(&args[1..]),
@@ -200,8 +202,11 @@ fn main() -> io::Result<()> {
         Some("render-test") => return cli::render_test(&args[1..]),
         Some("status") => return cli::status(),
         Some("login") => {
+            intr::login_phase();
             // an interactive login drops you into the chat, same as plain `hs`
-            if !cli::login(args.get(1).map(String::as_str) == Some("kick"))? {
+            let opened = cli::login(args.get(1).map(String::as_str) == Some("kick"))?;
+            intr::plain_phase();
+            if !opened {
                 return Ok(());
             }
             return chat(&[]);
@@ -291,8 +296,10 @@ fn chat(args: &[String]) -> io::Result<()> {
     // must probe the terminal for graphics BEFORE raw mode / alt screen.
     let had_fb = app.fb.is_some();
     let mut terminal = ratatui::init();
+    intr::tui_phase();
     let res = run(&mut terminal, app);
     ratatui::restore();
+    intr::plain_phase();
     if had_fb {
         // the bare console has no alternate screen to pop back to, so the dead
         // TUI text AND our framebuffer emote pixels would linger behind the
@@ -711,6 +718,9 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         // wake often enough to pick up chat, but only to look: no draw unless
         // something arrived (see `dirty`).
         woke = false;
+        if intr::requested() {
+            return Ok(());
+        }
         if event::poll(wait.min(sched::POLL))? {
             woke = true;
             if let Event::Key(k) = event::read()? {

@@ -47,3 +47,7 @@ ratatui-image = { version = "8", default-features = false, features = ["crosster
 # windows/mac .exe is unaffected.
 [target.'cfg(target_os = "linux")'.dependencies]
 framebuffer = "0.3"
+
+# ctrl-c outside the chat ui (loading, login, one-shot commands) exits clean.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
