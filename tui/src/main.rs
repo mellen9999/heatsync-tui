@@ -1622,14 +1622,8 @@ fn ui(f: &mut Frame, app: &App) {
     if app.channels.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "  no channels — press ",
-                    palette::DIM,
-                ),
-                Span::styled(
-                    "o",
-                    palette::HEAD,
-                ),
+                Span::styled("  no channels — press ", palette::DIM),
+                Span::styled("o", palette::HEAD),
                 Span::styled(" to join one", palette::DIM),
             ])),
             main,
@@ -1883,14 +1877,8 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
     let [head, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                " channels ",
-                palette::TAG,
-            ),
-            Span::styled(
-                format!("  {} open", app.channels.len()),
-                palette::DIM,
-            ),
+            Span::styled(" channels ", palette::TAG),
+            Span::styled(format!("  {} open", app.channels.len()), palette::DIM),
         ])),
         head,
     );
@@ -2145,10 +2133,7 @@ impl Rows {
         };
         let Some((w, ready)) = sized else {
             // text tier — the name is just a word on the line.
-            return self.word(
-                &s.base,
-                palette::TEXT,
-            );
+            return self.word(&s.base, palette::TEXT);
         };
         if self.col + w > self.maxw && !self.at_row_start() {
             self.newline();
@@ -2170,10 +2155,8 @@ impl Rows {
         } else {
             // loading: hold the exact footprint and show what fits of the
             // name, so the image swaps in place instead of shoving the line.
-            self.spans.push(Span::styled(
-                fit_exact(&s.base, w),
-                palette::TEXT,
-            ));
+            self.spans
+                .push(Span::styled(fit_exact(&s.base, w), palette::TEXT));
         }
         self.col += w;
     }
@@ -2183,9 +2166,7 @@ impl Rows {
         if self.full {
             // truncated: drop the empty continuation, mark the last real row.
             if let Some(last) = self.rows.last_mut() {
-                last.line
-                    .spans
-                    .push(Span::styled("…", palette::DIM));
+                last.line.spans.push(Span::styled("…", palette::DIM));
             }
         } else if !self.spans.is_empty() || self.rows.is_empty() {
             let h = if self.has_stack { EMOTE_H } else { 1 };
@@ -2238,10 +2219,7 @@ fn layout_message(
     let mut b = Rows::new(maxw);
     // merged tab: a one-cell bar in the platform's hue marks each line's origin.
     if tag_platform {
-        b.prefix(
-            Span::styled("▎", palette::platform(m.platform)),
-            1,
-        );
+        b.prefix(Span::styled("▎", palette::platform(m.platform)), 1);
     }
     // an event line: glyph + actor + headline in the event's hue, then any
     // attached chat text (resub message, kicks message) laid out like chat.
@@ -2252,7 +2230,10 @@ fn layout_message(
         if !m.user.is_empty() {
             let uw = UnicodeWidthStr::width(m.user.as_str()) as u16;
             b.prefix(
-                Span::styled(m.user.clone(), Style::default().fg(user_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    m.user.clone(),
+                    Style::default().fg(user_color).add_modifier(Modifier::BOLD),
+                ),
                 uw,
             );
             b.prefix(Span::raw(" "), 1);
@@ -2275,17 +2256,17 @@ fn layout_message(
     }
     let uw = UnicodeWidthStr::width(m.user.as_str()) as u16;
     b.prefix(
-        Span::styled(m.user.clone(), Style::default().fg(user_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            m.user.clone(),
+            Style::default().fg(user_color).add_modifier(Modifier::BOLD),
+        ),
         uw,
     );
     // reply thread marker: who this message answers, dim, before the content.
     if let Some(r) = &m.reply_to {
         let tag = format!(" ↳{r}");
         let tw = UnicodeWidthStr::width(tag.as_str()) as u16;
-        b.prefix(
-            Span::styled(tag, palette::DIM),
-            tw,
-        );
+        b.prefix(Span::styled(tag, palette::DIM), tw);
     }
     // a line that pings you swaps its ": " for a blue bar — semantic, not decor.
     let pinged = me.is_some_and(|me| mentions(&m.text, me));
@@ -2390,10 +2371,7 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
     let hue = palette::heat_fill(Tier::of(heat));
     Line::from(vec![
         Span::styled("\u{2588}".repeat(filled), hue),
-        Span::styled(
-            "\u{2591}".repeat(width - filled),
-            palette::TRACK,
-        ),
+        Span::styled("\u{2591}".repeat(width - filled), palette::TRACK),
     ])
 }
 
@@ -2423,10 +2401,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             spans.extend(pair);
         }
         if let Some(msg) = &app.status {
-            spans.push(Span::styled(
-                format!(" {msg}"),
-                palette::WARN,
-            ));
+            spans.push(Span::styled(format!(" {msg}"), palette::WARN));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
@@ -2462,10 +2437,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             Span::styled(" ❯ ", palette::TEXT),
             Span::styled(app.input.clone(), palette::TEXT),
             Span::styled("\u{2588}", palette::TEXT),
-            Span::styled(
-                "   enter apply · empty clears · esc back",
-                palette::DIM,
-            ),
+            Span::styled("   enter apply · empty clears · esc back", palette::DIM),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
@@ -2473,17 +2445,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // Join mode → type a channel to open.
     if app.mode == InputMode::Join {
         let spans = vec![
-            Span::styled(
-                " join ",
-                palette::TAG,
-            ),
+            Span::styled(" join ", palette::TAG),
             Span::styled(" ❯ ", palette::TEXT),
             Span::styled(app.input.clone(), palette::TEXT),
             Span::styled("\u{2588}", palette::TEXT),
-            Span::styled(
-                "   name · kick:name · yt:video",
-                palette::DIM,
-            ),
+            Span::styled("   name · kick:name · yt:video", palette::DIM),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
@@ -2543,20 +2509,14 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             // a command's reply (usage, "not open: x") has to be visible from
             // the composer — that is where the command was typed.
             if let Some(msg) = &app.status {
-                spans.push(Span::styled(
-                    format!("   {msg}"),
-                    palette::WARN,
-                ));
+                spans.push(Span::styled(format!("   {msg}"), palette::WARN));
             } else if app.line.is_empty() && !normal {
                 spans.push(Span::styled(
                     "   tab completes emotes/@users  ·  /join /part /quit  ·  text goes to chat",
                     palette::DIM,
                 ));
             } else if normal {
-                spans.push(Span::styled(
-                    "   kj history  esc leave",
-                    palette::DIM,
-                ));
+                spans.push(Span::styled("   kj history  esc leave", palette::DIM));
             }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -2572,18 +2532,12 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             connected: false, ..
         } => ("\u{25cf} ", palette::WARN, "connecting".to_string()),
     };
-    let mut spans = vec![Span::styled(
-        " heatsync ",
-        palette::TAG,
-    )];
+    let mut spans = vec![Span::styled(" heatsync ", palette::TAG)];
     // a message (search miss, send error) takes the front of the line the way
     // vi's command line does — appended after the key hints it was simply
     // truncated away on anything narrower than ~110 columns.
     if let Some(msg) = &app.status {
-        spans.push(Span::styled(
-            format!("  {msg}"),
-            palette::WARN,
-        ));
+        spans.push(Span::styled(format!("  {msg}"), palette::WARN));
     }
     // essentials only, one key per action — the full set fits a phone-width
     // terminal.
@@ -2598,16 +2552,10 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         spans.extend(pair);
     }
     if app.paused {
-        spans.push(Span::styled(
-            "PAUSED  ",
-            palette::WARN_BOLD,
-        ));
+        spans.push(Span::styled("PAUSED  ", palette::WARN_BOLD));
     }
     spans.push(Span::styled(dot, dot_color));
-    spans.push(Span::styled(
-        format!("{state} · {n} ch"),
-        palette::DIM,
-    ));
+    spans.push(Span::styled(format!("{state} · {n} ch"), palette::DIM));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
