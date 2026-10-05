@@ -188,6 +188,9 @@ fn print_me(me: &serde_json::Value, base: &str, want_kick: bool) {
         .map(|a| a.iter().filter_map(s).collect())
         .unwrap_or_default();
     println!("  this login can: {}", scopes.join(", "));
+    if !scopes.iter().any(|x| x == "mod") {
+        println!("            no mod tools — run `heatsync-tui login` again and tick mod");
+    }
     if let Some(e) = s(&me["expires_at"]) {
         println!("  renews itself; valid until {e}");
     }
@@ -251,6 +254,9 @@ pub fn status() -> std::io::Result<()> {
             match client.me() {
                 Ok(me) => print_me(&me, &base, false),
                 Err(e) => {
+                    if hsauth::is_logged_out(&e) {
+                        hsauth::delete_session();
+                    }
                     println!("  {e}");
                     std::process::exit(1);
                 }

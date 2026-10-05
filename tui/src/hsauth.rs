@@ -410,7 +410,7 @@ impl Client {
             },
             Ok((st, v)) => Outcome {
                 ok: false,
-                text: explain(st, &v, &self.base),
+                text: scope_note(&v, "mod").unwrap_or_else(|| explain(st, &v, &self.base)),
             },
             Err(e) => Outcome { ok: false, text: e },
         }
@@ -429,7 +429,9 @@ impl Client {
             Some(json!({ "channel": channel, "text": text })),
         ) {
             Ok((200, _)) => Ok(()),
-            Ok((st, v)) => Err(explain(st, &v, &self.base)),
+            Ok((st, v)) => {
+                Err(scope_note(&v, "chat").unwrap_or_else(|| explain(st, &v, &self.base)))
+            }
             Err(e) => Err(e),
         }
     }
@@ -477,6 +479,23 @@ pub fn human_secs(s: u32) -> String {
     }
 }
 
+/// every answer that means "this saved login is dead" starts with this.
+pub const LOGGED_OUT: &str = "logged out:";
+
+pub fn is_logged_out(text: &str) -> bool {
+    text.starts_with(LOGGED_OUT)
+}
+
+/// the server refused for a missing permission on THIS login (not a platform one).
+fn scope_note(v: &Value, what: &str) -> Option<String> {
+    (v.get("error_code").and_then(Value::as_str) == Some("scope_missing")
+        && v.get("relink_required").and_then(Value::as_bool) != Some(true))
+    .then(|| match what {
+        "mod" => "this terminal wasn't given mod permission — run `heatsync-tui login` again and tick mod".to_string(),
+        _ => "this terminal wasn't given chat permission — run `heatsync-tui login` again".to_string(),
+    })
+}
+
 /// a server error → one plain sentence, with the exact link when the fix is
 /// "link or upgrade on heatsync.org". never echoes anything token-shaped.
 pub fn explain(status: u16, v: &Value, base: &str) -> String {
@@ -492,7 +511,9 @@ pub fn explain(status: u16, v: &Value, base: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("twitch");
     if code == "cli_token_invalid" {
-        return "you're not logged in (or it expired) — run: heatsync-tui login".into();
+        return format!(
+            "{LOGGED_OUT} this login was ended (logged out on the site, expired, or the account was blocked) — run: heatsync-tui login"
+        );
     }
     if code == "not_mod" {
         return "you're not a moderator in this channel".into();
@@ -577,7 +598,8 @@ pub fn load_client() -> Option<Client> {
                 let _ = save_session(&n);
                 return Some(Client::new(&n, t));
             }
-            Err(e) if e.contains("heatsync-tui login") => {
+            Err(e) if is_logged_out(&e) => {
+                delete_session();
                 eprintln!("heatsync: {e}");
                 return None;
             }
@@ -592,6 +614,8 @@ pub struct Note {
     pub platform: Platform,
     pub channel: String,
     pub text: String,
+    /// the saved login is dead: the UI stops using it.
+    pub logged_out: bool,
 }
 
 /// run `f` off the UI thread and post its words back as a note.
@@ -601,10 +625,15 @@ where
 {
     std::thread::spawn(move || {
         let o = f();
+        let logged_out = is_logged_out(&o.text);
+        if logged_out {
+            delete_session(); // a dead login must not linger on disk
+        }
         let _ = tx.send(Note {
             platform,
             channel,
             text: o.text,
+            logged_out,
         });
     });
 }
@@ -889,6 +918,45 @@ mod tests {
         let seen = f.seen.lock().unwrap();
         assert!(seen[0].1.ends_with("/api/cli/twitch/send"));
         assert!(seen[1].1.ends_with("/api/cli/kick/send"));
+    }
+
+    #[test]
+    fn missing_login_permission_says_to_log_in_again_and_tick() {
+        let f = Fake::new(vec![
+            Ok((
+                403,
+                json!({"error_code":"scope_missing","error":"this login cannot use mod tools"}),
+            )),
+            Ok((403, json!({"error_code":"scope_missing"}))),
+        ]);
+        let c = client(&f);
+        let o = c.mod_action(Platform::Twitch, "c", "t", &ModAction::Ban);
+        assert_eq!(o.text, "this terminal wasn't given mod permission — run `heatsync-tui login` again and tick mod");
+        assert!(c
+            .send(Platform::Twitch, "c", "x")
+            .unwrap_err()
+            .contains("chat permission"));
+    }
+
+    #[test]
+    fn a_dead_login_reads_logged_out_for_every_call() {
+        let dead = || Ok((401, json!({"error_code":"cli_token_invalid"})));
+        let f = Fake::new(vec![dead(), dead(), dead()]);
+        let c = client(&f);
+        assert!(is_logged_out(
+            &c.mod_action(Platform::Twitch, "c", "t", &ModAction::Ban)
+                .text
+        ));
+        assert!(is_logged_out(
+            &c.send(Platform::Kick, "c", "x").unwrap_err()
+        ));
+        assert!(is_logged_out(&c.me().unwrap_err()));
+        // a platform refusal is NOT a dead login
+        assert!(!is_logged_out(&explain(
+            403,
+            &json!({"error_code":"not_mod"}),
+            "b"
+        )));
     }
 
     #[test]

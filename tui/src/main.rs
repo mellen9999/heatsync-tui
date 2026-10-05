@@ -1454,6 +1454,9 @@ fn drain_twitch(app: &mut App) {
 /// a clean send has no words: nothing to say.
 fn drain_hs(app: &mut App) {
     while let Ok(n) = app.hs_notes.try_recv() {
+        if n.logged_out {
+            app.hs = None; // the session file is already gone; stop using the dead login
+        }
         if n.text.is_empty() {
             continue;
         }
