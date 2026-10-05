@@ -2592,13 +2592,12 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         // read-only only when there's genuinely no send path for this platform:
         // twitch needs the user's own token; kick can also relay via the ws.
         // the mock feed echoes locally, so it always composes.
-        let readonly = !drawlog::enabled()
-            && match (&app.feed, ch.platform) {
-                (Feed::Mock(_), _) => false,
-                (_, Platform::Twitch) => app.twitch_tx.is_none(),
-                (_, Platform::Kick) => app.kick_tx.is_none() && app.out.is_none(),
-                (_, Platform::Youtube) => app.out.is_none(),
-            };
+        let readonly = match (&app.feed, ch.platform) {
+            (Feed::Mock(_), _) => false,
+            (_, Platform::Twitch) => app.twitch_tx.is_none(),
+            (_, Platform::Kick) => app.kick_tx.is_none() && app.out.is_none(),
+            (_, Platform::Youtube) => app.out.is_none(),
+        };
         // the tag names the mode as well as the target, so `esc` never leaves
         // you guessing whether a keystroke will type or command.
         let normal = app.line.mode() == edit::Mode::Normal;

@@ -1,14 +1,9 @@
 //! HS_DEBUG_DRAW=<path>: append one line per second — draws and key events.
-//! off (and free) when the variable is unset. while it is set the composer also
-//! shows without a send token, so typing can be benchmarked on a logged-out box.
+//! off (and free) when the variable is unset.
 
 use std::fs::File;
 use std::io::Write;
 use std::time::{Duration, Instant};
-
-pub fn enabled() -> bool {
-    std::env::var_os("HS_DEBUG_DRAW").is_some()
-}
 
 pub struct DrawLog {
     file: Option<File>,
