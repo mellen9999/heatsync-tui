@@ -14,7 +14,6 @@ mod key;
 mod kick;
 mod net;
 mod palette;
-mod scroll;
 mod twitch;
 
 // The editing model lives in core now, so a gui can share it. Imported under
@@ -85,10 +84,6 @@ struct App {
     status: Option<String>, // transient one-line notice (send errors, etc.)
     out: Option<net::Tx>,   // outbound channel to the live WS thread
     twitch_tx: Option<std::sync::mpsc::Sender<twitch::Send>>, // direct twitch sender
-    /// Some = reading scrollback (view frozen, cursor on a line); None = live.
-    scroll: Option<scroll::Scroll>,
-    /// rows the chat pane had at the last draw — sizes a half-page jump.
-    view_h: std::cell::Cell<u16>,
     // what the sender has to say back: NOTICE rejections, auth failure.
     twitch_notes: Option<Receiver<twitch::Note>>,
     kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>, // direct kick sender
@@ -221,7 +216,36 @@ fn main() -> io::Result<()> {
     let cfg = config::load();
 
     let app = if mock_mode {
-        mock_app(cfg.tab_pos)
+        let (emote_tx, emote_rx) = std::sync::mpsc::channel();
+        let (hist_tx, hist_rx) = std::sync::mpsc::channel();
+        App {
+            channels: mock::channels(),
+            emotes: (0..mock::channels().len())
+                .map(|_| EmoteSet::new())
+                .collect(),
+            globals: EmoteSet::new(),
+            focus: 0,
+            paused: false,
+            feed: Feed::Mock(mock::Driver::new()),
+            store: None,
+            fb: None,
+            mode: InputMode::Normal,
+            input: String::new(),
+            line: edit::Line::default(),
+            status: None,
+            out: None,
+            twitch_tx: None,
+            twitch_notes: None,
+            kick_tx: None,
+            tab_pos: cfg.tab_pos,
+            manage_cursor: 0,
+            completion: None,
+            me: None,
+            emote_tx,
+            emote_rx,
+            hist_tx,
+            hist_rx,
+        }
     } else {
         build_live(&chan_args, cfg.tab_pos, cfg.channels)
     };
@@ -240,42 +264,6 @@ fn main() -> io::Result<()> {
         let _ = io::stdout().flush();
     }
     res
-}
-
-/// the offline synthetic app (`--mock`), also the tests' app.
-fn mock_app(tab_pos: TabPos) -> App {
-    let (emote_tx, emote_rx) = std::sync::mpsc::channel();
-    let (hist_tx, hist_rx) = std::sync::mpsc::channel();
-    App {
-        channels: mock::channels(),
-        emotes: (0..mock::channels().len())
-            .map(|_| EmoteSet::new())
-            .collect(),
-        globals: EmoteSet::new(),
-        focus: 0,
-        paused: false,
-        feed: Feed::Mock(mock::Driver::new()),
-        store: None,
-        fb: None,
-        mode: InputMode::Normal,
-        input: String::new(),
-        line: edit::Line::default(),
-        status: None,
-        out: None,
-        twitch_tx: None,
-        scroll: None,
-        view_h: std::cell::Cell::new(0),
-        twitch_notes: None,
-        kick_tx: None,
-        tab_pos,
-        manage_cursor: 0,
-        completion: None,
-        me: None,
-        emote_tx,
-        emote_rx,
-        hist_tx,
-        hist_rx,
-    }
 }
 
 /// parse channel args (`name`, `twitch:name`, `kick:name`, `yt:id`, and
@@ -377,8 +365,6 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         status: None,
         out: Some(out),
         twitch_tx,
-        scroll: None,
-        view_h: std::cell::Cell::new(0),
         twitch_notes,
         kick_tx,
         tab_pos,
@@ -592,7 +578,6 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         drain_emotes(&mut app);
         drain_history(&mut app);
         drain_twitch(&mut app);
-        sync_scroll(&mut app);
         // the focused tab is on screen — whatever it holds is now seen.
         if let Some(ch) = app.channels.get_mut(app.focus) {
             ch.mark_seen();
@@ -797,30 +782,21 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
     Flow::Continue
 }
 
-/// Normal mode: switch channels, read scrollback, enter the other modes.
-/// h/l (and arrows, tab/shift-tab, J/K) move between tabs; k/↑/^u start
-/// reading scrollback, and j/k/^u/^d/g/G move through it (see `scroll_key`).
+/// Normal mode: switch channels and enter the other modes. chat has no message
+/// cursor — j/k and h/l (and arrows, tab/shift-tab) all move between tabs.
 fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
-    if app.scroll.is_some() {
-        if let Some(flow) = scroll_key(app, k) {
-            return flow;
-        }
-    } else if let Some(flow) = start_scroll(app, k) {
-        return flow;
-    }
     match k.code {
         KeyCode::Char('q') => Flow::Quit,
-        // l/right/tab/J → next channel; h/left/shift-tab/K → previous.
-        KeyCode::Char('l')
-        | KeyCode::Char('J')
-        | KeyCode::Right
-        | KeyCode::Tab => tab_and_continue(app, 1),
-        KeyCode::Char('h')
-        | KeyCode::Char('K')
+        // j/l/down/right/tab → next channel; k/h/up/left/shift-tab → previous.
+        KeyCode::Char('j') | KeyCode::Char('l') | KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
+            tab_and_continue(app, 1)
+        }
+        KeyCode::Char('k')
+        | KeyCode::Char('h')
+        | KeyCode::Up
         | KeyCode::Left
         | KeyCode::BackTab => tab_and_continue(app, -1),
         KeyCode::Char('i') | KeyCode::Char('a') => {
-            app.scroll = None;
             app.mode = InputMode::Insert;
             app.line.focus();
             app.status = None;
@@ -855,54 +831,6 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             Flow::Continue
         }
         _ => Flow::Continue,
-    }
-}
-
-/// live → scrollback: k/↑ puts the cursor on the newest line; ^u does that and
-/// pages up. the view freezes from here until `G`/esc.
-fn start_scroll(app: &mut App, k: crossterm::event::KeyEvent) -> Option<Flow> {
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let page = matches!(k.code, KeyCode::Char('u')) && ctrl;
-    if !(matches!(k.code, KeyCode::Char('k') | KeyCode::Up) || page) {
-        return None;
-    }
-    let ch = app.channels.get(app.focus)?;
-    if ch.messages.is_empty() {
-        return Some(Flow::Continue);
-    }
-    app.scroll = Some(scroll::Scroll::enter(app.focus, &ch.name, ch.seq));
-    if page {
-        scroll_key(app, k);
-    }
-    Some(Flow::Continue)
-}
-
-/// keys while reading scrollback. None = not ours (tabs, quit, insert… fall
-/// through to the normal map).
-fn scroll_key(app: &mut App, k: crossterm::event::KeyEvent) -> Option<Flow> {
-    let len = app.channels.get(app.focus)?.messages.len();
-    let half = (app.view_h.get() as usize / 2).max(1);
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let s = app.scroll.as_mut()?;
-    match k.code {
-        KeyCode::Char('k') | KeyCode::Up => s.up(1, len),
-        KeyCode::Char('j') | KeyCode::Down => s.down(1),
-        KeyCode::Char('u') if ctrl => s.up(half, len),
-        KeyCode::Char('d') if ctrl => s.down(half),
-        KeyCode::Char('g') => s.top(len),
-        KeyCode::Char('G') | KeyCode::Esc => app.scroll = None,
-        _ => return None,
-    }
-    Some(Flow::Continue)
-}
-
-/// scrollback follows the lines it started on: shift for arrivals, and drop it
-/// when the tab it belonged to is gone or no longer focused.
-fn sync_scroll(app: &mut App) {
-    let Some(s) = &mut app.scroll else { return };
-    match app.channels.get(app.focus) {
-        Some(ch) if s.chan == app.focus && s.name == ch.name => s.sync(ch.seq, ch.messages.len()),
-        _ => app.scroll = None,
     }
 }
 
@@ -1703,65 +1631,35 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     }
 
     let cap = body.height as usize;
-    app.view_h.set(body.height);
-    let me = app.me.as_deref();
-    // plan the visible messages newest-first from distance `bot` (0 = live),
-    // honouring per-message height (wrapped rows + emote rows). layout stops
-    // the moment the pane is full: nothing outside the viewport is ever laid
-    // out or drawn. the cursor line, in scrollback, is reversed.
-    let cursor = app.scroll.as_ref().map(|s| s.cursor);
-    let plan_from = |bot: usize| {
-        let mut plan: Vec<Vec<RowPlan>> = Vec::new();
-        let mut used = 0usize;
-        for (d, m) in ch.messages.iter().rev().enumerate().skip(bot) {
-            let mut rows = layout_message(m, set, mode, body.width, me, ch.merged());
-            if cursor == Some(d) {
-                for r in &mut rows {
-                    r.line = std::mem::take(&mut r.line)
-                        .patch_style(Style::new().add_modifier(Modifier::REVERSED));
-                }
+    // plan visible messages newest-first, honouring per-message height (wrapped
+    // rows + emote rows). chat always follows live — no scrollback, no message
+    // cursor. layout stops the moment the pane is full: nothing outside the
+    // viewport is ever laid out or drawn.
+    let mut plan: Vec<Vec<RowPlan>> = Vec::new();
+    let mut used = 0usize;
+    for m in ch.messages.iter().rev() {
+        let mut rows = layout_message(m, set, mode, body.width, app.me.as_deref(), ch.merged());
+        let h: usize = rows.iter().map(|r| r.h as usize).sum();
+        if used + h > cap {
+            // the newest message alone can exceed the pane — keep its tail.
+            if used == 0 {
+                let mut acc = 0usize;
+                let keep_from = rows
+                    .iter()
+                    .rposition(|r| {
+                        acc += r.h as usize;
+                        acc > cap
+                    })
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                rows.drain(..keep_from);
+                used = rows.iter().map(|r| r.h as usize).sum();
+                plan.push(rows);
             }
-            let h: usize = rows.iter().map(|r| r.h as usize).sum();
-            if used + h > cap {
-                // the newest message alone can exceed the pane — keep its tail.
-                if used == 0 {
-                    let mut acc = 0usize;
-                    let keep_from = rows
-                        .iter()
-                        .rposition(|r| {
-                            acc += r.h as usize;
-                            acc > cap
-                        })
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                    rows.drain(..keep_from);
-                    used = rows.iter().map(|r| r.h as usize).sum();
-                    plan.push(rows);
-                }
-                break;
-            }
-            used += h;
-            plan.push(rows);
+            break;
         }
-        (plan, used)
-    };
-    let mut bot = app.scroll.as_ref().map_or(0, |s| s.bot.get());
-    if let Some(c) = cursor {
-        bot = bot.min(c); // cursor below the view: slide the view down to it
-    }
-    let (mut plan, used) = loop {
-        let (plan, used) = plan_from(bot);
-        match cursor {
-            // cursor older than the top of the view: slide the view up until
-            // it shows (terminates — at bot == cursor it is the bottom line).
-            Some(c) if !plan.is_empty() && c >= bot + plan.len() => {
-                bot = (c + 1).saturating_sub(plan.len()).max(bot + 1).min(c);
-            }
-            _ => break (plan, used),
-        }
-    };
-    if let Some(s) = &app.scroll {
-        s.bot.set(bot);
+        used += h;
+        plan.push(rows);
     }
     plan.reverse();
 
@@ -2532,22 +2430,6 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             connected: false, ..
         } => ("\u{25cf} ", palette::WARN, "connecting".to_string()),
     };
-    // reading scrollback: its own tag + keys, and the live count that the
-    // frozen view is not showing.
-    if let Some(sc) = &app.scroll {
-        let mut spans = vec![Span::styled(" scroll ", palette::TAG), Span::raw("  ")];
-        for pair in [
-            hint("jk", "line"),
-            hint("^u^d", "page"),
-            hint("g", "top"),
-            hint("G", "live"),
-        ] {
-            spans.extend(pair);
-        }
-        spans.push(Span::styled(new_label(sc.new_lines()), palette::HEAD));
-        f.render_widget(Paragraph::new(Line::from(spans)), area);
-        return;
-    }
     let mut spans = vec![Span::styled(
         " heatsync ",
         palette::TAG,
@@ -2565,8 +2447,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // terminal.
     spans.push(Span::raw("  "));
     for pair in [
-        hint("hl", "chan"),
-        hint("k", "scroll"),
+        hint("jk", "chan"),
         hint("i", "say"),
         hint("o", "join"),
         hint("m", "manage"),
@@ -2586,15 +2467,6 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         palette::DIM,
     ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-/// "N new ↓" — or nothing yet, so the footer doesn't announce silence.
-fn new_label(n: u64) -> String {
-    if n == 0 {
-        String::new()
-    } else {
-        format!("{n} new ↓")
-    }
 }
 
 #[cfg(test)]
@@ -2829,204 +2701,5 @@ mod stack_tests {
         let mut keys = Vec::new();
         each_stack("A h1 h2", &set, |k| keys.push(k.to_string()));
         assert_eq!(keys, vec!["u/A\nu/h1\nu/h2"]);
-    }
-}
-
-#[cfg(test)]
-mod scroll_tests {
-    use super::*;
-    use crossterm::event::KeyEvent;
-    use ratatui::backend::TestBackend;
-
-    fn line(text: &str) -> Message {
-        Message {
-            platform: Platform::Twitch,
-            user: "u".into(),
-            text: text.into(),
-            color: None,
-            badges: Vec::new(),
-            id: None,
-            gone: None,
-            reply_to: None,
-            note: None,
-            heat: 0.0,
-        }
-    }
-
-    /// two empty tabs; the first is filled with `n` lines "m0".."m{n-1}".
-    fn app(n: usize) -> App {
-        let mut app = mock_app(TabPos::Top);
-        app.channels = vec![
-            Channel::new("a", Platform::Twitch, 200),
-            Channel::new("b", Platform::Twitch, 200),
-        ];
-        app.emotes = vec![EmoteSet::new(), EmoteSet::new()];
-        for i in 0..n {
-            app.channels[0].record(line(&format!("m{i}")), 1);
-        }
-        app
-    }
-
-    fn press(app: &mut App, c: KeyCode) {
-        handle_key(app, KeyEvent::new(c, KeyModifiers::NONE));
-        sync_scroll(app);
-    }
-
-    fn ctrl(app: &mut App, c: char) {
-        handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
-        sync_scroll(app);
-    }
-
-    fn cursor(app: &App) -> Option<usize> {
-        app.scroll.as_ref().map(|s| s.cursor)
-    }
-
-    #[test]
-    fn k_enters_on_the_newest_line_and_j_k_walk_it() {
-        let mut a = app(20);
-        assert_eq!(cursor(&a), None);
-        press(&mut a, KeyCode::Char('k'));
-        assert_eq!(cursor(&a), Some(0));
-        for _ in 0..3 {
-            press(&mut a, KeyCode::Char('k'));
-        }
-        assert_eq!(cursor(&a), Some(3));
-        press(&mut a, KeyCode::Char('j'));
-        assert_eq!(cursor(&a), Some(2));
-        press(&mut a, KeyCode::Char('g'));
-        assert_eq!(cursor(&a), Some(19), "g = oldest line in the ring");
-    }
-
-    #[test]
-    fn g_and_esc_return_to_live() {
-        let mut a = app(20);
-        press(&mut a, KeyCode::Up);
-        press(&mut a, KeyCode::Char('G'));
-        assert_eq!(cursor(&a), None);
-        press(&mut a, KeyCode::Up);
-        press(&mut a, KeyCode::Esc);
-        assert_eq!(cursor(&a), None);
-    }
-
-    #[test]
-    fn j_alone_does_not_scroll_or_switch_tabs() {
-        let mut a = app(5);
-        press(&mut a, KeyCode::Char('j'));
-        assert_eq!((cursor(&a), a.focus), (None, 0));
-    }
-
-    #[test]
-    fn ctrl_u_ctrl_d_move_half_a_page() {
-        let mut a = app(100);
-        a.view_h.set(20);
-        ctrl(&mut a, 'u'); // from live: enters and pages up
-        assert_eq!(cursor(&a), Some(10));
-        ctrl(&mut a, 'u');
-        assert_eq!(cursor(&a), Some(20));
-        ctrl(&mut a, 'd');
-        assert_eq!(cursor(&a), Some(10));
-        ctrl(&mut a, 'd');
-        ctrl(&mut a, 'd');
-        assert_eq!(cursor(&a), Some(0), "stops at the newest, stays in scroll");
-    }
-
-    #[test]
-    fn view_freezes_while_lines_arrive_and_counts_them() {
-        let mut a = app(20);
-        for _ in 0..4 {
-            press(&mut a, KeyCode::Char('k'));
-        }
-        assert_eq!(cursor(&a), Some(3)); // on m16
-        for i in 0..5 {
-            a.channels[0].record(line(&format!("new{i}")), 2);
-        }
-        sync_scroll(&mut a);
-        let s = a.scroll.as_ref().unwrap();
-        assert_eq!(s.cursor, 8, "still on m16");
-        assert_eq!(a.channels[0].messages.iter().rev().nth(s.cursor).unwrap().text, "m16");
-        assert_eq!(new_label(s.new_lines()), "5 new ↓");
-    }
-
-    #[test]
-    fn switching_tabs_or_insert_leaves_scrollback() {
-        let mut a = app(10);
-        press(&mut a, KeyCode::Char('k'));
-        press(&mut a, KeyCode::Char('l'));
-        assert_eq!((a.focus, cursor(&a)), (1, None));
-        let mut a = app(10);
-        press(&mut a, KeyCode::Char('k'));
-        press(&mut a, KeyCode::Char('i'));
-        assert_eq!(cursor(&a), None);
-    }
-
-    #[test]
-    fn empty_tab_does_not_enter_scrollback() {
-        let mut a = app(0);
-        press(&mut a, KeyCode::Char('k'));
-        assert_eq!(cursor(&a), None);
-    }
-
-    fn render(a: &App) -> ratatui::buffer::Buffer {
-        let mut t = Terminal::new(TestBackend::new(40, 8)).unwrap();
-        t.draw(|f| draw_active(f, f.area(), a, EmoteMode::Text)).unwrap();
-        t.backend().buffer().clone()
-    }
-
-    fn rows(b: &ratatui::buffer::Buffer) -> Vec<String> {
-        (0..b.area.height)
-            .map(|y| (0..b.area.width).map(|x| b[(x, y)].symbol()).collect())
-            .collect()
-    }
-
-    fn reversed_rows(b: &ratatui::buffer::Buffer) -> Vec<u16> {
-        (0..b.area.height)
-            .filter(|&y| b[(5, y)].modifier.contains(Modifier::REVERSED))
-            .collect()
-    }
-
-    #[test]
-    fn live_view_follows_the_newest_with_no_cursor() {
-        let b = render(&app(30));
-        assert!(rows(&b).last().unwrap().contains("m29"));
-        assert!(reversed_rows(&b).is_empty());
-    }
-
-    #[test]
-    fn the_cursor_line_is_reversed_and_the_view_scrolls_to_keep_it_visible() {
-        let mut a = app(30);
-        press(&mut a, KeyCode::Char('k'));
-        let b = render(&a);
-        let rv = reversed_rows(&b);
-        assert_eq!(rv.len(), 1);
-        assert!(rows(&b)[rv[0] as usize].contains("m29"));
-        // walk far past the top of the 7-line body: the cursor stays on screen
-        for _ in 0..15 {
-            press(&mut a, KeyCode::Char('k'));
-        }
-        let b = render(&a);
-        let rv = reversed_rows(&b);
-        assert_eq!(rv.len(), 1, "cursor visible");
-        assert!(rows(&b)[rv[0] as usize].contains("m14"), "{:?}", rows(&b));
-        // and back down to the newest
-        for _ in 0..15 {
-            press(&mut a, KeyCode::Char('j'));
-        }
-        let b = render(&a);
-        assert!(rows(&b).last().unwrap().contains("m29"));
-    }
-
-    #[test]
-    fn frozen_view_does_not_move_when_lines_arrive() {
-        let mut a = app(30);
-        for _ in 0..10 {
-            press(&mut a, KeyCode::Char('k'));
-        }
-        let body = |a: &App| rows(&render(a))[1..].to_vec(); // row 0 is the heat bar
-        let before = body(&a);
-        for i in 0..6 {
-            a.channels[0].record(line(&format!("x{i}")), 2);
-        }
-        sync_scroll(&mut a);
-        assert_eq!(body(&a), before);
     }
 }

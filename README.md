@@ -12,7 +12,7 @@ heatsync-tui xqc forsen kick:trainwreckstv   # explicit channels
 heatsync-tui login           # set up sending (see below)
 ```
 
-keys: `k` read scrollback (then `j`/`k` line · `ctrl-u`/`ctrl-d` page · `g` top · `G`/`esc` live) · `h`/`l` or `J`/`K` switch channel ·
+keys: `j`/`k` scroll · `h`/`l` (or `j`/`k` with a side tab bar) switch channel ·
 `i` compose · `o` join · `m` manage · `x` close · `T` move tab bar · `space` pause · `q` quit.
 open channels + tab-bar position persist in `~/.config/heatsync/config`.
 
