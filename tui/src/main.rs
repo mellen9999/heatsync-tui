@@ -9,9 +9,11 @@
 mod cli;
 mod config;
 mod emote;
+mod hsauth;
 mod http;
 mod key;
 mod kick;
+mod modcmd;
 mod net;
 mod palette;
 mod twitch;
@@ -87,6 +89,11 @@ struct App {
     // what the sender has to say back: NOTICE rejections, auth failure.
     twitch_notes: Option<Receiver<twitch::Note>>,
     kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>, // direct kick sender
+    /// the heatsync login: sends and mod actions go through heatsync.org with it.
+    hs: Option<hsauth::Client>,
+    /// finished sends / mod actions come back here, from their own threads.
+    hs_tx: Sender<hsauth::Note>,
+    hs_notes: Receiver<hsauth::Note>,
     tab_pos: TabPos,
     manage_cursor: usize, // cursor in the Manage view
     /// a tab-completion walk in progress; any non-tab key ends it.
@@ -157,9 +164,10 @@ SUBCOMMANDS:
     log        print recent messages
     search     search the chat archive
     hot, top   busiest channels right now
-    status     connection + auth status
-    login      link a twitch account
-    login kick link a kick account
+    login      log in with heatsync (chat + mod, twitch and kick)
+    login kick same login, with how to link kick
+    logout     log out and forget the login
+    status     who is logged in and what they can do
     probe      check a channel is reachable
     diag       dump diagnostics
     render-test  draw the emote/paint test pattern
@@ -180,8 +188,8 @@ fn main() -> io::Result<()> {
         Some("diag") => return cli::diag(&args[1..]),
         Some("render-test") => return cli::render_test(&args[1..]),
         Some("status") => return cli::status(),
-        Some("login") if args.get(1).map(String::as_str) == Some("kick") => return kick::login(),
-        Some("login") => return cli::login(),
+        Some("login") => return cli::login(args.get(1).map(String::as_str) == Some("kick")),
+        Some("logout") => return cli::logout(),
         // The two flags every installed binary is asked first. Without them
         // `heatsync-tui --version` fell through to the TUI, tried to connect to
         // three channels, and then panicked out of ratatui because there was no
@@ -214,8 +222,8 @@ fn main() -> io::Result<()> {
     let mock_mode = args.iter().any(|a| a == "--mock");
     let chan_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     let cfg = config::load();
-
     let app = if mock_mode {
+        let (hs_tx, hs_rx) = std::sync::mpsc::channel::<hsauth::Note>();
         let (emote_tx, emote_rx) = std::sync::mpsc::channel();
         let (hist_tx, hist_rx) = std::sync::mpsc::channel();
         App {
@@ -237,6 +245,9 @@ fn main() -> io::Result<()> {
             twitch_tx: None,
             twitch_notes: None,
             kick_tx: None,
+            hs: None,
+            hs_tx,
+            hs_notes: hs_rx,
             tab_pos: cfg.tab_pos,
             manage_cursor: 0,
             completion: None,
@@ -346,6 +357,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         _ => (None, None),
     };
     spawn_global_emotes(&emote_tx);
+    let (hs_tx, hs_rx) = std::sync::mpsc::channel::<hsauth::Note>();
     App {
         channels,
         emotes,
@@ -367,6 +379,9 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         twitch_tx,
         twitch_notes,
         kick_tx,
+        hs: hsauth::load_client(),
+        hs_tx,
+        hs_notes: hs_rx,
         tab_pos,
         manage_cursor: 0,
         completion: None,
@@ -578,6 +593,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         drain_emotes(&mut app);
         drain_history(&mut app);
         drain_twitch(&mut app);
+        drain_hs(&mut app);
         // the focused tab is on screen — whatever it holds is now seen.
         if let Some(ch) = app.channels.get_mut(app.focus) {
             ch.mark_seen();
@@ -1120,6 +1136,12 @@ fn send_focused(app: &mut App) -> Flow {
     if text.is_empty() || app.channels.is_empty() {
         return Flow::Continue;
     }
+    // /ban /unban /timeout /delete: twitch no longer runs these as chat text,
+    // so they go through heatsync as real mod actions.
+    if let Some(p) = modcmd::parse(&text, |u| last_id_of(app, u)) {
+        run_mod(app, p);
+        return Flow::Continue;
+    }
     // offline feed: echo the line locally — the composer (completion, preview,
     // history) works end-to-end with no network and nothing leaves the machine.
     if matches!(app.feed, Feed::Mock(_)) {
@@ -1148,21 +1170,34 @@ fn send_focused(app: &mut App) -> Flow {
         (c.platform, c.name.clone())
     };
     match platform {
-        Platform::Twitch => match &app.twitch_tx {
-            Some(tx) => {
-                // a dead sender (auth failed for good) must not look like a send.
-                if tx.send((name.clone(), text)).is_ok() {
-                    app.line.accept();
-                    app.status = Some(format!("sent → {name}"));
-                } else {
-                    app.status = Some("twitch sender stopped — run: heatsync login".into());
+        Platform::Twitch => {
+            if let Some(client) = app.hs.clone() {
+                send_via_heatsync(app, client, platform, name.clone(), text);
+                app.line.accept();
+                app.status = Some(format!("sent → {name}"));
+            } else {
+                match &app.twitch_tx {
+                    Some(tx) => {
+                        // a dead sender (auth failed for good) must not look like a send.
+                        if tx.send((name.clone(), text)).is_ok() {
+                            app.line.accept();
+                            app.status = Some(format!("sent → {name}"));
+                        } else {
+                            app.status =
+                                Some("twitch sender stopped — run: heatsync-tui login".into());
+                        }
+                    }
+                    None => app.status = Some("not logged in — run: heatsync-tui login".into()),
                 }
             }
-            None => app.status = Some("no twitch token — run: heatsync login".into()),
-        },
-        // prefer direct kick send (own token); fall back to the ext-relay path.
+        }
+        // heatsync login first; then a kick token the user supplied; then the ext relay.
         Platform::Kick => {
-            if let Some(ktx) = &app.kick_tx {
+            if let Some(client) = app.hs.clone() {
+                send_via_heatsync(app, client, platform, name.clone(), text);
+                app.line.accept();
+                app.status = Some(format!("sent → {name}"));
+            } else if let Some(ktx) = &app.kick_tx {
                 let _ = ktx.send((name.clone(), text));
                 app.line.accept();
                 app.status = Some(format!("sent → {name}"));
@@ -1175,7 +1210,7 @@ fn send_focused(app: &mut App) -> Flow {
                 app.line.accept();
                 app.status = Some(format!("sent → {name} (via ext)"));
             } else {
-                app.status = Some("no kick auth — run: heatsync login kick".into());
+                app.status = Some("not logged in — run: heatsync-tui login kick".into());
             }
         }
         // youtube sends only via the authenticated relay (extension path).
@@ -1193,6 +1228,26 @@ fn send_focused(app: &mut App) -> Flow {
         },
     }
     Flow::Continue
+}
+
+/// post `text` through heatsync on its own thread; only a failure speaks.
+fn send_via_heatsync(
+    app: &App,
+    client: hsauth::Client,
+    platform: Platform,
+    name: String,
+    text: String,
+) {
+    let chan = name.clone();
+    hsauth::spawn_note(app.hs_tx.clone(), platform, name, move || {
+        match client.send(platform, &chan, &text) {
+            Ok(()) => hsauth::Outcome {
+                ok: true,
+                text: String::new(),
+            },
+            Err(e) => hsauth::Outcome { ok: false, text: e },
+        }
+    });
 }
 
 /// one tab press: start or continue a completion walk over the focused
@@ -1392,6 +1447,90 @@ fn drain_twitch(app: &mut App) {
         }
         app.status = Some(n.text);
     }
+}
+
+/// finished heatsync sends / mod actions → a line in the tab they belong to (so
+/// a confirmation or a refusal stays in scrollback) and the status line.
+/// a clean send has no words: nothing to say.
+fn drain_hs(app: &mut App) {
+    while let Ok(n) = app.hs_notes.try_recv() {
+        if n.text.is_empty() {
+            continue;
+        }
+        if let Some(ch) = app
+            .channels
+            .iter_mut()
+            .find(|c| c.matches(n.platform, &n.channel))
+        {
+            ch.system(Message {
+                platform: n.platform,
+                user: String::new(),
+                text: String::new(),
+                color: None,
+                badges: Vec::new(),
+                id: None,
+                gone: None,
+                reply_to: None,
+                note: Some(heatsync_core::Note {
+                    kind: heatsync_core::NoteKind::Notice,
+                    what: n.text.clone(),
+                }),
+                heat: 0.0,
+            });
+        }
+        app.status = Some(n.text);
+    }
+}
+
+/// a mod command typed in the composer → a real mod action through heatsync.
+fn run_mod(app: &mut App, parsed: modcmd::Parsed) {
+    let (action, target) = match parsed {
+        modcmd::Parsed::Usage(u) => {
+            app.status = Some(u.into()); // keep the draft so it can be fixed
+            return;
+        }
+        modcmd::Parsed::Run(a, t) => (a, t),
+    };
+    let (platform, name) = {
+        let c = &app.channels[app.focus];
+        (c.platform, c.name.clone())
+    };
+    if matches!(app.feed, Feed::Mock(_)) {
+        app.status = Some("offline demo — mod actions are off".into());
+        return;
+    }
+    match platform {
+        Platform::Twitch => {}
+        Platform::Kick => {
+            app.status = Some("mod tools aren't on kick yet — use kick.com for that".into());
+            return;
+        }
+        Platform::Youtube => {
+            app.status = Some("mod tools are twitch-only for now".into());
+            return;
+        }
+    }
+    let Some(client) = app.hs.clone() else {
+        app.status = Some("log in first to use mod tools — run: heatsync-tui login".into());
+        return;
+    };
+    app.line.accept();
+    app.status = Some("working…".into());
+    let chan = name.clone();
+    hsauth::spawn_note(app.hs_tx.clone(), platform, name, move || {
+        client.mod_action(platform, &chan, &target, &action)
+    });
+}
+
+/// the newest message id this user has in the focused tab (for `/delete <user>`).
+fn last_id_of(app: &App, user: &str) -> Option<String> {
+    app.channels
+        .get(app.focus)?
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.user.eq_ignore_ascii_case(user) && m.id.is_some())
+        .and_then(|m| m.id.clone())
 }
 
 /// merge finished emote loads into the cache (every wake — a built emote is on

@@ -97,9 +97,10 @@ fn parse_chan(s: &str) -> Option<(Platform, String)> {
     }
 }
 
-/// the user's own twitch credentials for direct-to-platform sending (chatterino
-/// model). read from ~/.config/heatsync/token or the TWITCH_USER / TWITCH_OAUTH
-/// env. absent → twitch send is disabled and the client says so.
+/// optional own-token fallbacks for sending without a heatsync login: twitch
+/// direct IRC (TWITCH_USER / TWITCH_OAUTH, or ~/.config/heatsync/token) and a
+/// kick token (KICK_TOKEN). `heatsync-tui login` is the way in; these stay for
+/// people who already have them.
 pub struct Auth {
     pub twitch_user: Option<String>,
     pub twitch_oauth: Option<String>,
@@ -108,7 +109,7 @@ pub struct Auth {
     pub admin_token: Option<String>,
 }
 
-fn dir() -> Option<PathBuf> {
+pub fn dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
@@ -161,28 +162,6 @@ pub fn load_auth() -> Auth {
     }
 }
 
-/// persist a `kick_token=` line into the token file, preserving other keys.
-pub fn save_kick_token(token: &str) {
-    let Some(p) = token_path() else { return };
-    if let Some(d) = p.parent() {
-        let _ = fs::create_dir_all(d);
-    }
-    let mut lines: Vec<String> = fs::read_to_string(&p)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("kick_token="))
-        .map(str::to_string)
-        .collect();
-    lines.push(format!("kick_token={token}"));
-    if fs::write(&p, lines.join("\n") + "\n").is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
-        }
-    }
-}
-
 pub fn load() -> Config {
     let mut cfg = Config {
         tab_pos: TabPos::Top,
@@ -206,29 +185,6 @@ pub fn load() -> Config {
         }
     }
     cfg
-}
-
-/// ensure the token file exists (with a template + tight perms) and return its
-/// path. the file holds a secret, so it's created mode 0600.
-pub fn ensure_token_file() -> Option<PathBuf> {
-    let p = token_path()?;
-    if !p.exists() {
-        if let Some(d) = p.parent() {
-            let _ = fs::create_dir_all(d);
-        }
-        let tmpl = "# heatsync twitch sending (chatterino-style, sends go direct to twitch)\n\
-                    # get a token with the 'chat:edit' scope, e.g. https://twitchtokengenerator.com\n\
-                    twitch_user=\n\
-                    twitch_oauth=\n";
-        if fs::write(&p, tmpl).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
-            }
-        }
-    }
-    Some(p)
 }
 
 /// best-effort persist (creates the dir). failures are non-fatal.

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use heatsync_core::Platform;
 
 use crate::config;
+use crate::hsauth;
 use crate::http;
 use crate::net::{self, ChatEvent};
 
@@ -107,36 +108,160 @@ pub fn hot(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `heatsync login` — set up direct twitch sending (chatterino-style).
-pub fn login() -> std::io::Result<()> {
-    match config::ensure_token_file() {
-        Some(p) => {
-            println!(
-                "twitch sending — sends go DIRECT to twitch (like chatterino), not via heatsync:"
-            );
-            println!("  1. get a twitch oauth token with the 'chat:edit' scope");
-            println!("     e.g. https://twitchtokengenerator.com  (pick a bot/chat token)");
-            println!("  2. edit {}", p.display());
-            println!("       twitch_user=your_twitch_username");
-            println!("       twitch_oauth=oauth:xxxxxxxxxxxxxxxx");
-            println!("  3. restart heatsync. reading still comes through heatsync; only sending is direct.");
-            println!("  (or set TWITCH_USER / TWITCH_OAUTH env instead of the file.)");
+/// `heatsync-tui login [kick]` — log in with heatsync. prints a code, opens the
+/// approve page, waits for the click, keeps one revocable token at 0600.
+pub fn login(kick: bool) -> std::io::Result<()> {
+    let base = match hsauth::base_url() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
-        None => eprintln!("could not resolve ~/.config/heatsync/"),
+    };
+    let t = hsauth::UreqTransport;
+    let pair = match hsauth::pair_start(&t, &base) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    println!("log in to heatsync\n");
+    println!("  1. open   {}", pair.url);
+    println!("  2. log in there (twitch or kick) if it asks");
+    println!("  3. type   {}   and press approve\n", pair.user_code);
+    open_browser(&pair.url);
+    println!("waiting for you… (ctrl-c to cancel)");
+
+    let mut interval = pair.interval;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(pair.expires_in);
+    let session = loop {
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+        if std::time::Instant::now() > deadline {
+            eprintln!("that code expired — run the login again");
+            std::process::exit(1);
+        }
+        match hsauth::poll_once(&t, &base, &pair.device_code) {
+            hsauth::Poll::Pending => {}
+            hsauth::Poll::SlowDown => interval = (interval + 2).min(30),
+            hsauth::Poll::Approved(s) => break s,
+            hsauth::Poll::Failed(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    };
+    if let Err(e) = hsauth::save_session(&session) {
+        eprintln!("logged in, but could not save the login: {e}");
+        std::process::exit(1);
+    }
+    println!("logged in ✓\n");
+    let client = hsauth::Client::new(&session, std::sync::Arc::new(hsauth::UreqTransport));
+    match client.me() {
+        Ok(me) => print_me(&me, &base, kick),
+        Err(e) => println!("{e}"),
     }
     Ok(())
 }
 
-/// `heatsync status` — mellen-only admin glance: mod queue, reports, NCMEC
-/// backlog, capacity headroom. Reads the SAME endpoints the web admin
-/// dashboard does; no vanity concurrent-user count on purpose.
+/// best effort: only if a launcher exists. the url is already printed.
+fn open_browser(url: &str) {
+    let launcher = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(launcher)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// who is logged in and what each platform lets them do. never the token.
+fn print_me(me: &serde_json::Value, base: &str, want_kick: bool) {
+    let s = |v: &serde_json::Value| v.as_str().map(str::to_string);
+    let name = s(&me["user"]["display_name"]).or_else(|| s(&me["user"]["username"]));
+    println!("  account   {}", name.unwrap_or_else(|| "?".into()));
+    let scopes: Vec<String> = me["scopes"]
+        .as_array()
+        .map(|a| a.iter().filter_map(s).collect())
+        .unwrap_or_default();
+    println!("  this login can: {}", scopes.join(", "));
+    if let Some(e) = s(&me["expires_at"]) {
+        println!("  renews itself; valid until {e}");
+    }
+    let tw = &me["twitch"];
+    if tw["linked"].as_bool() == Some(true) {
+        println!("  twitch    {}", s(&tw["login"]).unwrap_or_default());
+        if tw["can_mod"].as_bool() == Some(false) {
+            println!("            to mod: open {base}/api/auth/login?scopes=mod");
+        }
+        if tw["can_send"].as_bool() == Some(false) {
+            println!("            to chat: open {base}/api/auth/login?scopes=chatsend");
+        }
+    } else {
+        println!("  twitch    not linked — open {base}/api/auth/login");
+    }
+    let k = &me["kick"];
+    if k["linked"].as_bool() == Some(true) {
+        println!("  kick      {}", s(&k["login"]).unwrap_or_default());
+    } else if want_kick {
+        println!("  kick      not linked yet — open {base}/api/auth/kick/login, then you can chat on kick from here");
+    } else {
+        println!("  kick      not linked (heatsync-tui login kick shows how)");
+    }
+}
+
+/// `heatsync-tui logout` — kill the login on the server, then delete the file.
+pub fn logout() -> std::io::Result<()> {
+    let Some(s) = hsauth::load_session() else {
+        println!("not logged in");
+        return Ok(());
+    };
+    let client = hsauth::Client::new(&s, std::sync::Arc::new(hsauth::UreqTransport));
+    let revoked = client.revoke();
+    let removed = hsauth::delete_session();
+    match (revoked, removed) {
+        (true, true) => println!("logged out ✓"),
+        (false, true) => println!(
+            "logged out here. heatsync couldn't be reached, so also run: heatsync.org/cli → \"log all out\""
+        ),
+        (_, false) => {
+            eprintln!("could not delete the saved login");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+/// `heatsync-tui status` — who is logged in and what they can do. if an admin
+/// token is configured it also prints mellen's admin glance (mod queue, reports,
+/// NCMEC backlog, capacity); no vanity concurrent-user count on purpose.
 pub fn status() -> std::io::Result<()> {
+    let base = hsauth::base_url().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    match hsauth::load_session() {
+        None => println!("not logged in — run: heatsync-tui login"),
+        Some(s) => {
+            let client = hsauth::Client::new(&s, std::sync::Arc::new(hsauth::UreqTransport));
+            println!("logged in to {}", s.base);
+            match client.me() {
+                Ok(me) => print_me(&me, &base, false),
+                Err(e) => {
+                    println!("  {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
     let auth = config::load_auth();
     let Some(token) = auth.admin_token else {
-        eprintln!("no admin token — add `admin_token=<jwt>` to ~/.config/heatsync/token");
-        std::process::exit(1);
+        return Ok(());
     };
-
+    println!();
     let mut ok = true;
     let health = http::admin_health(&token);
     let mod_queue = http::admin_mod_queue_total(&token);

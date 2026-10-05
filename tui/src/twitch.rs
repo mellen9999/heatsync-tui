@@ -155,7 +155,7 @@ fn run(user: String, oauth: String, rx: Receiver<Send>, notes: Sender<Note>) {
                 // fail loud: the connection, then every send that never left.
                 let _ = notes.send(Note {
                     channel: None,
-                    text: "twitch auth failed — run: heatsync login".into(),
+                    text: "twitch auth failed — run: heatsync-tui login".into(),
                 });
                 for (chan, _) in gate.fail() {
                     let _ = notes.send(Note {

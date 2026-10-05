@@ -38,9 +38,6 @@ ureq = { version = "2", default-features = false, features = ["tls", "json", "gz
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-width = "0.2"
-# kick oauth (PKCE): S256 challenge + random verifier. pure-rust, tiny.
-sha2 = "0.10"
-getrandom = "0.2"
 # terminal graphics protocols (sixel/halfblock/kitty are core — no chafa C lib,
 # no image-defaults codecs; we hand it already-decoded frames from `image`).
 ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
