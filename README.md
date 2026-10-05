@@ -13,7 +13,7 @@ heatsync-tui login           # set up sending (see below)
 ```
 
 keys: `j`/`k` scroll · `h`/`l` (or `j`/`k` with a side tab bar) switch channel ·
-`i` compose · `o` join · `m` manage · `x` close · `T` move tab bar · `space` pause · `q` quit.
+`i` compose · `o` pick a live channel · `m` manage · `x` close · `T` move tab bar · `space` pause · `q` quit.
 open channels + tab-bar position persist in `~/.config/heatsync/config`.
 
 ## sending

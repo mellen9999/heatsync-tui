@@ -369,6 +369,16 @@ impl Client {
         }
     }
 
+    /// the streams live among the channels you follow (`/api/cli/live/following`).
+    /// None for anything but a clean answer — a dead login (401), a down server
+    /// — so the picker just has no following section, never an error.
+    pub fn following(&self) -> Option<Vec<Value>> {
+        match self.call("GET", "/api/cli/live/following", None) {
+            Ok((200, v)) => v.get("streams")?.as_array().cloned(),
+            _ => None,
+        }
+    }
+
     pub fn rotate(&self) -> Result<Session, String> {
         let (st, v) = self.call("POST", "/api/cli/rotate", Some(json!({})))?;
         match (st, v.get("token").and_then(Value::as_str)) {
@@ -686,6 +696,26 @@ mod tests {
             ),
             f.clone(),
         )
+    }
+
+    #[test]
+    fn following_reads_streams_and_goes_quiet_on_anything_else() {
+        let ok = json!({"streams": [{"username": "a", "platform": "twitch"}]});
+        let f = Fake::new(vec![
+            Ok((200, ok)),
+            Ok((401, json!({"error": "login again"}))),
+            Ok((200, json!({"nope": 1}))),
+            Err("down".into()),
+        ]);
+        let c = client(&f);
+        assert_eq!(c.following().map(|v| v.len()), Some(1));
+        assert!(c.following().is_none());
+        assert!(c.following().is_none());
+        assert!(c.following().is_none());
+        let seen = f.seen.lock().unwrap();
+        assert_eq!(seen[0].0, "GET");
+        assert_eq!(seen[0].1, "https://h.test/api/cli/live/following");
+        assert_eq!(seen[0].2.as_deref(), Some("hscli_SECRET"));
     }
 
     #[test]

@@ -16,6 +16,7 @@ mod kick;
 mod modcmd;
 mod net;
 mod palette;
+mod picker;
 mod twitch;
 
 // The editing model lives in core now, so a gui can share it. Imported under
@@ -53,19 +54,20 @@ enum Feed {
     },
 }
 
-/// modes: switch channels in Normal, type a message in Insert, type a channel
-/// to join in Join, or manage channels rover-style in Manage. SlotPick/SlotEdit
+/// modes: switch channels in Normal, type a message in Insert, pick a live channel
+/// in Pick, or manage channels rover-style in Manage. SlotPick/SlotEdit
 /// are Manage sub-modes: pick one of the t/k/y source slots, then retype it.
 #[derive(Clone, Copy, PartialEq)]
 enum InputMode {
     Normal,
     Insert,
-    Join,
     Manage,
     /// e pressed in Manage — waiting for t/k/y to choose which slot to edit.
     SlotPick,
     /// typing a new name for one platform slot of the row under the cursor.
     SlotEdit(Platform),
+    /// the live-channel picker (`o`).
+    Pick,
 }
 
 struct App {
@@ -108,6 +110,13 @@ struct App {
     // merged in behind whatever live lines have already landed.
     hist_tx: Sender<(Platform, String, Vec<Message>)>,
     hist_rx: Receiver<(Platform, String, Vec<Message>)>,
+    /// the channel picker: its state while open, the last fetch (reused for
+    /// 30s), and the thread's way back.
+    picker: Option<picker::Picker>,
+    pick_cache: picker::Cache,
+    pick_tx: Sender<picker::Fetched>,
+    pick_rx: Receiver<picker::Fetched>,
+    pick_inflight: bool,
 }
 
 /// which emote backend a channel column should draw with this frame.
@@ -226,6 +235,7 @@ fn main() -> io::Result<()> {
         let (hs_tx, hs_rx) = std::sync::mpsc::channel::<hsauth::Note>();
         let (emote_tx, emote_rx) = std::sync::mpsc::channel();
         let (hist_tx, hist_rx) = std::sync::mpsc::channel();
+        let (pick_tx, pick_rx) = std::sync::mpsc::channel();
         App {
             channels: mock::channels(),
             emotes: (0..mock::channels().len())
@@ -256,6 +266,11 @@ fn main() -> io::Result<()> {
             emote_rx,
             hist_tx,
             hist_rx,
+            picker: None,
+            pick_cache: picker::Cache(None),
+            pick_tx,
+            pick_rx,
+            pick_inflight: false,
         }
     } else {
         build_live(&chan_args, cfg.tab_pos, cfg.channels)
@@ -358,6 +373,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
     };
     spawn_global_emotes(&emote_tx);
     let (hs_tx, hs_rx) = std::sync::mpsc::channel::<hsauth::Note>();
+    let (pick_tx, pick_rx) = std::sync::mpsc::channel();
     App {
         channels,
         emotes,
@@ -390,6 +406,11 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         emote_rx,
         hist_tx,
         hist_rx,
+        picker: None,
+        pick_cache: picker::Cache(None),
+        pick_tx,
+        pick_rx,
+        pick_inflight: false,
     }
 }
 
@@ -594,6 +615,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         drain_history(&mut app);
         drain_twitch(&mut app);
         drain_hs(&mut app);
+        drain_picker(&mut app);
         // the focused tab is on screen — whatever it holds is now seen.
         if let Some(ch) = app.channels.get_mut(app.focus) {
             ch.mark_seen();
@@ -686,7 +708,7 @@ enum Flow {
 }
 
 /// dispatch a keypress by mode. Normal = navigation; Insert = compose a message;
-/// Join = type a channel to open, Search = type a `/` pattern. h/l always change
+/// Pick = the live-channel picker, Search = type a `/` pattern. h/l always change
 /// channel; j/k are cursor motion, except on a vertical tab bar where (in
 /// normal mode) they walk the channel list the eye is looking at.
 fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
@@ -723,18 +745,7 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                 edit::Act::Leave => app.mode = InputMode::Normal,
             }
         }
-        InputMode::Join => match k.code {
-            KeyCode::Esc => {
-                app.mode = InputMode::Normal;
-                app.input.clear();
-            }
-            KeyCode::Enter => join_channel(app),
-            KeyCode::Backspace => {
-                app.input.pop();
-            }
-            KeyCode::Char(c) => app.input.push(c),
-            _ => {}
-        },
+        InputMode::Pick => pick_key(app, k),
         // rover-style channel manager: j/k move, enter open, a add, x leave,
         // e edit slots, K/J reorder, esc back.
         InputMode::Manage => {
@@ -756,10 +767,7 @@ fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                     }
                 }
                 // o joins here too — same key as normal mode.
-                KeyCode::Char('a') | KeyCode::Char('o') => {
-                    app.mode = InputMode::Join;
-                    app.input.clear();
-                }
+                KeyCode::Char('a') | KeyCode::Char('o') => open_picker(app),
                 KeyCode::Char('x') => manage_delete(app),
                 KeyCode::Char('e') => {
                     if !app.channels.is_empty() {
@@ -819,9 +827,7 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             Flow::Continue
         }
         KeyCode::Char('o') => {
-            app.mode = InputMode::Join;
-            app.input.clear();
-            app.status = None;
+            open_picker(app);
             Flow::Continue
         }
         KeyCode::Char('x') => {
@@ -871,13 +877,79 @@ fn prev_tab(app: &mut App) {
     }
 }
 
-/// open a new channel tab from the Join input (`name` or `kick:name`). subscribes
-/// over the live WS immediately; the emote set loads off-thread (never blocks).
-fn join_channel(app: &mut App) {
-    let tok = app.input.trim().to_string();
-    app.mode = InputMode::Normal;
-    app.input.clear();
-    open_channel(app, &tok);
+/// `o`: open the picker. a copy fetched under 30s ago is used as is; an older
+/// one shows while a fresh fetch runs off-thread.
+fn open_picker(app: &mut App) {
+    app.status = None;
+    app.mode = InputMode::Pick;
+    if let Some(f) = app.pick_cache.fresh() {
+        app.picker = Some(picker::Picker::new(Some(f.clone()), false));
+        return;
+    }
+    app.picker = Some(picker::Picker::new(app.pick_cache.any().cloned(), true));
+    if app.pick_inflight {
+        return;
+    }
+    app.pick_inflight = true;
+    let mine: Vec<(Platform, String)> = app
+        .channels
+        .iter()
+        .flat_map(|c| c.subs().map(|(p, n)| (p, n.to_string())))
+        .collect();
+    let tx = app.pick_tx.clone();
+    let hs = app.hs.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(picker::fetch(&mine, hs.as_ref()));
+    });
+}
+
+fn drain_picker(app: &mut App) {
+    while let Ok(f) = app.pick_rx.try_recv() {
+        app.pick_inflight = false;
+        // a failed fetch must not pin an empty list for 30s.
+        if f.error.is_none() {
+            app.pick_cache = picker::Cache(Some((Instant::now(), f.clone())));
+        }
+        if let Some(p) = &mut app.picker {
+            p.set(f);
+        }
+    }
+}
+
+fn pick_key(app: &mut App, k: crossterm::event::KeyEvent) {
+    let Some(p) = &mut app.picker else {
+        app.mode = InputMode::Normal;
+        return;
+    };
+    match p.key(k) {
+        picker::Action::None => {}
+        picker::Action::Close => {
+            app.picker = None;
+            app.mode = InputMode::Normal;
+        }
+        picker::Action::Join(spec) => {
+            app.picker = None;
+            app.mode = InputMode::Normal;
+            open_channel(app, &spec);
+        }
+        picker::Action::Merge(spec) => {
+            app.picker = None;
+            app.mode = InputMode::Normal;
+            // the current tab's own sources + the new one: open_channel folds
+            // the extras into the existing tab.
+            let cur: Vec<String> = app
+                .channels
+                .get(app.focus)
+                .map(|c| c.subs().map(|(p, n)| picker::spec_of(p, n)).collect())
+                .unwrap_or_default();
+            let tok = if cur.is_empty() {
+                spec
+            } else {
+                format!("{}+{spec}", cur.join("+"))
+            };
+            open_channel(app, &tok);
+        }
+    }
 }
 
 /// open (or focus, if already open) a tab by `name` / `kick:name` / `yt:id`,
@@ -1608,6 +1680,12 @@ fn ui(f: &mut Frame, app: &App) {
     .areas(f.area());
     if preview_h > 0 {
         draw_preview(f, preview, app, mode);
+    }
+
+    if let (InputMode::Pick, Some(p)) = (app.mode, &app.picker) {
+        f.render_widget(Paragraph::new(p.lines(main.width, main.height)), main);
+        draw_footer(f, footer, app, app.channels.len());
+        return;
     }
 
     if matches!(
@@ -2442,15 +2520,17 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
-    // Join mode → type a channel to open.
-    if app.mode == InputMode::Join {
-        let spans = vec![
-            Span::styled(" join ", palette::TAG),
-            Span::styled(" ❯ ", palette::TEXT),
-            Span::styled(app.input.clone(), palette::TEXT),
-            Span::styled("\u{2588}", palette::TEXT),
-            Span::styled("   name · kick:name · yt:video", palette::DIM),
-        ];
+    if app.mode == InputMode::Pick {
+        let mut spans = vec![Span::styled(" pick ", tag), Span::raw("  ")];
+        for pair in [
+            hint("type", "filter"),
+            hint("↑↓", "move"),
+            hint("enter", "join"),
+            hint("+", "merge"),
+            hint("esc", "close"),
+        ] {
+            spans.extend(pair);
+        }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
@@ -2545,7 +2625,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     for pair in [
         hint("jk", "chan"),
         hint("i", "say"),
-        hint("o", "join"),
+        hint("o", "pick"),
         hint("m", "manage"),
         hint("q", "quit"),
     ] {

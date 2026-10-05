@@ -228,6 +228,63 @@ pub fn hot(limit: u32, hours: u32) -> Option<HotPage> {
     agent().get(&url).call().ok()?.into_json().ok()
 }
 
+// ---- live lists (the channel picker) ---------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveStream {
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub viewer_count: u64,
+    #[serde(default)]
+    pub video_id: Option<String>,
+    #[serde(default)]
+    pub platform_usernames: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LivePage {
+    #[serde(default)]
+    streams: Vec<LiveStream>,
+}
+
+/// `/api/live/top` — the busiest live streams across twitch/kick/youtube.
+pub fn live_top(limit: u32) -> Option<Vec<LiveStream>> {
+    let url = format!("{BASE}/api/live/top?limit={limit}&sort=viewers");
+    let page: LivePage = agent().get(&url).call().ok()?.into_json().ok()?;
+    Some(page.streams)
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveStatus {
+    #[serde(default)]
+    live: Vec<String>,
+    #[serde(default, rename = "kickLive")]
+    kick_live: Vec<String>,
+}
+
+/// `/api/platform/live-status` — which of these twitch / kick channels are live
+/// right now (the server caps each list at 20). names only, no viewer counts.
+pub fn live_status(twitch: &[String], kick: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+    if twitch.is_empty() && kick.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let url = format!(
+        "{BASE}/api/platform/live-status?channels={}&kick_channels={}",
+        urlencode(&twitch.join(",")),
+        urlencode(&kick.join(","))
+    );
+    let st: LiveStatus = agent().get(&url).call().ok()?.into_json().ok()?;
+    Some((st.live, st.kick_live))
+}
+
 // ---- admin status (CLI, mellen-only) --------------------------------------
 
 #[derive(Debug, Deserialize)]
