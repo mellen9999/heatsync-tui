@@ -1,5 +1,5 @@
 //! the one place colors live: the 8 ansi names (so the user's terminal palette
-//! rules) plus vt320 attributes. nothing else in the tui names a color. the one
+//! rules) plus vt320 attributes. nothing else in the tui names a color.
 //! non-ansi colors allowed: the twitch marker, the read-tab gray, and a future
 //! [H] marker.
 
