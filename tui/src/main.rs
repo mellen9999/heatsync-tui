@@ -8,6 +8,7 @@
 #[allow(dead_code)]
 mod cli;
 mod config;
+mod drawlog;
 mod emote;
 mod hsauth;
 mod http;
@@ -17,6 +18,7 @@ mod modcmd;
 mod net;
 mod palette;
 mod picker;
+mod sched;
 mod twitch;
 
 // The editing model lives in core now, so a gui can share it. Imported under
@@ -620,6 +622,12 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     // instead of queueing writes the terminal renders as tearing. self-tuning, so
     // no protocol gets a hardcoded fps penalty.
     let mut draw_cost = Duration::ZERO;
+    let mut dlog = drawlog::DrawLog::from_env();
+    let mut gate = sched::ChatGate::default();
+    // true when something visible may have changed since the last draw: a key,
+    // the data tick, or a batch of chat. the 50ms look-for-chat wakes in between
+    // draw nothing, so they cost no bytes on the wire.
+    let mut woke = true;
     loop {
         drain_emotes(&mut app);
         drain_history(&mut app);
@@ -634,8 +642,13 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
         // animation cadence that's within one frame of arrival, never parked
         // until the next data tick. the tick below keeps only the slow work
         // (heat decay, the mock driver, the focused-channel prefetch sweep).
-        if !app.paused {
-            drain_feed(&mut app);
+        // throttled by the gate (see sched.rs): a burst is applied as one batch
+        // per gap, wider while typing, so keys repaint only the input line.
+        let now = Instant::now();
+        let mut dirty = woke;
+        if !app.paused && gate.due(now) && drain_feed(&mut app) {
+            gate.mark(now);
+            dirty = true;
         }
         pump_loads(&mut app);
         // composer preview: load images for emotes in the draft as it's typed
@@ -648,37 +661,40 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             } = &mut app;
             request_stacks(store, fb, &emotes[focus], &text);
         }
-        // snapshot the animation clock + reset the per-draw blit budget, so every
-        // emote in this frame is sampled at the same instant.
-        if let Some(store) = &app.store {
-            store.begin_frame();
-        }
-        let drew_at = Instant::now();
-        // synchronized output (DECSET 2026): the terminal holds presentation
-        // until the frame is complete, so a frame's blits land at once instead
-        // of streaming in as visible tearing. foot/kitty/wezterm honour it.
-        //
-        // NOT inside tmux. tmux doesn't pass the mode through — it implements
-        // it, and its implementation repaints the WHOLE pane when the frame
-        // ends. our emotes reach the terminal as passthrough, which tmux cannot
-        // see, so that repaint paints tmux's own blank cells straight over
-        // every image we just drew. wrapping frames in it inside tmux means no
-        // emote ever survives the frame it was drawn in.
-        if sync {
-            crossterm::execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
-        }
-        let drew = terminal.draw(|f| ui(f, &app));
-        if sync {
-            crossterm::execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
-        }
-        drew?;
-        // exponential moving average — one slow frame shouldn't throttle us, a
-        // sustained slow terminal should.
-        draw_cost = (draw_cost * 3 + drew_at.elapsed()) / 4;
-        // console tier: paint emote pixels onto the reserved cells now that the
-        // text has flushed. terminal tiers draw inline during the frame above.
-        if let Some(fb) = &app.fb {
-            fb.blit();
+        if dirty || emote_mode(&app).next_flip_in().is_some() {
+            // snapshot the animation clock + reset the per-draw blit budget, so every
+            // emote in this frame is sampled at the same instant.
+            if let Some(store) = &app.store {
+                store.begin_frame();
+            }
+            let drew_at = Instant::now();
+            // synchronized output (DECSET 2026): the terminal holds presentation
+            // until the frame is complete, so a frame's blits land at once instead
+            // of streaming in as visible tearing. foot/kitty/wezterm honour it.
+            //
+            // NOT inside tmux. tmux doesn't pass the mode through — it implements
+            // it, and its implementation repaints the WHOLE pane when the frame
+            // ends. our emotes reach the terminal as passthrough, which tmux cannot
+            // see, so that repaint paints tmux's own blank cells straight over
+            // every image we just drew. wrapping frames in it inside tmux means no
+            // emote ever survives the frame it was drawn in.
+            if sync {
+                crossterm::execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
+            }
+            let drew = terminal.draw(|f| ui(f, &app));
+            if sync {
+                crossterm::execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
+            }
+            drew?;
+            dlog.draw();
+            // exponential moving average — one slow frame shouldn't throttle us, a
+            // sustained slow terminal should.
+            draw_cost = (draw_cost * 3 + drew_at.elapsed()) / 4;
+            // console tier: paint emote pixels onto the reserved cells now that the
+            // text has flushed. terminal tiers draw inline during the frame above.
+            if let Some(fb) = &app.fb {
+                fb.blit();
+            }
         }
 
         // sleep until whichever comes first: the data tick, or the exact instant
@@ -692,8 +708,14 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             Some(flip) => flip.max(draw_cost * 2).min(tick_left),
             None => tick_left,
         };
-        if event::poll(wait)? {
+        // wake often enough to pick up chat, but only to look: no draw unless
+        // something arrived (see `dirty`).
+        woke = false;
+        if event::poll(wait.min(sched::POLL))? {
+            woke = true;
             if let Event::Key(k) = event::read()? {
+                gate.note_key(Instant::now());
+                dlog.key();
                 if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat)
                     && handle_key(&mut app, k) == Flow::Quit
                 {
@@ -707,6 +729,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
                 tick_advance(&mut app);
             }
             last = Instant::now();
+            woke = true;
         }
     }
 }
@@ -1391,7 +1414,7 @@ fn request_stacks(
 
 /// drain the live feed into the channel buffers. runs on every event-loop wake,
 /// so a chat line shows on the very next frame instead of the next data tick.
-fn drain_feed(app: &mut App) {
+fn drain_feed(app: &mut App) -> bool {
     let App {
         channels,
         emotes,
@@ -1409,10 +1432,12 @@ fn drain_feed(app: &mut App) {
         connected,
     } = feed
     else {
-        return; // mock advances on the tick — it's a synthetic cadence
+        return false; // mock advances on the tick — it's a synthetic cadence
     };
     let now = start.elapsed().as_millis() as u64;
+    let mut got = false;
     while let Ok(ev) = rx.try_recv() {
+        got = true;
         match ev {
             ChatEvent::Line(l) => {
                 if let Some(i) = channels
@@ -1496,6 +1521,7 @@ fn drain_feed(app: &mut App) {
             }
         }
     }
+    got
 }
 
 /// twitch sender feedback → a system line in the tab it belongs to (so a
@@ -2556,12 +2582,13 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         // read-only only when there's genuinely no send path for this platform:
         // twitch needs the user's own token; kick can also relay via the ws.
         // the mock feed echoes locally, so it always composes.
-        let readonly = match (&app.feed, ch.platform) {
-            (Feed::Mock(_), _) => false,
-            (_, Platform::Twitch) => app.twitch_tx.is_none(),
-            (_, Platform::Kick) => app.kick_tx.is_none() && app.out.is_none(),
-            (_, Platform::Youtube) => app.out.is_none(),
-        };
+        let readonly = !drawlog::enabled()
+            && match (&app.feed, ch.platform) {
+                (Feed::Mock(_), _) => false,
+                (_, Platform::Twitch) => app.twitch_tx.is_none(),
+                (_, Platform::Kick) => app.kick_tx.is_none() && app.out.is_none(),
+                (_, Platform::Youtube) => app.out.is_none(),
+            };
         // the tag names the mode as well as the target, so `esc` never leaves
         // you guessing whether a keystroke will type or command.
         let normal = app.line.mode() == edit::Mode::Normal;
