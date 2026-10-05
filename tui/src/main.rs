@@ -84,6 +84,8 @@ struct App {
     status: Option<String>, // transient one-line notice (send errors, etc.)
     out: Option<net::Tx>,   // outbound channel to the live WS thread
     twitch_tx: Option<std::sync::mpsc::Sender<twitch::Send>>, // direct twitch sender
+    // what the sender has to say back: NOTICE rejections, auth failure.
+    twitch_notes: Option<Receiver<twitch::Note>>,
     kick_tx: Option<std::sync::mpsc::Sender<kick::Send>>, // direct kick sender
     tab_pos: TabPos,
     manage_cursor: usize, // cursor in the Manage view
@@ -233,6 +235,7 @@ fn main() -> io::Result<()> {
             status: None,
             out: None,
             twitch_tx: None,
+            twitch_notes: None,
             kick_tx: None,
             tab_pos: cfg.tab_pos,
             manage_cursor: 0,
@@ -335,9 +338,12 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
     let auth = config::load_auth();
     let me = auth.twitch_user.clone();
     let kick_tx = auth.kick_token.clone().map(kick::spawn);
-    let twitch_tx = match (auth.twitch_user, auth.twitch_oauth) {
-        (Some(u), Some(o)) => Some(twitch::spawn(u, o)),
-        _ => None,
+    let (twitch_tx, twitch_notes) = match (auth.twitch_user, auth.twitch_oauth) {
+        (Some(u), Some(o)) => {
+            let (tx, notes) = twitch::spawn(u, o);
+            (Some(tx), Some(notes))
+        }
+        _ => (None, None),
     };
     spawn_global_emotes(&emote_tx);
     App {
@@ -359,6 +365,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         status: None,
         out: Some(out),
         twitch_tx,
+        twitch_notes,
         kick_tx,
         tab_pos,
         manage_cursor: 0,
@@ -570,6 +577,11 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     loop {
         drain_emotes(&mut app);
         drain_history(&mut app);
+        drain_twitch(&mut app);
+        // the focused tab is on screen — whatever it holds is now seen.
+        if let Some(ch) = app.channels.get_mut(app.focus) {
+            ch.mark_seen();
+        }
         // new chat lines and finished emote loads land on EVERY wake — at the
         // animation cadence that's within one frame of arrival, never parked
         // until the next data tick. the tick below keeps only the slow work
@@ -1136,9 +1148,13 @@ fn send_focused(app: &mut App) -> Flow {
     match platform {
         Platform::Twitch => match &app.twitch_tx {
             Some(tx) => {
-                let _ = tx.send((name.clone(), text));
-                app.line.accept();
-                app.status = Some(format!("sent → {name}"));
+                // a dead sender (auth failed for good) must not look like a send.
+                if tx.send((name.clone(), text)).is_ok() {
+                    app.line.accept();
+                    app.status = Some(format!("sent → {name}"));
+                } else {
+                    app.status = Some("twitch sender stopped — run: heatsync login".into());
+                }
             }
             None => app.status = Some("no twitch token — run: heatsync login".into()),
         },
@@ -1245,6 +1261,7 @@ fn drain_feed(app: &mut App) {
         fb,
         status,
         focus,
+        me,
         ..
     } = app;
     let Feed::Live {
@@ -1286,6 +1303,10 @@ fn drain_feed(app: &mut App) {
                     if i == *focus {
                         request_stacks(store, fb, &emotes[i], &l.content);
                     }
+                    let pinged = l.note.is_none()
+                        && me.as_deref().is_some_and(|me| {
+                            !l.user.eq_ignore_ascii_case(me) && mentions(&l.content, me)
+                        });
                     channels[i].record(
                         Message {
                             platform: l.platform,
@@ -1299,6 +1320,9 @@ fn drain_feed(app: &mut App) {
                         },
                         now,
                     );
+                    if pinged {
+                        channels[i].ping();
+                    }
                 }
             }
             ChatEvent::Connected => *connected = true,
@@ -1316,6 +1340,37 @@ fn drain_feed(app: &mut App) {
                 }
             }
         }
+    }
+}
+
+/// twitch sender feedback → a system line in the tab it belongs to (so a
+/// rejection stays in scrollback) and the status line (so it shows while
+/// composing). connection-wide notes have no tab: status only.
+fn drain_twitch(app: &mut App) {
+    let Some(rx) = &app.twitch_notes else { return };
+    while let Ok(n) = rx.try_recv() {
+        if let Some(name) = &n.channel {
+            if let Some(ch) = app
+                .channels
+                .iter_mut()
+                .find(|c| c.matches(Platform::Twitch, name))
+            {
+                ch.system(Message {
+                    platform: Platform::Twitch,
+                    user: String::new(),
+                    text: String::new(),
+                    color: None,
+                    badges: Vec::new(),
+                    reply_to: None,
+                    note: Some(heatsync_core::Note {
+                        kind: heatsync_core::NoteKind::Notice,
+                        what: n.text.clone(),
+                    }),
+                    heat: 0.0,
+                });
+            }
+        }
+        app.status = Some(n.text);
     }
 }
 
@@ -1485,11 +1540,11 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
 
 /// the channel tab bar — horizontal row (top/bottom) or vertical list (left/right).
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
-    let tab_style = |i: usize, heat: f64| {
+    let tab_style = |i: usize, ch: &Channel| {
         if i == app.focus {
             palette::TAG
         } else {
-            palette::heat(Tier::of(heat))
+            palette::tab(ch.unread())
         }
     };
 
@@ -1517,7 +1572,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
                 height: 1,
             };
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(label, tab_style(i, ch.heat)))),
+                Paragraph::new(Line::from(Span::styled(label, tab_style(i, ch)))),
                 row,
             );
         }
@@ -1532,7 +1587,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
                     plus(ch),
                     ch.heat
                 ),
-                tab_style(i, ch.heat),
+                tab_style(i, ch),
             ));
             spans.push(Span::raw(" "));
         }

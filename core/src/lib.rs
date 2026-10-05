@@ -163,7 +163,19 @@ pub struct Channel {
     /// wall-clock ms of the last heat update — decay is computed against it.
     pub last_ms: u64,
     pub messages: VecDeque<Message>,
+    /// live lines recorded since the tab was last on screen.
+    unread: u32,
+    /// one of them pinged the user.
+    pinged: bool,
     cap: usize,
+}
+
+/// what a tab has waiting, for its color: nothing, chat, or a ping.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unread {
+    None,
+    Chat,
+    Ping,
 }
 
 impl Channel {
@@ -175,8 +187,41 @@ impl Channel {
             heat: 0.0,
             last_ms: 0,
             messages: VecDeque::with_capacity(cap),
+            unread: 0,
+            pinged: false,
             cap,
         }
+    }
+
+    /// the tab's unread state.
+    pub fn unread(&self) -> Unread {
+        if self.pinged {
+            Unread::Ping
+        } else if self.unread > 0 {
+            Unread::Chat
+        } else {
+            Unread::None
+        }
+    }
+
+    /// flag the most recent line as a ping (caller knows who "me" is).
+    pub fn ping(&mut self) {
+        self.pinged = true;
+    }
+
+    /// add a client-side line (a send rejection, a connection notice): keeps the
+    /// cap, but touches neither heat nor unread — it is not chat.
+    pub fn system(&mut self, msg: Message) {
+        if self.messages.len() == self.cap {
+            self.messages.pop_front();
+        }
+        self.messages.push_back(msg);
+    }
+
+    /// the tab is on screen — everything it holds is now seen.
+    pub fn mark_seen(&mut self) {
+        self.unread = 0;
+        self.pinged = false;
     }
 
     /// every source feeding this tab, primary first.
@@ -237,12 +282,34 @@ impl Channel {
             self.messages.pop_front();
         }
         self.messages.push_back(msg);
+        self.unread = self.unread.saturating_add(1);
     }
 }
 
 #[cfg(test)]
 mod channel_tests {
     use super::*;
+
+    #[test]
+    fn unread_goes_none_chat_ping_and_clears_when_seen() {
+        let mut c = Channel::new("x", Platform::Twitch, 8);
+        assert_eq!(c.unread(), Unread::None);
+        c.record(msg("a", "hi"), 1);
+        assert_eq!(c.unread(), Unread::Chat);
+        c.ping();
+        assert_eq!(c.unread(), Unread::Ping);
+        c.record(msg("b", "yo"), 2);
+        assert_eq!(c.unread(), Unread::Ping, "a later plain line does not downgrade a ping");
+        c.mark_seen();
+        assert_eq!(c.unread(), Unread::None);
+    }
+
+    #[test]
+    fn backfill_is_not_unread() {
+        let mut c = Channel::new("x", Platform::Twitch, 8);
+        c.backfill(vec![msg("a", "old")]);
+        assert_eq!(c.unread(), Unread::None);
+    }
 
     fn msg(user: &str, text: &str) -> Message {
         Message {

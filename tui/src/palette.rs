@@ -1,9 +1,10 @@
 //! the one place colors live: the 8 ansi names (so the user's terminal palette
 //! rules) plus vt320 attributes. nothing else in the tui names a color. the one
-//! non-ansi exception allowed is the twitch marker (and a future [H] marker).
+//! non-ansi colors allowed: the twitch marker, the read-tab gray, and a future
+//! [H] marker.
 
 use heatsync_core::heat::{Hue, Look, Tier};
-use heatsync_core::{Badge, NoteKind, Platform};
+use heatsync_core::{Badge, NoteKind, Platform, Unread};
 use ratatui::style::{Color, Modifier, Style};
 
 /// secondary text.
@@ -24,7 +25,20 @@ pub const PING: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD
 pub const TRACK: Style = Style::new().fg(Color::Blue);
 pub const LIVE: Style = Style::new().fg(Color::Green);
 
-/// twitch's brand purple — the only rgb color in the tui.
+/// a tab with nothing unread: the extension's #808080 — the third allowed rgb.
+pub const READ: Color = Color::Rgb(128, 128, 128);
+
+/// a background tab by what it holds: read = gray, unread = white, a ping =
+/// bold red. the focused tab is `TAG` (reversed).
+pub fn tab(u: Unread) -> Style {
+    match u {
+        Unread::None => Style::new().fg(READ),
+        Unread::Chat => TEXT,
+        Unread::Ping => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+    }
+}
+
+/// twitch's brand purple — a non-ansi color (see top).
 pub const TWITCH: Color = Color::Rgb(200, 168, 255);
 
 fn color(h: Hue) -> Color {
@@ -108,5 +122,19 @@ pub fn note(k: NoteKind) -> (&'static str, Style) {
         K::Notice => ("»", s.fg(Color::Cyan)),
         K::Spike => ("▲", s.fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         K::Mod => ("×", s.fg(Color::Red)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_states_read_gray_unread_white_ping_bold_red() {
+        assert_eq!(tab(Unread::None).fg, Some(READ));
+        assert_eq!(tab(Unread::Chat), TEXT);
+        let p = tab(Unread::Ping);
+        assert_eq!(p.fg, Some(Color::Red));
+        assert!(p.add_modifier.contains(Modifier::BOLD));
     }
 }
