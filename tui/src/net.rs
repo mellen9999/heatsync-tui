@@ -61,7 +61,10 @@ pub enum ChatEvent {
     Connected,
     Disconnected,
     Auth(bool),
-    SendResult { ok: bool, error: Option<String> },
+    SendResult {
+        ok: bool,
+        error: Option<String>,
+    },
 }
 
 /// hand one parsed frame upward. false = the receiver is gone.

@@ -97,12 +97,14 @@ pub fn parse(raw: &str) -> Event {
         // carries its platform). twitch stream:sub / stream:sub-gift are
         // deliberately NOT parsed — the IRC usernotice already covers every
         // channel, and connected broadcasters would double-post.
-        "stream:online" | "stream:offline" | "stream:update" | "stream:raid"
-        | "stream:redeem" | "stream:hype-start" | "stream:hype-end" | "moment:spike" => {
+        "stream:online" | "stream:offline" | "stream:update" | "stream:raid" | "stream:redeem"
+        | "stream:hype-start" | "stream:hype-end" | "moment:spike" => {
             stream_line(&v).map(Event::Chat).unwrap_or(Event::Ignore)
         }
         "kick-sub-event" => kick_sub_line(&v).map(Event::Chat).unwrap_or(Event::Ignore),
-        "kick-kicks-event" => kick_kicks_line(&v).map(Event::Chat).unwrap_or(Event::Ignore),
+        "kick-kicks-event" => kick_kicks_line(&v)
+            .map(Event::Chat)
+            .unwrap_or(Event::Ignore),
         "youtube:status" => yt_status_line(&v).map(Event::Chat).unwrap_or(Event::Ignore),
         "kick-chat-message" => v
             .get("data")
@@ -288,8 +290,12 @@ fn usernotice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
     let sub = m.get("subType").and_then(Value::as_str).unwrap_or("");
     let kind = match sub {
         "sub" | "resub" => NoteKind::Sub,
-        "subgift" | "submysterygift" | "giftpaidupgrade" | "primepaidupgrade"
-        | "standardpayforward" | "communitypayforward" => NoteKind::Gift,
+        "subgift"
+        | "submysterygift"
+        | "giftpaidupgrade"
+        | "primepaidupgrade"
+        | "standardpayforward"
+        | "communitypayforward" => NoteKind::Gift,
         "raid" | "unraid" => NoteKind::Raid,
         _ => NoteKind::Notice, // announcement, viewermilestone, future subtypes
     };
@@ -366,7 +372,11 @@ fn clearchat_event(v: &Value) -> Event {
         target,
         None,
         NoteKind::Mod,
-        if matches!(t, Target::All) { "chat cleared".into() } else { label.clone() },
+        if matches!(t, Target::All) {
+            "chat cleared".into()
+        } else {
+            label.clone()
+        },
         String::new(),
     );
     Event::Delete {
@@ -442,7 +452,15 @@ fn stream_line(v: &Value) -> Option<ChatLine> {
             } else {
                 format!("live — {game}")
             };
-            note_line(platform, channel, String::new(), None, NoteKind::Live, what, field(v, "title"))
+            note_line(
+                platform,
+                channel,
+                String::new(),
+                None,
+                NoteKind::Live,
+                what,
+                field(v, "title"),
+            )
         }
         "stream:offline" => note_line(
             platform,
@@ -462,8 +480,20 @@ fn stream_line(v: &Value) -> Option<ChatLine> {
                 } else {
                     format!("{prev} → {game}")
                 };
-                let t = if title != prev_t { title } else { String::new() };
-                note_line(platform, channel, String::new(), None, NoteKind::Category, what, t)
+                let t = if title != prev_t {
+                    title
+                } else {
+                    String::new()
+                };
+                note_line(
+                    platform,
+                    channel,
+                    String::new(),
+                    None,
+                    NoteKind::Category,
+                    what,
+                    t,
+                )
             } else if !title.is_empty() && title != prev_t {
                 note_line(
                     platform,
@@ -489,7 +519,15 @@ fn stream_line(v: &Value) -> Option<ChatLine> {
             } else {
                 format!("raiding {target}")
             };
-            note_line(platform, channel, String::new(), None, NoteKind::Raid, what, String::new())
+            note_line(
+                platform,
+                channel,
+                String::new(),
+                None,
+                NoteKind::Raid,
+                what,
+                String::new(),
+            )
         }
         "stream:redeem" => {
             let title = field(v, "title");
@@ -499,7 +537,15 @@ fn stream_line(v: &Value) -> Option<ChatLine> {
                 (false, _) => format!("redeemed {title}"),
                 _ => "redeemed".to_string(),
             };
-            note_line(platform, channel, field(v, "user"), None, NoteKind::Redeem, what, String::new())
+            note_line(
+                platform,
+                channel,
+                field(v, "user"),
+                None,
+                NoteKind::Redeem,
+                what,
+                String::new(),
+            )
         }
         "stream:hype-start" => note_line(
             platform,
@@ -527,7 +573,15 @@ fn stream_line(v: &Value) -> Option<ChatLine> {
             } else {
                 format!("chat spike — {rate:.0}/s")
             };
-            note_line(platform, channel, String::new(), None, NoteKind::Spike, what, String::new())
+            note_line(
+                platform,
+                channel,
+                String::new(),
+                None,
+                NoteKind::Spike,
+                what,
+                String::new(),
+            )
         }
         _ => None,
     }
@@ -570,7 +624,15 @@ fn kick_sub_line(v: &Value) -> Option<ChatLine> {
             _ => "subscribed".into(),
         };
     }
-    note_line(Platform::Kick, channel, user, None, kind, what, String::new())
+    note_line(
+        Platform::Kick,
+        channel,
+        user,
+        None,
+        kind,
+        what,
+        String::new(),
+    )
 }
 
 /// kick "kicks" gifted (kick's bits) → cheer with the user's message.
@@ -614,7 +676,11 @@ fn yt_status_line(v: &Value) -> Option<ChatLine> {
             };
             (NoteKind::Notice, what, field(v, "title"))
         }
-        "error" => (NoteKind::Notice, "connection error".to_string(), field(v, "error")),
+        "error" => (
+            NoteKind::Notice,
+            "connection error".to_string(),
+            field(v, "error"),
+        ),
         _ => return None,
     };
     note_line(
@@ -1234,7 +1300,10 @@ mod tests {
     #[test]
     fn headline_split_respects_word_boundaries() {
         let mut user = "a".to_string();
-        assert_eq!(split_headline(&mut user, "announcement time"), "announcement time");
+        assert_eq!(
+            split_headline(&mut user, "announcement time"),
+            "announcement time"
+        );
         assert_eq!(user, "", "non-prefixed headline drops the actor");
         let mut user = "Ann".to_string();
         assert_eq!(split_headline(&mut user, "Ann subscribed!"), "subscribed!");

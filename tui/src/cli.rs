@@ -2,6 +2,7 @@
 //! `heatsync log <channel> <date>` · `search <query>` · `hot`. plain stdout,
 //! grep/fzf-friendly. this is the moat chatterino structurally can't match.
 
+use std::io::{BufRead, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use heatsync_core::Platform;
@@ -110,7 +111,7 @@ pub fn hot(args: &[String]) -> std::io::Result<()> {
 
 /// `heatsync-tui login [kick]` — log in with heatsync. prints a code, opens the
 /// approve page, waits for the click, keeps one revocable token at 0600.
-pub fn login(kick: bool) -> std::io::Result<()> {
+pub fn login(kick: bool) -> std::io::Result<bool> {
     let base = match hsauth::base_url() {
         Ok(b) => b,
         Err(e) => {
@@ -155,13 +156,109 @@ pub fn login(kick: bool) -> std::io::Result<()> {
         eprintln!("logged in, but could not save the login: {e}");
         std::process::exit(1);
     }
-    println!("logged in ✓\n");
     let client = hsauth::Client::new(&session, std::sync::Arc::new(hsauth::UreqTransport));
-    match client.me() {
-        Ok(me) => print_me(&me, &base, kick),
-        Err(e) => println!("{e}"),
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let stdin = std::io::stdin();
+    Ok(finish_login(
+        &client,
+        &base,
+        kick,
+        tty,
+        &mut stdin.lock(),
+        &mut open_browser,
+    ))
+}
+
+/// what to show after a saved login. true = the caller should open the chat ui
+/// (interactive terminals only; scripts get the printout and a clean exit).
+fn finish_login(
+    client: &hsauth::Client,
+    base: &str,
+    kick: bool,
+    tty: bool,
+    input: &mut dyn BufRead,
+    open: &mut dyn FnMut(&str),
+) -> bool {
+    let me = client.me();
+    if !tty {
+        println!("logged in ✓\n");
     }
-    Ok(())
+    match &me {
+        Ok(me) => {
+            if !tty {
+                print_me(me, base, kick, false);
+            }
+            offer_scopes(&missing_scopes(me, base), tty, input, open);
+            if tty && kick {
+                print_kick(me, base, true);
+            }
+            if tty {
+                println!("logged in as {} — opening chat…", account_name(me));
+            }
+        }
+        Err(e) => {
+            println!("{e}");
+            if tty {
+                println!("logged in — opening chat…");
+            }
+        }
+    }
+    tty
+}
+
+fn account_name(me: &serde_json::Value) -> String {
+    let s = |v: &serde_json::Value| v.as_str().map(str::to_string);
+    s(&me["user"]["display_name"])
+        .or_else(|| s(&me["user"]["username"]))
+        .unwrap_or_else(|| "?".into())
+}
+
+/// the twitch permission packs this terminal still needs: (what, link).
+fn missing_scopes(me: &serde_json::Value, base: &str) -> Vec<(&'static str, String)> {
+    let tw = &me["twitch"];
+    let mut v = vec![];
+    if tw["linked"].as_bool() != Some(true) {
+        return v;
+    }
+    if tw["can_send"].as_bool() == Some(false) {
+        v.push(("chat", format!("{base}/api/auth/login?scopes=chatsend")));
+    }
+    if tw["can_mod"].as_bool() == Some(false) {
+        v.push(("mod", format!("{base}/api/auth/login?scopes=mod")));
+    }
+    v
+}
+
+/// say what twitch still needs, and (on a terminal) offer to open it. default no.
+/// the server takes one permission pack per link, so two needs are two links.
+fn offer_scopes(
+    need: &[(&str, String)],
+    tty: bool,
+    input: &mut dyn BufRead,
+    open: &mut dyn FnMut(&str),
+) {
+    if need.is_empty() {
+        return;
+    }
+    let what: Vec<&str> = need.iter().map(|n| n.0).collect();
+    println!("twitch needs one more ok for {}:", what.join(" + "));
+    for (_, url) in need {
+        println!("  {url}");
+    }
+    if !tty {
+        return;
+    }
+    print!(
+        "open {}? [y/N] ",
+        if need.len() > 1 { "them" } else { "it" }
+    );
+    let _ = std::io::stdout().flush();
+    let mut ans = String::new();
+    if input.read_line(&mut ans).is_ok() && matches!(ans.trim(), "y" | "Y" | "yes") {
+        for (_, url) in need {
+            open(url);
+        }
+    }
 }
 
 /// best effort: only if a launcher exists. the url is already printed.
@@ -179,10 +276,9 @@ fn open_browser(url: &str) {
 }
 
 /// who is logged in and what each platform lets them do. never the token.
-fn print_me(me: &serde_json::Value, base: &str, want_kick: bool) {
+fn print_me(me: &serde_json::Value, base: &str, want_kick: bool, link_hints: bool) {
     let s = |v: &serde_json::Value| v.as_str().map(str::to_string);
-    let name = s(&me["user"]["display_name"]).or_else(|| s(&me["user"]["username"]));
-    println!("  account   {}", name.unwrap_or_else(|| "?".into()));
+    println!("  account   {}", account_name(me));
     let scopes: Vec<String> = me["scopes"]
         .as_array()
         .map(|a| a.iter().filter_map(s).collect())
@@ -197,15 +293,20 @@ fn print_me(me: &serde_json::Value, base: &str, want_kick: bool) {
     let tw = &me["twitch"];
     if tw["linked"].as_bool() == Some(true) {
         println!("  twitch    {}", s(&tw["login"]).unwrap_or_default());
-        if tw["can_mod"].as_bool() == Some(false) {
+        if link_hints && tw["can_mod"].as_bool() == Some(false) {
             println!("            to mod: open {base}/api/auth/login?scopes=mod");
         }
-        if tw["can_send"].as_bool() == Some(false) {
+        if link_hints && tw["can_send"].as_bool() == Some(false) {
             println!("            to chat: open {base}/api/auth/login?scopes=chatsend");
         }
     } else {
         println!("  twitch    not linked — open {base}/api/auth/login");
     }
+    print_kick(me, base, want_kick);
+}
+
+fn print_kick(me: &serde_json::Value, base: &str, want_kick: bool) {
+    let s = |v: &serde_json::Value| v.as_str().map(str::to_string);
     let k = &me["kick"];
     if k["linked"].as_bool() == Some(true) {
         println!("  kick      {}", s(&k["login"]).unwrap_or_default());
@@ -238,6 +339,9 @@ pub fn logout() -> std::io::Result<()> {
     Ok(())
 }
 
+const ADMIN_EXPIRED: &str =
+    "admin glance: admin token expired (~/.config/heatsync/token) — skip or refresh it";
+
 /// `heatsync-tui status` — who is logged in and what they can do. if an admin
 /// token is configured it also prints mellen's admin glance (mod queue, reports,
 /// NCMEC backlog, capacity); no vanity concurrent-user count on purpose.
@@ -252,7 +356,7 @@ pub fn status() -> std::io::Result<()> {
             let client = hsauth::Client::new(&s, std::sync::Arc::new(hsauth::UreqTransport));
             println!("logged in to {}", s.base);
             match client.me() {
-                Ok(me) => print_me(&me, &base, false),
+                Ok(me) => print_me(&me, &base, false, true),
                 Err(e) => {
                     if hsauth::is_logged_out(&e) {
                         hsauth::delete_session();
@@ -268,8 +372,12 @@ pub fn status() -> std::io::Result<()> {
         return Ok(());
     };
     println!();
-    let mut ok = true;
     let health = http::admin_health(&token);
+    if health.is_none() && http::admin_token_rejected(http::BASE, &token) {
+        println!("{ADMIN_EXPIRED}");
+        return Ok(());
+    }
+    let mut ok = true;
     let mod_queue = http::admin_mod_queue_total(&token);
     let reports = http::admin_pending_reports(&token);
     let ncmec = http::admin_ncmec_backlog(&token);
@@ -807,4 +915,102 @@ fn paint_test(mut fb: framebuffer::Framebuffer, xres: u32, yres: u32, line_len: 
     }
     println!("painted an ORANGE block at px(100,100) size 200x100 — holding 5s");
     std::thread::sleep(std::time::Duration::from_secs(5));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+
+    struct Fake(Mutex<Vec<Result<(u16, Value), String>>>);
+    impl hsauth::Transport for Fake {
+        fn call(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&Value>,
+        ) -> Result<(u16, Value), String> {
+            self.0.lock().unwrap().remove(0)
+        }
+    }
+
+    fn client(me: Value) -> hsauth::Client {
+        let s = hsauth::Session::new("hscli_X".into(), "https://h.test".into(), String::new());
+        hsauth::Client::new(&s, Arc::new(Fake(Mutex::new(vec![Ok((200, me))]))))
+    }
+
+    fn me(can_send: bool, can_mod: bool) -> Value {
+        json!({"user": {"display_name": "Mellen"}, "scopes": ["chat"],
+               "twitch": {"linked": true, "login": "m", "can_send": can_send, "can_mod": can_mod},
+               "kick": {"linked": false}})
+    }
+
+    fn run(me_v: Value, tty: bool, answer: &str) -> (bool, Vec<String>) {
+        let mut opened = vec![];
+        let go = finish_login(
+            &client(me_v),
+            "https://h.test",
+            false,
+            tty,
+            &mut answer.as_bytes(),
+            &mut |u| opened.push(u.to_string()),
+        );
+        (go, opened)
+    }
+
+    #[test]
+    fn tty_goes_to_chat_scripts_exit() {
+        assert!(run(me(true, true), true, "").0);
+        assert!(!run(me(true, true), false, "").0);
+    }
+
+    #[test]
+    fn scope_prompt_defaults_to_no_and_opens_both_on_yes() {
+        let (_, o) = run(me(false, false), true, "\n");
+        assert!(o.is_empty());
+        let (_, o) = run(me(false, false), true, "y\n");
+        assert_eq!(
+            o,
+            [
+                "https://h.test/api/auth/login?scopes=chatsend",
+                "https://h.test/api/auth/login?scopes=mod"
+            ]
+        );
+    }
+
+    #[test]
+    fn no_prompt_without_a_tty_and_nothing_when_complete() {
+        // a script never blocks on stdin, even if "y" is sitting there
+        assert!(run(me(false, false), false, "y\n").1.is_empty());
+        assert!(missing_scopes(&me(true, true), "b").is_empty());
+        assert_eq!(missing_scopes(&me(true, false), "b").len(), 1);
+    }
+
+    /// one canned reply per connection, then gone.
+    fn serve(status: &'static str) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut b = [0u8; 1024];
+                let _ = c.read(&mut b);
+                let _ = write!(
+                    c,
+                    "HTTP/1.1 {status}\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}"
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn only_a_clear_no_means_the_admin_token_expired() {
+        assert!(http::admin_token_rejected(&serve("401 Unauthorized"), "t"));
+        assert!(!http::admin_token_rejected(&serve("500 Oops"), "t"));
+        assert!(!http::admin_token_rejected(&serve("200 OK"), "t"));
+        assert!(!http::admin_token_rejected("http://127.0.0.1:1", "t"));
+    }
 }

@@ -17,8 +17,8 @@ mod cadence;
 mod chat;
 mod e2e;
 mod emote;
-mod palette;
 mod paint;
+mod palette;
 
 use std::time::{Duration, Instant};
 
@@ -81,16 +81,9 @@ fn paints() -> Vec<Option<Paint>> {
     vec![
         None,
         None,
-        Some(Paint::still(vec![
-            palette::YELLOW,
-            palette::WHITE,
-        ])),
+        Some(Paint::still(vec![palette::YELLOW, palette::WHITE])),
         Some(Paint::animated(
-            vec![
-                palette::MAGENTA,
-                palette::CYAN,
-                palette::WHITE,
-            ],
+            vec![palette::MAGENTA, palette::CYAN, palette::WHITE],
             0.35,
         )),
     ]

@@ -53,8 +53,10 @@ impl Completion {
 
         // byte-safe: get() refuses a slice that would split a multibyte char
         // (an emote named "🅰x" must not panic the completer).
-        let matches =
-            |c: &str| c.get(..prefix.len()).is_some_and(|h| h.eq_ignore_ascii_case(prefix));
+        let matches = |c: &str| {
+            c.get(..prefix.len())
+                .is_some_and(|h| h.eq_ignore_ascii_case(prefix))
+        };
         let mut items: Vec<String> = Vec::new();
         let mut push = |s: String| {
             if !items.iter().any(|i| i.eq_ignore_ascii_case(&s)) {
@@ -107,12 +109,7 @@ mod tests {
     fn build(text: &str, cursor: usize) -> Option<Completion> {
         let emotes = ["KEKW", "Kappa", "kekHeim", "GAMBA"];
         let users = ["kekuser", "Gamba_Andy", "mellen"];
-        Completion::build(
-            text,
-            cursor,
-            emotes.iter().copied(),
-            users.iter().copied(),
-        )
+        Completion::build(text, cursor, emotes.iter().copied(), users.iter().copied())
     }
 
     #[test]
@@ -146,7 +143,10 @@ mod tests {
     fn at_prefix_completes_users_only_and_keeps_the_at() {
         let mut c = build("yo @ga", 6).unwrap();
         assert_eq!(c.advance(1), (3, 6, "@Gamba_Andy"));
-        assert!(build("yo @kekw", 8).is_none(), "no user matches — emotes excluded");
+        assert!(
+            build("yo @kekw", 8).is_none(),
+            "no user matches — emotes excluded"
+        );
     }
 
     #[test]

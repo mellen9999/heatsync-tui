@@ -57,8 +57,7 @@ pub fn notice_text(msg_id: &str) -> Option<&'static str> {
 /// the `msg-id` tag of an irc line, if it carries tags.
 fn msg_id(line: &str) -> Option<&str> {
     let tags = line.strip_prefix('@')?.split(' ').next()?;
-    tags.split(';')
-        .find_map(|kv| kv.strip_prefix("msg-id="))
+    tags.split(';').find_map(|kv| kv.strip_prefix("msg-id="))
 }
 
 /// turn one irc line into a user-facing note, if it is a NOTICE worth showing:
@@ -67,10 +66,7 @@ fn msg_id(line: &str) -> Option<&str> {
 pub fn classify_notice(line: &str) -> Option<Note> {
     let (_, after) = line.split_once(" NOTICE ")?;
     let (target, text) = after.split_once(" :").unwrap_or((after, ""));
-    let channel = target
-        .trim()
-        .strip_prefix('#')
-        .map(|c| c.to_lowercase());
+    let channel = target.trim().strip_prefix('#').map(|c| c.to_lowercase());
     let text = text.trim_end();
     let id = msg_id(line);
     let text = match id.and_then(notice_text) {
@@ -294,15 +290,32 @@ mod tests {
     #[test]
     fn every_ext_msg_id_has_words() {
         for id in [
-            "msg_followersonly", "msg_followersonly_followed", "msg_followersonly_zero",
-            "msg_subsonly", "msg_emoteonly", "msg_slowmode", "msg_r9k", "msg_duplicate",
-            "msg_banned", "msg_timedout", "msg_rejected", "msg_rejected_mandatory",
-            "msg_channel_suspended", "msg_channel_blocked", "msg_verified_email",
-            "msg_requires_verified_phone_number", "no_permission", "unrecognized_cmd", "tos_ban",
+            "msg_followersonly",
+            "msg_followersonly_followed",
+            "msg_followersonly_zero",
+            "msg_subsonly",
+            "msg_emoteonly",
+            "msg_slowmode",
+            "msg_r9k",
+            "msg_duplicate",
+            "msg_banned",
+            "msg_timedout",
+            "msg_rejected",
+            "msg_rejected_mandatory",
+            "msg_channel_suspended",
+            "msg_channel_blocked",
+            "msg_verified_email",
+            "msg_requires_verified_phone_number",
+            "no_permission",
+            "unrecognized_cmd",
+            "tos_ban",
         ] {
             assert!(notice_text(id).is_some(), "{id}");
         }
-        assert_eq!(notice_text("msg_slowmode"), Some("slow mode — please wait a moment"));
+        assert_eq!(
+            notice_text("msg_slowmode"),
+            Some("slow mode — please wait a moment")
+        );
         assert_eq!(notice_text("host_on"), None);
     }
 
@@ -322,15 +335,27 @@ mod tests {
     fn unknown_refusals_pass_twitchs_own_words_but_chatter_stays_quiet() {
         let l = "@msg-id=msg_something_new :tmi.twitch.tv NOTICE #c :Nope : really.";
         assert_eq!(classify_notice(l).unwrap().text, "twitch: Nope : really.");
-        assert_eq!(classify_notice("@msg-id=host_on :tmi.twitch.tv NOTICE #c :Now hosting x."), None);
+        assert_eq!(
+            classify_notice("@msg-id=host_on :tmi.twitch.tv NOTICE #c :Now hosting x."),
+            None
+        );
         assert_eq!(classify_notice(":tmi.twitch.tv 001 me :Welcome"), None);
-        assert_eq!(classify_notice("@msg-id=msg_banned :tmi.twitch.tv NOTICE * :x").unwrap().channel, None);
+        assert_eq!(
+            classify_notice("@msg-id=msg_banned :tmi.twitch.tv NOTICE * :x")
+                .unwrap()
+                .channel,
+            None
+        );
     }
 
     #[test]
     fn auth_failure_and_welcome_detection() {
-        assert!(is_auth_failure(":tmi.twitch.tv NOTICE * :Login authentication failed"));
-        assert!(is_auth_failure(":tmi.twitch.tv NOTICE * :Improperly formatted auth"));
+        assert!(is_auth_failure(
+            ":tmi.twitch.tv NOTICE * :Login authentication failed"
+        ));
+        assert!(is_auth_failure(
+            ":tmi.twitch.tv NOTICE * :Improperly formatted auth"
+        ));
         assert!(is_welcome(":tmi.twitch.tv 001 me :Welcome, GLHF!"));
         assert!(!is_welcome("PING :tmi.twitch.tv"));
     }

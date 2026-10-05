@@ -26,7 +26,12 @@ pub struct Look {
 
 impl Look {
     pub const fn new(hue: Hue) -> Look {
-        Look { hue, bold: false, reversed: false, blink: false }
+        Look {
+            hue,
+            bold: false,
+            reversed: false,
+            blink: false,
+        }
     }
     pub const fn bold(mut self) -> Look {
         self.bold = true;
@@ -137,7 +142,14 @@ mod tests {
     fn ladder_escalates_and_blinks_only_at_the_top() {
         assert_eq!(Tier::Cold.look(), Look::new(Hue::White));
         assert_eq!(Tier::Erupting.look(), Look::new(Hue::Red).bold());
-        for t in [Tier::Zero, Tier::Cold, Tier::Spark, Tier::Warm, Tier::Hot, Tier::Erupting] {
+        for t in [
+            Tier::Zero,
+            Tier::Cold,
+            Tier::Spark,
+            Tier::Warm,
+            Tier::Hot,
+            Tier::Erupting,
+        ] {
             assert!(!t.look().blink && !t.look().reversed);
         }
         assert!(Tier::Mythic.look().blink && Tier::Mythic.look().reversed);

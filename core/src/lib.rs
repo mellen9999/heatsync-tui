@@ -332,7 +332,11 @@ mod channel_tests {
         c.ping();
         assert_eq!(c.unread(), Unread::Ping);
         c.record(msg("b", "yo"), 2);
-        assert_eq!(c.unread(), Unread::Ping, "a later plain line does not downgrade a ping");
+        assert_eq!(
+            c.unread(),
+            Unread::Ping,
+            "a later plain line does not downgrade a ping"
+        );
         c.mark_seen();
         assert_eq!(c.unread(), Unread::None);
     }
@@ -358,9 +362,16 @@ mod channel_tests {
             m.id = Some(format!("id{i}"));
             c.record(m, 1);
         }
-        assert_eq!(c.apply(&del(proto::Target::Msg("id1".into()), "deleted")), 1);
+        assert_eq!(
+            c.apply(&del(proto::Target::Msg("id1".into()), "deleted")),
+            1
+        );
         assert_eq!(gone_after(&c), vec![None, Some("deleted".into()), None]);
-        assert_eq!(c.apply(&del(proto::Target::Msg("id1".into()), "deleted")), 0, "already marked");
+        assert_eq!(
+            c.apply(&del(proto::Target::Msg("id1".into()), "deleted")),
+            0,
+            "already marked"
+        );
     }
 
     #[test]
@@ -369,10 +380,16 @@ mod channel_tests {
         c.record(msg("Troll", "a"), 1);
         c.record(msg("other", "b"), 1);
         let mut ev = msg("troll", "");
-        ev.note = Some(Note { kind: NoteKind::Sub, what: "subbed".into() });
+        ev.note = Some(Note {
+            kind: NoteKind::Sub,
+            what: "subbed".into(),
+        });
         c.record(ev, 1);
         c.record(msg("TROLL", "c"), 1);
-        assert_eq!(c.apply(&del(proto::Target::User("troll".into()), "timed out 10m")), 2);
+        assert_eq!(
+            c.apply(&del(proto::Target::User("troll".into()), "timed out 10m")),
+            2
+        );
         let g = gone_after(&c);
         assert_eq!(g[0].as_deref(), Some("timed out 10m"));
         assert_eq!(g[1], None);

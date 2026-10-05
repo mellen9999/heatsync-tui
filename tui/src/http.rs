@@ -9,7 +9,7 @@ use heatsync_core::emote::{EmoteSet, EmoteSetResponse};
 use heatsync_core::Platform;
 use serde::Deserialize;
 
-const BASE: &str = "https://heatsync.org";
+pub const BASE: &str = "https://heatsync.org";
 /// staged for the emote image-render layer (next phase).
 #[allow(dead_code)]
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -338,6 +338,18 @@ fn admin_get<T: for<'de> Deserialize<'de>>(path: &str, token: &str) -> Option<T>
 
 pub fn admin_health(token: &str) -> Option<HealthData> {
     admin_get("/api/admin/health", token)
+}
+
+/// is the admin token itself refused (401/403)? false for a down server or a
+/// good token — only a clear "no" from heatsync counts.
+pub fn admin_token_rejected(base: &str, token: &str) -> bool {
+    matches!(
+        agent()
+            .get(&format!("{base}/api/admin/health"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .call(),
+        Err(ureq::Error::Status(401 | 403, _))
+    )
 }
 
 /// moderation-queue depth (items awaiting review).

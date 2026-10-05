@@ -105,7 +105,10 @@ pub fn badge(b: Badge) -> Style {
         Badge::Founder => s.fg(Color::Black).bg(Color::Yellow),
         Badge::Staff => s.fg(Color::Black).bg(Color::White),
         Badge::Verified => s.fg(Color::Black).bg(Color::Cyan),
-        Badge::Og => s.fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+        Badge::Og => s
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::UNDERLINED),
     }
 }
 

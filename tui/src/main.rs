@@ -197,7 +197,13 @@ fn main() -> io::Result<()> {
         Some("diag") => return cli::diag(&args[1..]),
         Some("render-test") => return cli::render_test(&args[1..]),
         Some("status") => return cli::status(),
-        Some("login") => return cli::login(args.get(1).map(String::as_str) == Some("kick")),
+        Some("login") => {
+            // an interactive login drops you into the chat, same as plain `hs`
+            if !cli::login(args.get(1).map(String::as_str) == Some("kick"))? {
+                return Ok(());
+            }
+            return chat(&[]);
+        }
         Some("logout") => return cli::logout(),
         // The two flags every installed binary is asked first. Without them
         // `heatsync-tui --version` fell through to the TUI, tried to connect to
@@ -214,7 +220,11 @@ fn main() -> io::Result<()> {
         }
         _ => {}
     }
+    chat(&args)
+}
 
+/// the chat ui, for plain `hs` and for the end of an interactive `hs login`.
+fn chat(args: &[String]) -> io::Result<()> {
     // Starting the TUI needs a terminal. Say so plainly instead of panicking
     // out of ratatui's init with `Os { code: 6 }`, which is what a pipe, a cron
     // job or a CI step would otherwise get.
@@ -2462,6 +2472,12 @@ fn hint(k: &'static str, d: &'static str) -> [Span<'static>; 2] {
     ]
 }
 
+/// live feed, no heatsync login: sends and mod tools won't work. the demo feed
+/// never needs one.
+fn logged_out_live(app: &App) -> bool {
+    app.hs.is_none() && matches!(app.feed, Feed::Live { .. })
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     let tag = palette::TAG;
     // Manage mode → rover-style key hints.
@@ -2618,6 +2634,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // truncated away on anything narrower than ~110 columns.
     if let Some(msg) = &app.status {
         spans.push(Span::styled(format!("  {msg}"), palette::WARN));
+    } else if logged_out_live(app) {
+        spans.push(Span::styled(
+            "  not logged in — q then `hs login`",
+            palette::DIM,
+        ));
     }
     // essentials only, one key per action — the full set fits a phone-width
     // terminal.
