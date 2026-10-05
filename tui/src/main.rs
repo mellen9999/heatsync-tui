@@ -1132,6 +1132,8 @@ fn send_focused(app: &mut App) -> Flow {
                 text,
                 color: Some("#ff8700".into()),
                 badges: Vec::new(),
+                id: None,
+                gone: None,
                 reply_to: None,
                 note: None,
                 heat: 0.0,
@@ -1314,6 +1316,8 @@ fn drain_feed(app: &mut App) {
                             text: l.content,
                             color: l.color,
                             badges: l.badges,
+                            id: l.id,
+                            gone: None,
                             reply_to: l.reply_to,
                             note: l.note,
                             heat: 0.0,
@@ -1322,6 +1326,20 @@ fn drain_feed(app: &mut App) {
                     );
                     if pinged {
                         channels[i].ping();
+                    }
+                }
+            }
+            ChatEvent::Delete(d) => {
+                for c in channels.iter_mut() {
+                    // youtube's frame names a video; an empty channel = any tab
+                    // of that platform (the id still has to match a line).
+                    let here = if d.channel.is_empty() {
+                        c.subs().any(|(p, _)| p == d.platform)
+                    } else {
+                        c.matches(d.platform, &d.channel)
+                    };
+                    if here {
+                        c.apply(&d);
                     }
                 }
             }
@@ -1361,6 +1379,8 @@ fn drain_twitch(app: &mut App) {
                     text: String::new(),
                     color: None,
                     badges: Vec::new(),
+                    id: None,
+                    gone: None,
                     reply_to: None,
                     note: Some(heatsync_core::Note {
                         kind: heatsync_core::NoteKind::Notice,
@@ -2136,7 +2156,26 @@ fn layout_message(
         2,
     );
     layout_text(&mut b, &m.text, set, mode);
-    b.finish()
+    match &m.gone {
+        Some(g) => {
+            b.word(&format!("[{g}]"), palette::GONE_TAG);
+            let mut rows = b.finish();
+            strike(&mut rows);
+            rows
+        }
+        None => b.finish(),
+    }
+}
+
+/// a removed line: gray + crossed out, everything but its own `[tag]`.
+fn strike(rows: &mut [RowPlan]) {
+    for r in rows {
+        for sp in &mut r.line.spans {
+            if sp.style != palette::GONE_TAG {
+                sp.style = palette::GONE;
+            }
+        }
+    }
 }
 
 /// `#rrggbb` → terminal color. truecolor terminals get the exact rgb; anything
@@ -2520,6 +2559,8 @@ mod wrap_tests {
             text: text.into(),
             color: None,
             badges: Vec::new(),
+            id: None,
+            gone: None,
             reply_to: None,
             note: None,
             heat: 0.0,
@@ -2536,6 +2577,25 @@ mod wrap_tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_removed_line_is_struck_gray_with_its_own_tag() {
+        let set = EmoteSet::new();
+        let mut m = msg("buy followers");
+        m.gone = Some("timed out 10m".into());
+        let rows = layout_message(&m, &set, EmoteMode::Text, 80, None, false);
+        let spans: Vec<&Span> = rows.iter().flat_map(|r| r.line.spans.iter()).collect();
+        let tag = spans.last().unwrap();
+        assert_eq!(tag.content.trim(), "[timed out 10m]");
+        assert_eq!(tag.style, palette::GONE_TAG);
+        assert!(spans.len() > 1);
+        for sp in &spans[..spans.len() - 1] {
+            assert_eq!(sp.style, palette::GONE, "{:?}", sp.content);
+        }
+        // an untouched line keeps its colors
+        let ok = layout_message(&msg("hi"), &set, EmoteMode::Text, 80, None, false);
+        assert!(ok[0].line.spans.iter().all(|s| s.style != palette::GONE));
     }
 
     #[test]

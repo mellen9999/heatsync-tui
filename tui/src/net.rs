@@ -56,10 +56,36 @@ pub fn spawn(subs: Vec<Sub>, token: Option<String>) -> (Receiver<ChatEvent>, Tx)
 /// what the feed reports upward — chat plus connection state for the status bar.
 pub enum ChatEvent {
     Line(proto::ChatLine),
+    /// a mod removed lines (the mod-log note, if any, arrives as a Line).
+    Delete(proto::Delete),
     Connected,
     Disconnected,
     Auth(bool),
     SendResult { ok: bool, error: Option<String> },
+}
+
+/// hand one parsed frame upward. false = the receiver is gone.
+fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
+    match ev {
+        Event::Chat(l) => tx.send(ChatEvent::Line(l)).is_ok(),
+        Event::Backfill(lines) => lines
+            .into_iter()
+            .all(|l| tx.send(ChatEvent::Line(l)).is_ok()),
+        Event::Delete { line, del } => {
+            line.is_none_or(|l| tx.send(ChatEvent::Line(l)).is_ok())
+                && tx.send(ChatEvent::Delete(del)).is_ok()
+        }
+        Event::Batch(es) => es.into_iter().all(|e| forward(e, tx)),
+        Event::Auth(ok) => {
+            let _ = tx.send(ChatEvent::Auth(ok));
+            true
+        }
+        Event::SendResult { ok, error } => {
+            let _ = tx.send(ChatEvent::SendResult { ok, error });
+            true
+        }
+        Event::Pong | Event::Ignore => true,
+    }
 }
 
 fn run(mut subs: Vec<Sub>, token: Option<String>, tx: Sender<ChatEvent>, out: Receiver<Outbound>) {
@@ -119,27 +145,11 @@ fn session(
     let mut last_hb = Instant::now();
     loop {
         match ws.read() {
-            Ok(WsMsg::Text(t)) => match proto::parse(t.as_str()) {
-                Event::Chat(l) => {
-                    if tx.send(ChatEvent::Line(l)).is_err() {
-                        return SessionEnd::ReceiverGone;
-                    }
+            Ok(WsMsg::Text(t)) => {
+                if !forward(proto::parse(t.as_str()), tx) {
+                    return SessionEnd::ReceiverGone;
                 }
-                Event::Backfill(lines) => {
-                    for l in lines {
-                        if tx.send(ChatEvent::Line(l)).is_err() {
-                            return SessionEnd::ReceiverGone;
-                        }
-                    }
-                }
-                Event::Auth(ok) => {
-                    let _ = tx.send(ChatEvent::Auth(ok));
-                }
-                Event::SendResult { ok, error } => {
-                    let _ = tx.send(ChatEvent::SendResult { ok, error });
-                }
-                _ => {}
-            },
+            }
             Ok(WsMsg::Ping(p)) => {
                 let _ = ws.send(WsMsg::Pong(p));
             }

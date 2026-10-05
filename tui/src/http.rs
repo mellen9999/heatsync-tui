@@ -166,6 +166,8 @@ pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_co
                 text: sanitize::clean(&r.message),
                 color: None,
                 badges: badges_from(r.badges.as_ref()),
+                id: None,
+                gone: None,
                 reply_to: None,
                 note: None,
                 heat: 0.0,

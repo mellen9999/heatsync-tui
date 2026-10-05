@@ -142,6 +142,11 @@ pub struct Message {
     pub badges: Vec<Badge>,
     /// username this message replies to, when the platform sent one.
     pub reply_to: Option<String>,
+    /// the platform's message id, when the relay sent one.
+    pub id: Option<String>,
+    /// set when a mod removed this line: the marker ("deleted", "timed out
+    /// 10m"…). the line stays in scrollback, struck through.
+    pub gone: Option<String>,
     /// set when this line is an event (sub, raid, redemption, live…) rather
     /// than plain chat — it renders as an inline notice.
     pub note: Option<Note>,
@@ -167,6 +172,9 @@ pub struct Channel {
     unread: u32,
     /// one of them pinged the user.
     pinged: bool,
+    /// lines ever appended at the live end — a monotonic clock for "how many
+    /// arrived since", unaffected by the ring evicting old ones.
+    pub seq: u64,
     cap: usize,
 }
 
@@ -189,6 +197,7 @@ impl Channel {
             messages: VecDeque::with_capacity(cap),
             unread: 0,
             pinged: false,
+            seq: 0,
             cap,
         }
     }
@@ -216,6 +225,29 @@ impl Channel {
             self.messages.pop_front();
         }
         self.messages.push_back(msg);
+        self.seq += 1;
+    }
+
+    /// a mod removed lines: mark every matching chat line (events are never
+    /// struck). returns how many were marked. the caller has already routed
+    /// `d` to this tab; platform is checked per line (merged tabs).
+    pub fn apply(&mut self, d: &proto::Delete) -> usize {
+        let mut n = 0;
+        for m in self.messages.iter_mut() {
+            if m.platform != d.platform || m.note.is_some() || m.gone.is_some() {
+                continue;
+            }
+            let hit = match &d.target {
+                proto::Target::Msg(id) => m.id.as_deref() == Some(id.as_str()),
+                proto::Target::User(u) => !m.user.is_empty() && m.user.eq_ignore_ascii_case(u),
+                proto::Target::All => true,
+            };
+            if hit {
+                m.gone = Some(d.label.clone());
+                n += 1;
+            }
+        }
+        n
     }
 
     /// the tab is on screen — everything it holds is now seen.
@@ -282,6 +314,7 @@ impl Channel {
             self.messages.pop_front();
         }
         self.messages.push_back(msg);
+        self.seq += 1;
         self.unread = self.unread.saturating_add(1);
     }
 }
@@ -304,6 +337,71 @@ mod channel_tests {
         assert_eq!(c.unread(), Unread::None);
     }
 
+    fn gone_after(c: &Channel) -> Vec<Option<String>> {
+        c.messages.iter().map(|m| m.gone.clone()).collect()
+    }
+
+    fn del(target: proto::Target, label: &str) -> proto::Delete {
+        proto::Delete {
+            platform: Platform::Twitch,
+            channel: "x".into(),
+            target,
+            label: label.into(),
+        }
+    }
+
+    #[test]
+    fn delete_by_id_marks_only_that_line() {
+        let mut c = Channel::new("x", Platform::Twitch, 8);
+        for (i, t) in ["a", "b", "c"].iter().enumerate() {
+            let mut m = msg("u", t);
+            m.id = Some(format!("id{i}"));
+            c.record(m, 1);
+        }
+        assert_eq!(c.apply(&del(proto::Target::Msg("id1".into()), "deleted")), 1);
+        assert_eq!(gone_after(&c), vec![None, Some("deleted".into()), None]);
+        assert_eq!(c.apply(&del(proto::Target::Msg("id1".into()), "deleted")), 0, "already marked");
+    }
+
+    #[test]
+    fn timeout_marks_all_of_a_users_chat_lines_not_events() {
+        let mut c = Channel::new("x", Platform::Twitch, 8);
+        c.record(msg("Troll", "a"), 1);
+        c.record(msg("other", "b"), 1);
+        let mut ev = msg("troll", "");
+        ev.note = Some(Note { kind: NoteKind::Sub, what: "subbed".into() });
+        c.record(ev, 1);
+        c.record(msg("TROLL", "c"), 1);
+        assert_eq!(c.apply(&del(proto::Target::User("troll".into()), "timed out 10m")), 2);
+        let g = gone_after(&c);
+        assert_eq!(g[0].as_deref(), Some("timed out 10m"));
+        assert_eq!(g[1], None);
+        assert_eq!(g[2], None, "events stay");
+        assert_eq!(g[3].as_deref(), Some("timed out 10m"));
+    }
+
+    #[test]
+    fn clear_marks_everything_on_that_platform_only() {
+        let mut c = Channel::new("x", Platform::Twitch, 8);
+        c.record(msg("a", "1"), 1);
+        let mut k = msg("b", "2");
+        k.platform = Platform::Kick;
+        c.record(k, 1);
+        c.apply(&del(proto::Target::All, "cleared"));
+        let g = gone_after(&c);
+        assert_eq!(g[0].as_deref(), Some("cleared"));
+        assert_eq!(g[1], None);
+    }
+
+    #[test]
+    fn seq_counts_appends_through_eviction() {
+        let mut c = Channel::new("x", Platform::Twitch, 2);
+        for i in 0..5 {
+            c.record(msg("u", &i.to_string()), 1);
+        }
+        assert_eq!((c.seq, c.messages.len()), (5, 2));
+    }
+
     #[test]
     fn backfill_is_not_unread() {
         let mut c = Channel::new("x", Platform::Twitch, 8);
@@ -318,6 +416,8 @@ mod channel_tests {
             text: text.into(),
             color: None,
             badges: Vec::new(),
+            id: None,
+            gone: None,
             reply_to: None,
             note: None,
             heat: 0.0,

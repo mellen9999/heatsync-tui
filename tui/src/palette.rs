@@ -28,6 +28,10 @@ pub const LIVE: Style = Style::new().fg(Color::Green);
 /// a tab with nothing unread: the extension's #808080 — the third allowed rgb.
 pub const READ: Color = Color::Rgb(128, 128, 128);
 
+/// a line a mod removed: gray, struck through; its `[deleted]` tag is gray only.
+pub const GONE: Style = Style::new().fg(READ).add_modifier(Modifier::CROSSED_OUT);
+pub const GONE_TAG: Style = Style::new().fg(READ);
+
 /// a background tab by what it holds: read = gray, unread = white, a ping =
 /// bold red. the focused tab is `TAG` (reversed).
 pub fn tab(u: Unread) -> Style {
@@ -128,6 +132,13 @@ pub fn note(k: NoteKind) -> (&'static str, Style) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gone_is_gray_and_crossed_out_but_its_tag_is_not() {
+        assert_eq!(GONE.fg, Some(READ));
+        assert!(GONE.add_modifier.contains(Modifier::CROSSED_OUT));
+        assert!(!GONE_TAG.add_modifier.contains(Modifier::CROSSED_OUT));
+    }
 
     #[test]
     fn tab_states_read_gray_unread_white_ping_bold_red() {

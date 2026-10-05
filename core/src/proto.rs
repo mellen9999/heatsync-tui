@@ -12,6 +12,8 @@ use crate::{sanitize, Badge, Note, NoteKind, Platform};
 pub struct ChatLine {
     pub platform: Platform,
     pub channel: String,
+    /// the platform's own message id — what a later delete points at.
+    pub id: Option<String>,
     pub user: String,
     pub color: Option<String>,
     pub badges: Vec<Badge>,
@@ -21,11 +23,42 @@ pub struct ChatLine {
     pub content: String,
 }
 
+/// whose lines a moderation event removes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    /// one message, by platform id.
+    Msg(String),
+    /// every line from one user (login or display name, case-insensitive).
+    User(String),
+    /// the whole channel.
+    All,
+}
+
+/// a moderation event: the lines stay on screen, struck through and tagged
+/// with `label` ("deleted", "timed out 10m", "banned", "cleared").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Delete {
+    pub platform: Platform,
+    /// the tab's channel; empty = every channel of `platform` (youtube's
+    /// delete frame is keyed by message id alone).
+    pub channel: String,
+    pub target: Target,
+    pub label: String,
+}
+
 /// what an inbound frame turned into.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Chat(ChatLine),
     Backfill(Vec<ChatLine>),
+    /// lines removed by a mod, plus the mod-log note to show (clearchat has
+    /// one; a single deleted message doesn't).
+    Delete {
+        line: Option<ChatLine>,
+        del: Delete,
+    },
+    /// several events from one frame, in order.
+    Batch(Vec<Event>),
     /// authentication outcome (true = ok).
     Auth(bool),
     /// result of an outbound send: ok, or an error reason.
@@ -48,11 +81,12 @@ pub fn parse(raw: &str) -> Event {
         // the irc:message frame multiplexes every twitch IRC record type —
         // chat, usernotice (subs/gifts/raids/announcements), moderation.
         // roomstate/clearmsg are state we don't surface as lines.
+        "irc:message" if is_irc(&v, "clearmsg") => clearmsg_event(&v),
+        "irc:message" if is_irc(&v, "clearchat") => clearchat_event(&v),
         "irc:message" => v
             .get("message")
             .and_then(|m| match m.get("type").and_then(Value::as_str) {
                 Some("usernotice") => usernotice_line(m, v.get("channel")),
-                Some("clearchat") => clearchat_line(m, v.get("channel")),
                 Some("notice") => notice_line(m, v.get("channel")),
                 Some("privmsg") | None => line_from(m, Platform::Twitch, v.get("channel")),
                 _ => None,
@@ -98,6 +132,7 @@ pub fn parse(raw: &str) -> Event {
                 .unwrap_or_default();
             Event::Backfill(lines)
         }
+        "youtube:delete" => youtube_delete_event(&v),
         "authenticated" => Event::Auth(true),
         "authentication_failed" => Event::Auth(false),
         "chat:send_kick_result" | "chat:send_youtube_result" => Event::SendResult {
@@ -159,6 +194,7 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
     Some(ChatLine {
         platform,
         channel,
+        id: id_of(m),
         user,
         color,
         badges: badges_from(m.get("badges")),
@@ -236,6 +272,7 @@ fn note_line(
     Some(ChatLine {
         platform,
         channel,
+        id: None,
         user,
         color,
         badges: Vec::new(),
@@ -275,27 +312,94 @@ fn usernotice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
     note_line(Platform::Twitch, channel, user, color, kind, what, text)
 }
 
-/// twitch CLEARCHAT → ban / timeout / full clear.
-fn clearchat_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
+fn is_irc(v: &Value, kind: &str) -> bool {
+    v.get("message")
+        .and_then(|m| m.get("type"))
+        .and_then(Value::as_str)
+        == Some(kind)
+}
+
+/// a message's platform id, if the frame carries one.
+fn id_of(m: &Value) -> Option<String> {
+    m.get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(str::to_string)
+}
+
+/// twitch CLEARMSG → one message struck through.
+fn clearmsg_event(v: &Value) -> Event {
+    let m = &v["message"];
+    let id = field(m, "targetMsgId");
+    if id.is_empty() {
+        return Event::Ignore;
+    }
+    Event::Delete {
+        line: None,
+        del: Delete {
+            platform: Platform::Twitch,
+            channel: field(v, "channel"),
+            target: Target::Msg(id),
+            label: "deleted".into(),
+        },
+    }
+}
+
+/// twitch CLEARCHAT → ban / timeout / full clear: a mod-log note, and the
+/// target's lines struck through.
+fn clearchat_event(v: &Value) -> Event {
+    let m = &v["message"];
     let target = field(m, "targetUsername");
-    let what = if target.is_empty() {
-        "chat cleared".to_string()
+    let (label, t) = if target.is_empty() {
+        ("cleared".to_string(), Target::All)
     } else {
-        match m.get("banDuration").and_then(Value::as_u64) {
+        let label = match m.get("banDuration").and_then(Value::as_u64) {
             Some(s) => format!("timed out {}", fmt_secs(s)),
             None => "banned".to_string(),
-        }
+        };
+        (label, Target::User(target.clone()))
     };
-    let channel = channel.and_then(Value::as_str).unwrap_or("").to_string();
-    note_line(
+    let channel = field(v, "channel");
+    let line = note_line(
         Platform::Twitch,
-        channel,
+        channel.clone(),
         target,
         None,
         NoteKind::Mod,
-        what,
+        if matches!(t, Target::All) { "chat cleared".into() } else { label.clone() },
         String::new(),
-    )
+    );
+    Event::Delete {
+        line,
+        del: Delete {
+            platform: Platform::Twitch,
+            channel,
+            target: t,
+            label,
+        },
+    }
+}
+
+/// youtube delete frame: message ids only (no author handle we can match).
+fn youtube_delete_event(v: &Value) -> Event {
+    let ids: Vec<&str> = v
+        .get("messageIds")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let dels: Vec<Event> = ids
+        .into_iter()
+        .map(|id| Event::Delete {
+            line: None,
+            del: Delete {
+                platform: Platform::Youtube,
+                channel: field(v, "videoId"),
+                target: Target::Msg(id.to_string()),
+                label: "deleted".into(),
+            },
+        })
+        .collect();
+    Event::Batch(dels)
 }
 
 /// twitch NOTICE → server line ("this room is now in slow mode").
@@ -581,6 +685,7 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
     Some(ChatLine {
         platform: Platform::Youtube,
         channel: video.to_string(),
+        id: id_of(m),
         user,
         color: color_of(m),
         badges: Vec::new(),
@@ -700,6 +805,7 @@ mod tests {
             Event::Chat(ChatLine {
                 platform: Platform::Twitch,
                 channel: "xqc".into(),
+                id: Some("abc".into()),
                 user: "ChatUser".into(),
                 color: Some("#ff8700".into()),
                 badges: vec![],
@@ -880,43 +986,89 @@ mod tests {
         }
     }
 
-    #[test]
-    fn clearchat_maps_to_timeout_ban_and_clear() {
-        let timeout = r#"{"type":"irc:message","channel":"c","message":{
-            "type":"clearchat","targetUsername":"troll","banDuration":600}}"#;
-        match parse(timeout) {
-            Event::Chat(l) => {
-                assert_eq!(l.user, "troll");
-                assert_eq!(l.note.unwrap().what, "timed out 10m");
-            }
-            _ => panic!(),
-        }
-        let ban = r#"{"type":"irc:message","channel":"c","message":{
-            "type":"clearchat","targetUsername":"troll"}}"#;
-        match parse(ban) {
-            Event::Chat(l) => assert_eq!(l.note.unwrap().what, "banned"),
-            _ => panic!(),
-        }
-        let clear = r#"{"type":"irc:message","channel":"c","message":{"type":"clearchat"}}"#;
-        match parse(clear) {
-            Event::Chat(l) => {
-                assert_eq!(l.user, "");
-                let n = l.note.unwrap();
-                assert_eq!(n.kind, NoteKind::Mod);
-                assert_eq!(n.what, "chat cleared");
-            }
-            _ => panic!(),
+    fn del(raw: &str) -> (Option<ChatLine>, Delete) {
+        match parse(raw) {
+            Event::Delete { line, del } => (line, del),
+            e => panic!("expected delete, got {e:?}"),
         }
     }
 
     #[test]
-    fn roomstate_and_clearmsg_stay_silent() {
+    fn clearchat_maps_to_timeout_ban_and_clear() {
+        let (l, d) = del(r#"{"type":"irc:message","channel":"c","message":{
+            "type":"clearchat","targetUsername":"troll","banDuration":600}}"#);
+        let l = l.unwrap();
+        assert_eq!(l.user, "troll");
+        assert_eq!(l.note.unwrap().what, "timed out 10m");
+        assert_eq!(d.target, Target::User("troll".into()));
+        assert_eq!(d.label, "timed out 10m");
+        assert_eq!(d.channel, "c");
+
+        let (l, d) = del(r#"{"type":"irc:message","channel":"c","message":{
+            "type":"clearchat","targetUsername":"troll"}}"#);
+        assert_eq!(l.unwrap().note.unwrap().what, "banned");
+        assert_eq!(d.label, "banned");
+
+        let (l, d) = del(r#"{"type":"irc:message","channel":"c","message":{"type":"clearchat"}}"#);
+        let l = l.unwrap();
+        assert_eq!(l.user, "");
+        let n = l.note.unwrap();
+        assert_eq!(n.kind, NoteKind::Mod);
+        assert_eq!(n.what, "chat cleared");
+        assert_eq!(d.target, Target::All);
+    }
+
+    #[test]
+    fn clearmsg_targets_one_message_by_id() {
+        let (l, d) = del(r#"{"type":"irc:message","channel":"c","message":{
+            "type":"clearmsg","targetMsgId":"abc-123","login":"troll"}}"#);
+        assert!(l.is_none(), "a single delete adds no mod-log line");
+        assert_eq!(d.target, Target::Msg("abc-123".into()));
+        assert_eq!(d.platform, Platform::Twitch);
+        assert_eq!(d.label, "deleted");
+    }
+
+    #[test]
+    fn youtube_delete_batches_message_ids() {
+        match parse(r#"{"type":"youtube:delete","videoId":"v1","messageIds":["a","b"]}"#) {
+            Event::Batch(es) => {
+                assert_eq!(es.len(), 2);
+                match &es[1] {
+                    Event::Delete { del, .. } => {
+                        assert_eq!(del.target, Target::Msg("b".into()));
+                        assert_eq!(del.channel, "v1");
+                        assert_eq!(del.platform, Platform::Youtube);
+                    }
+                    e => panic!("{e:?}"),
+                }
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn kick_and_youtube_lines_carry_their_ids() {
+        let raw = r##"{"type":"kick-chat-message","data":{
+            "id":"k-1","channel":"c","username":"u","content":"hi"}}"##;
+        match parse(raw) {
+            Event::Chat(l) => assert_eq!(l.id.as_deref(), Some("k-1")),
+            e => panic!("{e:?}"),
+        }
+        let raw = r##"{"type":"youtube:chat","videoId":"v","messages":[{"id":"y-9","user":"a","text":"x"}]}"##;
+        match parse(raw) {
+            Event::Backfill(l) => assert_eq!(l[0].id.as_deref(), Some("y-9")),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn roomstate_stays_silent() {
         let rs = r#"{"type":"irc:message","channel":"c","message":{
             "type":"roomstate","emoteOnly":false,"slow":0}}"#;
         assert_eq!(parse(rs), Event::Ignore);
         let cm = r#"{"type":"irc:message","channel":"c","message":{
-            "type":"clearmsg","targetMsgId":"x"}}"#;
-        assert_eq!(parse(cm), Event::Ignore);
+            "type":"clearmsg","targetMsgId":""}}"#;
+        assert_eq!(parse(cm), Event::Ignore, "no target id, nothing to strike");
     }
 
     #[test]

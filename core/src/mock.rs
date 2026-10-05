@@ -165,6 +165,8 @@ impl Driver {
                         text: text.to_string(),
                         color: None,
                         badges: Vec::new(),
+                        id: None,
+                        gone: None,
                         reply_to: None,
                         note: Some(crate::Note {
                             kind,
@@ -194,6 +196,8 @@ impl Driver {
                             text,
                             color: None,
                             badges,
+                            id: None,
+                            gone: None,
                             reply_to: None,
                             note: None,
                             heat: 0.0,
