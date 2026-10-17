@@ -7,7 +7,7 @@
 
 pkgname=heatsync-tui
 pkgver=0.1.1
-pkgrel=1
+pkgrel=2
 pkgdesc='heat-sorted live multichat in the terminal — twitch + kick, real emotes, vim keys'
 arch=('x86_64' 'aarch64')
 url='https://github.com/mellen9999/heatsync-tui'
