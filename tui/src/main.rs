@@ -22,6 +22,7 @@ mod kick;
 mod layout;
 mod modcmd;
 mod net;
+mod paints;
 mod palette;
 mod picker;
 mod sched;
@@ -172,6 +173,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             pick_tx,
             pick_rx,
             pick_inflight: false,
+            paints: paints::Paints::new(),
         }
     } else {
         build_live(&chan_args, cfg.tab_pos, cfg.channels)
@@ -314,6 +316,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         pick_tx,
         pick_rx,
         pick_inflight: false,
+        paints: paints::Paints::new(),
     }
 }
 

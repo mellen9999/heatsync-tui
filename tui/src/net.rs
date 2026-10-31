@@ -65,6 +65,13 @@ pub enum ChatEvent {
         ok: bool,
         error: Option<String>,
     },
+    /// a heatsync name color changed (paint-space id).
+    Color {
+        id: String,
+        color: String,
+    },
+    /// paints changed for these paint-space ids.
+    Cosmetic(Vec<String>),
 }
 
 /// hand one parsed frame upward. false = the receiver is gone.
@@ -87,6 +94,8 @@ fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
             let _ = tx.send(ChatEvent::SendResult { ok, error });
             true
         }
+        Event::Color { id, color } => tx.send(ChatEvent::Color { id, color }).is_ok(),
+        Event::Cosmetic(ids) => tx.send(ChatEvent::Cosmetic(ids)).is_ok(),
         Event::Pong | Event::Ignore => true,
     }
 }

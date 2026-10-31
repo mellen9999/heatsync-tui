@@ -539,6 +539,7 @@ fn send_focused(app: &mut App) -> Flow {
                 reply_to: None,
                 note: None,
                 heat: 0.0,
+                uid: None,
             },
             now,
         );

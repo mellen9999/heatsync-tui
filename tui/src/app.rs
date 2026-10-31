@@ -2,6 +2,7 @@ use crate::config::TabPos;
 use crate::emote::fb::FbEmotes;
 use crate::emote::render::EmoteStore;
 use crate::net::ChatEvent;
+use crate::paints::Paints;
 use crate::{hsauth, kick, net, picker, twitch};
 use heatsync_core::complete::Completion;
 use heatsync_core::edit;
@@ -83,4 +84,6 @@ pub(crate) struct App {
     pub(crate) pick_tx: Sender<picker::Fetched>,
     pub(crate) pick_rx: Receiver<picker::Fetched>,
     pub(crate) pick_inflight: bool,
+    /// name paints + heatsync name colors, by sender id.
+    pub(crate) paints: Paints,
 }

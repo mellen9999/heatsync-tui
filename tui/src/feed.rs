@@ -156,6 +156,7 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
         status,
         focus,
         me,
+        paints,
         ..
     } = app;
     let Feed::Live {
@@ -196,6 +197,9 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                     {
                         continue;
                     }
+                    if let Some(u) = &l.uid {
+                        paints.want(u);
+                    }
                     if i == *focus {
                         request_stacks(store, fb, &emotes[i], &l.content);
                     }
@@ -215,6 +219,7 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                             reply_to: l.reply_to,
                             note: l.note,
                             heat: 0.0,
+                            uid: None,
                         },
                         now,
                     );
@@ -237,6 +242,8 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                     }
                 }
             }
+            ChatEvent::Color { id, color } => paints.set_color(&id, &color),
+            ChatEvent::Cosmetic(ids) => paints.invalidate(&ids),
             ChatEvent::Connected => *connected = true,
             ChatEvent::Disconnected => *connected = false,
             ChatEvent::Auth(ok) => {
@@ -282,6 +289,7 @@ pub(crate) fn drain_twitch(app: &mut App) {
                         what: n.text.clone(),
                     }),
                     heat: 0.0,
+                    uid: None,
                 });
             }
         }
@@ -319,6 +327,7 @@ pub(crate) fn drain_hs(app: &mut App) {
                     what: n.text.clone(),
                 }),
                 heat: 0.0,
+                uid: None,
             });
         }
         app.status = Some(n.text);
@@ -328,6 +337,7 @@ pub(crate) fn drain_hs(app: &mut App) {
 /// merge finished emote loads into the cache (every wake — a built emote is on
 /// screen the next frame, never parked until the tick).
 pub(crate) fn pump_loads(app: &mut App) {
+    app.paints.pump();
     if let Some(store) = &mut app.store {
         store.pump();
     } else if let Some(fb) = &mut app.fb {

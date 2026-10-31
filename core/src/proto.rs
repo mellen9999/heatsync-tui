@@ -20,6 +20,8 @@ pub struct ChatLine {
     pub reply_to: Option<String>,
     /// set when this line is an event notice, not plain chat.
     pub note: Option<Note>,
+    /// sender id in paint space (see `Message::uid`).
+    pub uid: Option<String>,
     pub content: String,
 }
 
@@ -67,6 +69,13 @@ pub enum Event {
         error: Option<String>,
     },
     Pong,
+    /// `profile:color`: a user's picked name color, by paint-space id.
+    Color {
+        id: String,
+        color: String,
+    },
+    /// `cosmetic:changed`: paints changed for these paint-space ids.
+    Cosmetic(Vec<String>),
     Ignore,
 }
 
@@ -145,6 +154,29 @@ pub fn parse(raw: &str) -> Event {
                 .map(|s| s.to_string()),
         },
         "pong" => Event::Pong,
+        // a user's name color changed on heatsync (paint space id).
+        "profile:color" => match (
+            v.get("userId").and_then(Value::as_str),
+            v.get("color").and_then(color_str),
+        ) {
+            (Some(id), Some(color)) if paint_id("", id).is_some() => Event::Color {
+                id: id.to_string(),
+                color: color.to_string(),
+            },
+            _ => Event::Ignore,
+        },
+        // paints / badges changed for these ids — refetch what's cached.
+        "cosmetic:changed" => Event::Cosmetic(
+            v.get("ids")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .filter_map(|s| paint_id("", s))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
         _ => Event::Ignore,
     }
 }
@@ -208,6 +240,7 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
             .filter(|s| !s.is_empty()),
         note,
         content,
+        uid: uid_of(m, platform),
     })
 }
 
@@ -217,6 +250,42 @@ fn color_of(m: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|s| s.starts_with('#') && (s.len() == 7 || s.len() == 4))
         .map(|s| s.to_string())
+}
+
+/// a `#rrggbb` string.
+fn color_str(v: &Value) -> Option<&str> {
+    v.as_str().filter(|s| {
+        s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+/// a paint-space id: `prefix` + a safe token (the server's id charset), or
+/// `None` for anything that isn't one.
+fn paint_id(prefix: &str, raw: &str) -> Option<String> {
+    let ok = !raw.is_empty()
+        && raw.len() <= 64
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    ok.then(|| format!("{prefix}{raw}"))
+}
+
+/// the sender's paint-space id: twitch's bare user id, kick's `kick_<id>`
+/// (kick ids overlap twitch's range, so they must never go bare). the relay
+/// sends `userId`; kick frames may name it `senderId`.
+fn uid_of(m: &Value, platform: Platform) -> Option<String> {
+    let id = ["userId", "senderId"]
+        .iter()
+        .find_map(|k| match m.get(*k)? {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })?;
+    match platform {
+        Platform::Twitch => paint_id("", &id),
+        Platform::Kick => paint_id("kick_", &id),
+        Platform::Youtube => None,
+    }
 }
 
 /// sanitized string field, empty when absent.
@@ -281,6 +350,7 @@ fn note_line(
         reply_to: None,
         note: Some(Note { kind, what }),
         content,
+        uid: None,
     })
 }
 
@@ -758,6 +828,10 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
         reply_to: None,
         note,
         content,
+        uid: m
+            .get("authorChannelId")
+            .and_then(Value::as_str)
+            .and_then(|c| paint_id("yt_", c)),
     })
 }
 
@@ -878,6 +952,7 @@ mod tests {
                 reply_to: None,
                 note: None,
                 content: "hello GAMBA".into(),
+                uid: None,
             })
         );
     }
@@ -1325,5 +1400,48 @@ mod tests {
         assert!(f.contains(r#""type":"chat:send_youtube""#));
         assert!(f.contains(r#""videoId":"vid123abc""#));
         assert!(f.contains(r#""reqId":"7""#));
+    }
+    #[test]
+    fn sender_ids_land_in_paint_space() {
+        let tw = r#"{"type":"irc:message","channel":"c","message":{
+            "username":"u","content":"x","userId":"12345"}}"#;
+        let Event::Chat(l) = parse(tw) else { panic!() };
+        assert_eq!(l.uid.as_deref(), Some("12345"));
+        // kick ids overlap twitch's range — they never go bare
+        let kick = r#"{"type":"kick-chat-message","data":{"channel":"c","username":"u",
+            "content":"x","senderId":99}}"#;
+        let Event::Chat(l) = parse(kick) else {
+            panic!()
+        };
+        assert_eq!(l.uid.as_deref(), Some("kick_99"));
+        let yt = r#"{"type":"youtube:chat","videoId":"v","messages":[
+            {"user":"u","text":"x","authorChannelId":"UCabc-1"}]}"#;
+        let Event::Backfill(ls) = parse(yt) else {
+            panic!()
+        };
+        assert_eq!(ls[0].uid.as_deref(), Some("yt_UCabc-1"));
+        let bad = r#"{"type":"irc:message","channel":"c","message":{
+            "username":"u","content":"x","userId":"1,2"}}"#;
+        let Event::Chat(l) = parse(bad) else { panic!() };
+        assert_eq!(l.uid, None);
+    }
+
+    #[test]
+    fn color_and_cosmetic_pushes_parse() {
+        let c = r##"{"type":"profile:color","userId":"7","usernames":["a"],"color":"#aabbcc"}"##;
+        assert_eq!(
+            parse(c),
+            Event::Color {
+                id: "7".into(),
+                color: "#aabbcc".into()
+            }
+        );
+        let bad = r#"{"type":"profile:color","userId":"7","color":"red"}"#;
+        assert_eq!(parse(bad), Event::Ignore);
+        let ch = r#"{"type":"cosmetic:changed","ids":["7","kick_9","bad id"]}"#;
+        assert_eq!(
+            parse(ch),
+            Event::Cosmetic(vec!["7".into(), "kick_9".into()])
+        );
     }
 }

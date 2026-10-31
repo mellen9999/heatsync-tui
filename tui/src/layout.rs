@@ -1,7 +1,9 @@
 use crate::emote::fb::FbEmotes;
 use crate::emote::render::{EmoteStore, EMOTE_H};
+use crate::paints::Look;
 use crate::palette;
 use heatsync_core::emote::{segments, EmoteSet, Segment};
+use heatsync_core::paint::Paint;
 use heatsync_core::{Badge, Message, Platform};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -320,6 +322,35 @@ pub(crate) fn layout_text(b: &mut Rows, text: &str, set: &EmoteSet, mode: EmoteM
     }
 }
 
+/// the bold username prefix. a paint colors it per character where the
+/// terminal can show 24-bit color; anywhere else the plain name color stands.
+fn name(b: &mut Rows, user: &str, color: Color, paint: Option<&Paint>) {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let Some(p) = paint.filter(|_| truecolor()) else {
+        let uw = UnicodeWidthStr::width(user) as u16;
+        b.prefix(Span::styled(user.to_string(), bold.fg(color)), uw);
+        return;
+    };
+    let chars: Vec<char> = user.chars().collect();
+    let mut run = String::new();
+    let mut run_w = 0u16;
+    let mut run_rgb = [0u8; 3];
+    for (c, rgb) in chars.iter().zip(p.colors(chars.len())) {
+        if !run.is_empty() && rgb != run_rgb {
+            let fg = Color::Rgb(run_rgb[0], run_rgb[1], run_rgb[2]);
+            b.prefix(Span::styled(std::mem::take(&mut run), bold.fg(fg)), run_w);
+            run_w = 0;
+        }
+        run_rgb = rgb;
+        run.push(*c);
+        run_w += UnicodeWidthChar::width(*c).unwrap_or(0) as u16;
+    }
+    if !run.is_empty() {
+        let fg = Color::Rgb(run_rgb[0], run_rgb[1], run_rgb[2]);
+        b.prefix(Span::styled(run, bold.fg(fg)), run_w);
+    }
+}
+
 /// lay a message out as wrapped visual rows: badges + user prefix on the
 /// first, indented continuations after, emote cells reserved wherever their
 /// stack lands.
@@ -330,12 +361,16 @@ pub(crate) fn layout_message(
     maxw: u16,
     me: Option<&str>,
     tag_platform: bool,
+    look: Option<&Look>,
 ) -> Vec<RowPlan> {
+    // the chat color wins; a heatsync-picked one fills in for a user with none.
     let user_color = m
         .color
         .as_deref()
+        .or(look.and_then(|l| l.color.as_deref()))
         .and_then(parse_hex)
         .unwrap_or(Color::White);
+    let paint = look.and_then(|l| l.paint.as_ref());
     let mut b = Rows::new(maxw);
     // merged tab: a `[T]`/`[K]`/`[Y]` tag in the platform's hue marks each
     // line's origin; wrapped rows hang under the text after it.
@@ -355,14 +390,7 @@ pub(crate) fn layout_message(
         b.prefix(Span::styled(glyph, hue), 1);
         b.prefix(Span::raw(" "), 1);
         if !m.user.is_empty() {
-            let uw = UnicodeWidthStr::width(m.user.as_str()) as u16;
-            b.prefix(
-                Span::styled(
-                    m.user.clone(),
-                    Style::default().fg(user_color).add_modifier(Modifier::BOLD),
-                ),
-                uw,
-            );
+            name(&mut b, &m.user, user_color, paint);
             b.prefix(Span::raw(" "), 1);
         }
         for w in n.what.split(' ') {
@@ -381,14 +409,7 @@ pub(crate) fn layout_message(
     if !m.badges.is_empty() {
         b.prefix(Span::raw(" "), 1);
     }
-    let uw = UnicodeWidthStr::width(m.user.as_str()) as u16;
-    b.prefix(
-        Span::styled(
-            m.user.clone(),
-            Style::default().fg(user_color).add_modifier(Modifier::BOLD),
-        ),
-        uw,
-    );
+    name(&mut b, &m.user, user_color, paint);
     // reply thread marker: who this message answers, dim, before the content.
     if let Some(r) = &m.reply_to {
         let tag = format!(" ↳{r}");
@@ -428,6 +449,16 @@ fn strike(rows: &mut [RowPlan]) {
     }
 }
 
+/// does this terminal take 24-bit color? decided once from `COLORTERM`.
+fn truecolor() -> bool {
+    static TRUECOLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRUECOLOR.get_or_init(|| {
+        std::env::var("COLORTERM")
+            .map(|v| v.contains("truecolor") || v.contains("24bit"))
+            .unwrap_or(false)
+    })
+}
+
 /// `#rrggbb` → terminal color. truecolor terminals get the exact rgb; anything
 /// else (linux vt, old xterms, DEC hardware) gets the nearest xterm-256 index —
 /// emitting 24-bit escapes at a terminal that can't parse them turns user
@@ -440,13 +471,7 @@ fn parse_hex(hex: &str) -> Option<Color> {
     let r = u8::from_str_radix(&h[0..2], 16).ok()?;
     let g = u8::from_str_radix(&h[2..4], 16).ok()?;
     let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-    static TRUECOLOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let tc = *TRUECOLOR.get_or_init(|| {
-        std::env::var("COLORTERM")
-            .map(|v| v.contains("truecolor") || v.contains("24bit"))
-            .unwrap_or(false)
-    });
-    Some(if tc {
+    Some(if truecolor() {
         Color::Rgb(r, g, b)
     } else {
         Color::Indexed(nearest_256(r, g, b))
@@ -541,6 +566,7 @@ mod wrap_tests {
             reply_to: None,
             note: None,
             heat: 0.0,
+            uid: None,
         }
     }
 
@@ -561,7 +587,7 @@ mod wrap_tests {
         let set = EmoteSet::new();
         let mut m = msg("buy followers");
         m.gone = Some("timed out 10m".into());
-        let rows = layout_message(&m, &set, EmoteMode::Text, 80, None, false);
+        let rows = layout_message(&m, &set, EmoteMode::Text, 80, None, false, None);
         let spans: Vec<&Span> = rows.iter().flat_map(|r| r.line.spans.iter()).collect();
         let tag = spans.last().unwrap();
         assert_eq!(tag.content.trim(), "[timed out 10m]");
@@ -571,7 +597,7 @@ mod wrap_tests {
             assert_eq!(sp.style, palette::GONE, "{:?}", sp.content);
         }
         // an untouched line keeps its colors
-        let ok = layout_message(&msg("hi"), &set, EmoteMode::Text, 80, None, false);
+        let ok = layout_message(&msg("hi"), &set, EmoteMode::Text, 80, None, false, None);
         assert!(ok[0].line.spans.iter().all(|s| s.style != palette::GONE));
     }
 
@@ -585,6 +611,7 @@ mod wrap_tests {
             12,
             None,
             false,
+            None,
         );
         let got = flat(&rows);
         assert!(got.len() > 1, "wrapped: {got:?}");
@@ -609,6 +636,7 @@ mod wrap_tests {
             14,
             None,
             false,
+            None,
         );
         let got = flat(&rows);
         assert!(got.len() >= 3, "{got:?}");
@@ -625,7 +653,7 @@ mod wrap_tests {
     fn a_wall_is_capped_with_an_ellipsis() {
         let set = EmoteSet::new();
         let text = "word ".repeat(200);
-        let rows = layout_message(&msg(&text), &set, EmoteMode::Text, 20, None, false);
+        let rows = layout_message(&msg(&text), &set, EmoteMode::Text, 20, None, false, None);
         assert_eq!(rows.len(), MAX_MSG_ROWS);
         assert!(flat(&rows).last().unwrap().ends_with('…'));
     }
@@ -635,18 +663,56 @@ mod wrap_tests {
         let set = EmoteSet::new();
         let mut m = msg(&"word ".repeat(30));
         m.platform = Platform::Kick;
-        let rows = layout_message(&m, &set, EmoteMode::Text, 20, None, true);
+        let rows = layout_message(&m, &set, EmoteMode::Text, 20, None, true, None);
         let f = flat(&rows);
         assert!(f[0].starts_with("[K] u"));
         assert!(f[1].starts_with("    ") && !f[1].starts_with("     "));
-        let one = layout_message(&m, &set, EmoteMode::Text, 20, None, false);
+        let one = layout_message(&m, &set, EmoteMode::Text, 20, None, false, None);
         assert!(flat(&one)[0].starts_with("u"));
+    }
+
+    fn first_span(m: &Message, look: Option<&Look>) -> Vec<Span<'static>> {
+        let set = EmoteSet::new();
+        let rows = layout_message(m, &set, EmoteMode::Text, 80, None, false, look);
+        rows[0].line.spans.clone()
+    }
+
+    #[test]
+    fn a_profile_color_fills_in_only_when_chat_sent_none() {
+        let look = Look {
+            paint: None,
+            color: Some("#ff0000".into()),
+        };
+        let mut m = msg("hi");
+        assert_ne!(first_span(&m, Some(&look))[0].style.fg, Some(Color::White));
+        m.color = Some("#00ff00".into());
+        assert_eq!(
+            first_span(&m, Some(&look))[0].style.fg,
+            first_span(&m, None)[0].style.fg
+        );
+    }
+
+    #[test]
+    fn a_paint_colors_the_name_per_character_on_truecolor_only() {
+        let paint = Paint::from_heatsync(&serde_json::json!({"base": {"type": "linear",
+            "angle": 90, "stops": [{"color": "#000000", "pos": 0}, {"color": "#ffffff", "pos": 100}]}}));
+        let look = Look { paint, color: None };
+        let mut m = msg("hi");
+        m.user = "abcdef".into();
+        let spans = first_span(&m, Some(&look));
+        let name: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(name.starts_with("abcdef"), "{name}");
+        if truecolor() {
+            assert!(spans.len() > 3, "gradient splits the name into runs");
+        } else {
+            assert_eq!(spans[0].content, "abcdef");
+        }
     }
 
     #[test]
     fn short_messages_stay_on_one_row() {
         let set = EmoteSet::new();
-        let rows = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, None, false);
+        let rows = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, None, false, None);
         assert_eq!(flat(&rows), vec!["u: hi"]);
         assert_eq!(rows[0].h, 1);
     }

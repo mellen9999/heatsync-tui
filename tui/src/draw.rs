@@ -216,7 +216,16 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let mut plan: Vec<Vec<RowPlan>> = Vec::new();
     let mut used = 0usize;
     for m in ch.messages.iter().rev() {
-        let mut rows = layout_message(m, set, mode, body.width, app.me.as_deref(), ch.merged());
+        let look = m.uid.as_deref().and_then(|u| app.paints.get(u));
+        let mut rows = layout_message(
+            m,
+            set,
+            mode,
+            body.width,
+            app.me.as_deref(),
+            ch.merged(),
+            look,
+        );
         let h: usize = rows.iter().map(|r| r.h as usize).sum();
         if used + h > cap {
             // the newest message alone can exceed the pane — keep its tail.

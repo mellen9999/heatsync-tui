@@ -14,6 +14,7 @@ pub mod emote;
 pub mod heat;
 pub mod key;
 pub mod mock;
+pub mod paint;
 pub mod proto;
 pub mod sanitize;
 pub mod slash;
@@ -150,6 +151,9 @@ pub struct Message {
     /// set when this line is an event (sub, raid, redemption, live…) rather
     /// than plain chat — it renders as an inline notice.
     pub note: Option<Note>,
+    /// the sender's heatsync paint-space id (twitch user id, `kick_<id>`,
+    /// `yt_<UC id>`), when the relay sent one — keys name paints and colors.
+    pub uid: Option<String>,
     pub heat: f64,
 }
 
@@ -438,6 +442,7 @@ mod channel_tests {
             reply_to: None,
             note: None,
             heat: 0.0,
+            uid: None,
         }
     }
 

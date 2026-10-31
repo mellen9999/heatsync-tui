@@ -52,6 +52,19 @@ pub fn global_emotes() -> Option<EmoteSet> {
     Some(set)
 }
 
+/// `/api/paints` for a batch of paint-space ids (<=50): heatsync paint specs
+/// and picked name colors. `None` on any failure so the caller retries.
+pub fn paints(ids: &[String]) -> Option<serde_json::Value> {
+    let url = format!("{BASE}/api/paints?ids={}", ids.join(","));
+    agent().get(&url).call().ok()?.into_json().ok()
+}
+
+/// `/api/cosmetics/batch`: 7tv paints for twitch ids and `kick_<id>`s (<=50).
+pub fn cosmetics(ids: &[String]) -> Option<serde_json::Value> {
+    let url = format!("{BASE}/api/cosmetics/batch?ids={}", ids.join(","));
+    agent().get(&url).call().ok()?.into_json().ok()
+}
+
 /// channel emote set (7tv/bttv/ffz precedence, deduped server-side).
 pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
     let url = format!(
@@ -171,6 +184,7 @@ pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_co
                 reply_to: None,
                 note: None,
                 heat: 0.0,
+                uid: None,
             }
         })
         .filter(|m| !m.user.is_empty() || !m.text.is_empty())

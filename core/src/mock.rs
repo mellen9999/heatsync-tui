@@ -173,6 +173,7 @@ impl Driver {
                             what: what.to_string(),
                         }),
                         heat: 0.0,
+                        uid: None,
                     },
                     now,
                 );
@@ -201,6 +202,7 @@ impl Driver {
                             reply_to: None,
                             note: None,
                             heat: 0.0,
+                            uid: None,
                         },
                         now,
                     );
