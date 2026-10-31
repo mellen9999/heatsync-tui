@@ -18,6 +18,7 @@ pub mod paint;
 pub mod proto;
 pub mod sanitize;
 pub mod slash;
+pub mod streamev;
 pub mod vi;
 
 use std::collections::VecDeque;
