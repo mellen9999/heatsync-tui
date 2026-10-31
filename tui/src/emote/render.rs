@@ -820,18 +820,35 @@ fn loader(
 }
 
 /// fetch + decode + composite a stack into RGBA frames (base at the bottom,
-/// overlays on top), driven by the longest-animating layer, then apply any
-/// effects the key carries (`#codes` pseudo-layer — see core's stack keys).
+/// overlays on top), driven by the longest-animating layer, each layer with
+/// the effects its key line carries (`#codes@hue` — see core's stack keys).
 /// `key` is layer urls joined by '\n'; `min_px` is the pixel size the caller
 /// will render at, used to pick a CDN size tier that never needs upscaling. no
 /// encoding — shared by build(), the framebuffer tier, and the render-test
 /// harness. any fetch/decode failure → None.
 pub fn composite_frames(key: &str, min_px: u32) -> Option<Vec<(RgbaImage, u32)>> {
-    let (urls, fx) = heatsync_core::emote::split_key(key);
     let mut layers: Vec<decode::Decoded> = Vec::new();
-    for url in urls {
-        let bytes = fetch_at(url, min_px)?;
-        layers.push(decode::decode(&bytes).ok()?);
+    for spec in heatsync_core::emote::split_key(key) {
+        let bytes = fetch_at(&spec.url, min_px)?;
+        let mut layer = decode::decode(&bytes).ok()?;
+        // each layer carries its own effects — applied BEFORE compositing, so
+        // `Kappa RainTime ffzX` flips the overlay and leaves the base alone.
+        // geometry on an overlay is undone by the resize onto the base canvas.
+        if !spec.fx.is_empty() || spec.hue.is_some() {
+            let frames = layer
+                .frames
+                .into_iter()
+                .map(|f| (f.img, f.delay_ms))
+                .collect();
+            layer.frames = super::fx::apply(frames, &spec.fx, spec.hue)
+                .into_iter()
+                .map(|(img, delay_ms)| decode::Frame { img, delay_ms })
+                .collect();
+            if layer.frames.is_empty() {
+                return None;
+            }
+        }
+        layers.push(layer);
     }
     if layers.is_empty() {
         return None;
@@ -866,7 +883,6 @@ pub fn composite_frames(key: &str, min_px: u32) -> Option<Vec<(RgbaImage, u32)>>
         out.push((canvas, df.delay_ms));
         t += df.delay_ms.max(MIN_DELAY_MS) as u64;
     }
-    let out = super::fx::apply(out, &fx);
     if out.is_empty() {
         None
     } else {

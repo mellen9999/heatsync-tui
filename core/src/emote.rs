@@ -2,14 +2,14 @@
 //! precedence-ordered (7tv > bttv > ffz > twitch > kick) deduped list, so we
 //! insert first-wins into a name→emote map and word-match message text against
 //! it. modifiers (BTTV `w!`-style prefixes / FFZ `ffzX`-style effect words) are
-//! parsed here into per-stack [`Effect`] lists; the pixel work happens at render.
+//! parsed here into per-layer [`Effect`] lists; the pixel work happens at render.
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 
 /// one emote as the HeatSync emote API returns it.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Emote {
     pub name: String,
     pub url: String,
@@ -98,132 +98,425 @@ impl EmoteSet {
     }
 }
 
-/// a pixel effect on an emote stack. BTTV prefix modifiers and FFZ effect words
-/// share this vocabulary; the render layer applies them in enum order (geometry
-/// → color → motion), so derived Ord IS the application order.
+/// a pixel effect on an emote layer. BTTV prefix modifiers and FFZ effect
+/// words share this vocabulary; the render layer applies them in enum order
+/// (geometry → color → motion), so derived Ord IS the application order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Effect {
     RotateL, // l!
     RotateR, // r!
-    FlipX,   // h! / ffzX
-    FlipY,   // v! / ffzY
-    Wide,    // w! / ffzW — stack renders double-width
+    FlipX,   // h! x! / ffzX
+    FlipY,   // v! y! / ffzY
+    Wide,    // w! / ffzW ffzWide — double width
+    Tall,    // ffzTall — double height
     Cursed,  // c! / ffzCursed — grayscale + darken
-    Rainbow, // p! / ffzRainbow — hue cycle (animates even static emotes)
-    Shake,   // s! / ffzHyper — jitter (animates even static emotes)
+    Hyper,   // ffzHyper — oversaturated + shake
+    Party,   // p! — saturated hue cycle
+    Rainbow, // ffzRainbow — hue cycle (animates even static emotes)
+    Shake,   // s! — jitter (animates even static emotes)
+    Bounce,  // ffzBounce
+    Jam,     // ffzJam — squash/stretch pulse
+    Slide,   // ffzSlide — in from the left
+    Arrive,  // ffzArrive — grow in
+    Leave,   // ffzLeave — shrink out
+    Spin,    // ffzSpin
 }
 
+/// one-letter stack-key codes (stable — keys are cache identities).
+const CODES: [(Effect, char); 17] = [
+    (Effect::RotateL, 'l'),
+    (Effect::RotateR, 'r'),
+    (Effect::FlipX, 'x'),
+    (Effect::FlipY, 'y'),
+    (Effect::Wide, 'w'),
+    (Effect::Tall, 't'),
+    (Effect::Cursed, 'c'),
+    (Effect::Hyper, 'H'),
+    (Effect::Party, 'p'),
+    (Effect::Rainbow, 'R'),
+    (Effect::Shake, 's'),
+    (Effect::Bounce, 'b'),
+    (Effect::Jam, 'j'),
+    (Effect::Slide, 'd'),
+    (Effect::Arrive, 'a'),
+    (Effect::Leave, 'e'),
+    (Effect::Spin, 'o'),
+];
+
+/// a modifier word's meaning: a pixel effect, or `z!` (changes stacking only).
+#[derive(Clone, Copy)]
+enum Tok {
+    Fx(Effect),
+    Zero,
+}
+
+/// the shared word table, same as the extension's HS_MOD_TOKENS. a key ending
+/// in `!` is BTTV-shaped (binds forward); the rest are FFZ (bind backward).
+const TOKENS: [(&str, Tok); 25] = [
+    ("w!", Tok::Fx(Effect::Wide)),
+    ("h!", Tok::Fx(Effect::FlipX)),
+    ("v!", Tok::Fx(Effect::FlipY)),
+    ("z!", Tok::Zero),
+    ("c!", Tok::Fx(Effect::Cursed)),
+    ("l!", Tok::Fx(Effect::RotateL)),
+    ("r!", Tok::Fx(Effect::RotateR)),
+    ("p!", Tok::Fx(Effect::Party)),
+    ("s!", Tok::Fx(Effect::Shake)),
+    ("x!", Tok::Fx(Effect::FlipX)),
+    ("y!", Tok::Fx(Effect::FlipY)),
+    ("ffzX", Tok::Fx(Effect::FlipX)),
+    ("ffzY", Tok::Fx(Effect::FlipY)),
+    ("ffzW", Tok::Fx(Effect::Wide)),
+    ("ffzWide", Tok::Fx(Effect::Wide)),
+    ("ffzTall", Tok::Fx(Effect::Tall)),
+    ("ffzCursed", Tok::Fx(Effect::Cursed)),
+    ("ffzHyper", Tok::Fx(Effect::Hyper)),
+    ("ffzRainbow", Tok::Fx(Effect::Rainbow)),
+    ("ffzBounce", Tok::Fx(Effect::Bounce)),
+    ("ffzJam", Tok::Fx(Effect::Jam)),
+    ("ffzSlide", Tok::Fx(Effect::Slide)),
+    ("ffzArrive", Tok::Fx(Effect::Arrive)),
+    ("ffzLeave", Tok::Fx(Effect::Leave)),
+    ("ffzSpin", Tok::Fx(Effect::Spin)),
+];
+
+/// scales clamp to ±this (extension HS_MOD_MAX_SCALE).
+const MAX_SCALE: i32 = 4;
+/// geometry repeats kept per layer — past this nothing changes (clamped) and
+/// keys stay bounded.
+const MAX_REPEAT: usize = 4;
+
 impl Effect {
-    /// one-letter code used in stack keys (stable — keys are cache identities).
+    /// one-letter code used in stack keys.
     pub fn code(self) -> char {
-        match self {
-            Effect::RotateL => 'l',
-            Effect::RotateR => 'r',
-            Effect::FlipX => 'x',
-            Effect::FlipY => 'y',
-            Effect::Wide => 'w',
-            Effect::Cursed => 'c',
-            Effect::Rainbow => 'p',
-            Effect::Shake => 's',
-        }
+        CODES.iter().find(|(e, _)| *e == self).map_or('?', |c| c.1)
     }
 
     fn from_code(c: char) -> Option<Effect> {
-        Some(match c {
-            'l' => Effect::RotateL,
-            'r' => Effect::RotateR,
-            'x' => Effect::FlipX,
-            'y' => Effect::FlipY,
-            'w' => Effect::Wide,
-            'c' => Effect::Cursed,
-            'p' => Effect::Rainbow,
-            's' => Effect::Shake,
-            _ => return None,
-        })
+        CODES.iter().find(|(_, k)| *k == c).map(|c| c.0)
     }
 
-    /// BTTV `X!` prefix letter → effect. `z` (zero-width) is handled separately —
-    /// it changes stacking, not pixels.
-    fn from_bttv(c: char) -> Option<Effect> {
-        Some(match c {
-            'w' => Effect::Wide,
-            'h' => Effect::FlipX,
-            'v' => Effect::FlipY,
-            'c' => Effect::Cursed,
-            'l' => Effect::RotateL,
-            'r' => Effect::RotateR,
-            'p' => Effect::Rainbow,
-            's' => Effect::Shake,
-            _ => return None,
-        })
+    /// geometry composes (scales multiply, rotations add) so repeats count;
+    /// everything else dedupes.
+    fn composes(self) -> bool {
+        self <= Effect::Tall
     }
 
-    /// FFZ effect word (typed AFTER the emote it modifies) → effect.
-    fn from_ffz(word: &str) -> Option<Effect> {
-        Some(match word {
-            "ffzX" => Effect::FlipX,
-            "ffzY" => Effect::FlipY,
-            "ffzW" => Effect::Wide,
-            "ffzCursed" => Effect::Cursed,
-            "ffzRainbow" => Effect::Rainbow,
-            "ffzHyper" => Effect::Shake,
-            _ => return None,
-        })
+    /// motion effects synthesize frames over time, after color.
+    pub fn is_motion(self) -> bool {
+        self >= Effect::Shake
     }
 }
 
-/// a renderable emote stack: base emote + zero-width overlays + effects. the
-/// key doubles as the render cache identity — layer urls joined by '\n', with
-/// effects (if any) as a final `#codes` pseudo-layer ('\n' and '#'-first lines
-/// can't appear in a real url, so the parse back is unambiguous).
+/// composed geometry of a layer's effects, per hsModComposeAll: scale factors
+/// multiply and clamp to ±4 (negative = mirrored), rotations add.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometry {
+    pub sx: i32,
+    pub sy: i32,
+    /// clockwise degrees, always a multiple of 90 in 0..360.
+    pub rot: u32,
+}
+
+pub fn compose(fx: &[Effect]) -> Geometry {
+    let (mut sx, mut sy, mut rot) = (1i32, 1i32, 0i32);
+    for f in fx {
+        match f {
+            Effect::Wide => sx = sx.saturating_mul(2),
+            Effect::Tall => sy = sy.saturating_mul(2),
+            Effect::FlipX => sx = -sx,
+            Effect::FlipY => sy = -sy,
+            Effect::RotateL => rot -= 90,
+            Effect::RotateR => rot += 90,
+            _ => {}
+        }
+    }
+    Geometry {
+        sx: sx.clamp(-MAX_SCALE, MAX_SCALE),
+        sy: sy.clamp(-MAX_SCALE, MAX_SCALE),
+        rot: rot.rem_euclid(360) as u32,
+    }
+}
+
+/// hue (degrees) of a 3- or 6-digit hex color, rounded — hsModHexToHue.
+fn hex_hue(hex: &str) -> Option<u16> {
+    let v: Vec<f64> = match hex.len() {
+        3 => hex
+            .chars()
+            .map(|c| c.to_digit(16).map(|d| (d * 17) as f64 / 255.0))
+            .collect::<Option<_>>()?,
+        6 => (0..3)
+            .map(|i| {
+                u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16)
+                    .ok()
+                    .map(|b| b as f64 / 255.0)
+            })
+            .collect::<Option<_>>()?,
+        _ => return None,
+    };
+    let (r, g, b) = (v[0], v[1], v[2]);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let d = max - min;
+    let mut h = 0.0;
+    if d > 0.0 {
+        h = if max == r {
+            ((g - b) / d) % 6.0
+        } else if max == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        } * 60.0;
+        if h < 0.0 {
+            h += 360.0;
+        }
+    }
+    Some(h.round() as u16 % 360)
+}
+
+/// a `c!#hex` color token at the start of `s`: (hue, bytes consumed). 6 digits
+/// preferred over 3, the `#` optional — the extension's peel regex.
+fn color_prefix(s: &str) -> Option<(u16, usize)> {
+    let rest = s.strip_prefix("c!")?;
+    let (hash, rest) = match rest.strip_prefix('#') {
+        Some(r) => (1, r),
+        None => (0, rest),
+    };
+    for n in [6, 3] {
+        if let Some(h) = rest
+            .get(..n)
+            .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Some((hex_hue(h)?, 2 + hash + n));
+        }
+    }
+    None
+}
+
+/// what a modifier word contributes.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Mods {
+    fx: Vec<Effect>,
+    zero: bool,
+    hue: Option<u16>,
+}
+
+impl Mods {
+    fn is_empty(&self) -> bool {
+        self.fx.is_empty() && !self.zero && self.hue.is_none()
+    }
+
+    fn push_tok(&mut self, t: Tok) {
+        match t {
+            Tok::Fx(f) => self.fx.push(f),
+            Tok::Zero => self.zero = true,
+        }
+    }
+
+    /// fold later mods in; a later hue wins.
+    fn merge(&mut self, o: Mods) {
+        self.fx.extend(o.fx);
+        self.zero |= o.zero;
+        self.hue = o.hue.or(self.hue);
+    }
+}
+
+fn exact_tok(word: &str) -> Option<Tok> {
+    TOKENS.iter().find(|(k, _)| *k == word).map(|t| t.1)
+}
+
+/// longest token that starts `s`, optionally limited to BTTV-shaped (`!`) ones.
+fn tok_prefix(s: &str, bttv_only: bool) -> Option<(&'static str, Tok)> {
+    TOKENS
+        .iter()
+        .filter(|(k, _)| s.starts_with(k) && (!bttv_only || k.ends_with('!')))
+        .max_by_key(|(k, _)| k.len())
+        .map(|t| (t.0, t.1))
+}
+
+/// peel a word made ENTIRELY of modifier tokens (`w!h!ffzX`, `w!c!#888h!`).
+fn peel_chain(word: &str) -> Option<Mods> {
+    let mut m = Mods::default();
+    let mut rem = word;
+    while !rem.is_empty() {
+        if let Some((hue, n)) = color_prefix(rem) {
+            m.hue = Some(hue);
+            rem = &rem[n..];
+        } else if let Some((k, t)) = tok_prefix(rem, false) {
+            m.push_tok(t);
+            rem = &rem[k.len()..];
+        } else {
+            return None;
+        }
+    }
+    (!m.is_empty()).then_some(m)
+}
+
+/// a classified modifier word.
+struct Modifier {
+    mods: Mods,
+    /// binds to the NEXT emote first (BTTV-shaped), else the previous.
+    forward: bool,
+    /// a single table token / color (vs a peeled chain). only chains defer to
+    /// a real emote of the same name.
+    exact: bool,
+}
+
+fn classify(word: &str) -> Option<Modifier> {
+    if let Some(t) = exact_tok(word) {
+        let mut mods = Mods::default();
+        mods.push_tok(t);
+        return Some(Modifier {
+            mods,
+            forward: word.ends_with('!'),
+            exact: true,
+        });
+    }
+    if let Some((hue, n)) = color_prefix(word) {
+        if n == word.len() {
+            let mods = Mods {
+                hue: Some(hue),
+                ..Mods::default()
+            };
+            // c!#hex is BTTV-shaped — forward first like its siblings.
+            return Some(Modifier {
+                mods,
+                forward: true,
+                exact: true,
+            });
+        }
+    }
+    // chains mirror the extension: direction by the word's trailing `!`.
+    peel_chain(word).map(|mods| Modifier {
+        mods,
+        forward: word.ends_with('!'),
+        exact: false,
+    })
+}
+
+/// one drawable layer of a stack: an emote image plus ITS OWN effects — a
+/// modifier binds to one emote, so `Kappa RainTime w!` widens RainTime only.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Stack {
-    pub base: String, // base emote name — the text fallback while loading
-    pub urls: Vec<String>,
-    pub fx: Vec<Effect>, // sorted + deduped (stable keys)
+pub struct Layer {
+    pub url: String,
+    /// sorted (= application order); geometry may repeat, the rest dedupes.
+    pub fx: Vec<Effect>,
+    /// `c!#hex` tint as a hue-rotate in degrees.
+    pub hue: Option<u16>,
 }
 
-impl Stack {
-    fn new(base: &str, url: String) -> Stack {
-        Stack {
-            base: base.to_string(),
-            urls: vec![url],
+impl Layer {
+    fn new(url: impl Into<String>) -> Layer {
+        Layer {
+            url: url.into(),
             fx: Vec::new(),
+            hue: None,
         }
     }
 
     fn add_fx(&mut self, fx: Effect) {
-        if let Err(i) = self.fx.binary_search(&fx) {
-            self.fx.insert(i, fx);
+        if fx.composes() {
+            if self.fx.iter().filter(|e| **e == fx).count() >= MAX_REPEAT {
+                return;
+            }
+        } else if self.fx.contains(&fx) {
+            return;
+        }
+        let i = self.fx.partition_point(|e| *e <= fx);
+        self.fx.insert(i, fx);
+    }
+
+    fn apply(&mut self, m: &Mods) {
+        for &f in &m.fx {
+            self.add_fx(f);
+        }
+        if m.hue.is_some() {
+            self.hue = m.hue;
         }
     }
 
+    /// `#codes@hue` key line, if the layer has any effect.
+    fn code_line(&self) -> Option<String> {
+        if self.fx.is_empty() && self.hue.is_none() {
+            return None;
+        }
+        let mut s = String::from("#");
+        s.extend(self.fx.iter().map(|f| f.code()));
+        if let Some(h) = self.hue {
+            s.push('@');
+            s.push_str(&h.to_string());
+        }
+        Some(s)
+    }
+
+    fn set_codes(&mut self, line: &str) {
+        let (codes, hue) = match line.split_once('@') {
+            Some((c, h)) => (c, h.parse::<u16>().ok().map(|h| h % 360)),
+            None => (line, None),
+        };
+        for f in codes.chars().filter_map(Effect::from_code) {
+            self.add_fx(f);
+        }
+        self.hue = hue;
+    }
+}
+
+/// a renderable emote stack: base emote + zero-width overlays, each with its
+/// own effects. the key doubles as the render cache identity — each layer's
+/// url on its own line, followed by an optional `#codes@hue` line ('\n' and
+/// '#'-first lines can't appear in a real url, so the parse back is
+/// unambiguous).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stack {
+    pub base: String, // base emote name — the text fallback while loading
+    pub layers: Vec<Layer>,
+}
+
+impl Stack {
+    fn new(base: &str, layer: Layer) -> Stack {
+        Stack {
+            base: base.to_string(),
+            layers: vec![layer],
+        }
+    }
+
+    /// the stack renders at least double width (overlays resize onto the base,
+    /// so only the base layer's geometry sets the footprint).
     pub fn wide(&self) -> bool {
-        self.fx.contains(&Effect::Wide)
+        self.layers
+            .first()
+            .is_some_and(|l| compose(&l.fx).sx.abs() >= 2)
     }
 
     pub fn key(&self) -> String {
-        let mut k = self.urls.join("\n");
-        if !self.fx.is_empty() {
-            k.push_str("\n#");
-            k.extend(self.fx.iter().map(|f| f.code()));
+        let mut k = String::new();
+        for (i, l) in self.layers.iter().enumerate() {
+            if i > 0 {
+                k.push('\n');
+            }
+            k.push_str(&l.url);
+            if let Some(c) = l.code_line() {
+                k.push('\n');
+                k.push_str(&c);
+            }
         }
         k
     }
 }
 
-/// split a stack key back into layer urls + effects (render side).
-pub fn split_key(key: &str) -> (Vec<&str>, Vec<Effect>) {
-    let mut urls = Vec::new();
-    let mut fx = Vec::new();
+/// split a stack key back into its layers (render side).
+pub fn split_key(key: &str) -> Vec<Layer> {
+    let mut layers: Vec<Layer> = Vec::new();
     for line in key.split('\n') {
-        if let Some(codes) = line.strip_prefix('#') {
-            fx.extend(codes.chars().filter_map(Effect::from_code));
-        } else {
-            urls.push(line);
+        match line.strip_prefix('#') {
+            Some(codes) => {
+                if let Some(l) = layers.last_mut() {
+                    l.set_codes(codes);
+                }
+            }
+            None => layers.push(Layer::new(line)),
         }
     }
-    (urls, fx)
+    layers
 }
 
 /// a laid-out chunk of a message: literal text, or an emote stack.
@@ -233,42 +526,142 @@ pub enum Segment {
     Stack(Stack),
 }
 
-/// strip chained BTTV prefixes (`w!h!Emote`) off a word. returns the collected
-/// effects, whether `z!` (force zero-width) was present, and the remainder.
-fn strip_bttv(word: &str) -> (Vec<Effect>, bool, &str) {
-    let mut fx = Vec::new();
-    let mut zw = false;
-    let mut rest = word;
-    loop {
-        let mut it = rest.chars();
-        match (it.next(), it.next()) {
-            (Some(c), Some('!')) if c == 'z' || Effect::from_bttv(c).is_some() => {
-                if c == 'z' {
-                    zw = true;
-                } else {
-                    fx.push(Effect::from_bttv(c).unwrap());
-                }
-                rest = &rest[2..];
+/// name → emote with per-message refs on top. refs (the sender's inventory
+/// emotes, twitch/kick native ids) win over the channel set — the emote the
+/// sender actually used is the only one that isn't a guess. native refs are
+/// the exception: a same-named emote in the set wins (its url is the animated
+/// / full-quality one and its zero-width flag is known).
+struct Lookup<'a> {
+    set: &'a EmoteSet,
+    refs: &'a EmoteSet,
+}
+
+impl<'a> Lookup<'a> {
+    fn get(&self, name: &str) -> Option<&'a Emote> {
+        match self.refs.get(name) {
+            Some(r) if matches!(r.provider.as_str(), "twitch" | "kick") => {
+                self.set.get(name).or(Some(r))
             }
-            _ => return (fx, zw, rest),
+            Some(r) => Some(r),
+            None => self.set.get(name),
         }
     }
 }
 
+/// an emote word resolved to a layer's worth of data.
+struct Resolved<'a> {
+    emote: &'a Emote,
+    /// stacks onto the previous emote instead of starting a new one.
+    overlay: bool,
+    /// effects glued onto the word (`Kappaw!`, `w!Kappa`).
+    mods: Mods,
+}
+
+/// word → emote. a literal name always wins; then the 7tv `Name0` overlay
+/// convention (only when no emote is literally named `Name0`), then glued
+/// modifier suffixes (`Kappaw!`, `KappaffzX`, `Kappac!#888`, chains), then
+/// glued BTTV prefixes (`w!h!Kappa`).
+fn resolve<'a>(word: &str, look: &Lookup<'a>) -> Option<Resolved<'a>> {
+    if let Some(e) = look.get(word) {
+        return Some(Resolved {
+            emote: e,
+            overlay: e.zero_width,
+            mods: Mods::default(),
+        });
+    }
+    if let Some(base) = word.strip_suffix('0').filter(|b| !b.is_empty()) {
+        if let Some(e) = look.get(base) {
+            return Some(Resolved {
+                emote: e,
+                overlay: true,
+                mods: Mods::default(),
+            });
+        }
+    }
+    // every modifier spelling has a `!` or starts `ffz` — skip the peel scans
+    // for the (vast majority) plain words.
+    if !word.contains('!') && !word.contains("ffz") {
+        return None;
+    }
+    // longest base first, at least two chars
+    for (i, _) in word.char_indices().rev() {
+        if i < 2 {
+            break;
+        }
+        let (base, rest) = word.split_at(i);
+        if let Some(mods) = peel_chain(rest) {
+            if let Some(e) = look.get(base) {
+                return Some(Resolved {
+                    emote: e,
+                    overlay: e.zero_width || mods.zero,
+                    mods,
+                });
+            }
+        }
+    }
+    let mut mods = Mods::default();
+    let mut rem = word;
+    while let Some((k, t)) = tok_prefix(rem, true).filter(|(k, _)| rem.len() > k.len()) {
+        mods.push_tok(t);
+        rem = &rem[k.len()..];
+    }
+    if rem.len() < word.len() {
+        if let Some(e) = look.get(rem) {
+            return Some(Resolved {
+                emote: e,
+                overlay: e.zero_width || mods.zero,
+                mods,
+            });
+        }
+    }
+    None
+}
+
+/// is the next non-modifier word an emote? modifiers in between are skipped so
+/// `c! ffzX Kappa` lands both on Kappa; a plain word stops the scan.
+fn emote_ahead(words: &[&str], from: usize, look: &Lookup) -> bool {
+    for w in &words[from.min(words.len())..] {
+        if is_modifier(w, look) {
+            continue;
+        }
+        return resolve(w, look).is_some();
+    }
+    false
+}
+
+/// a modifier word — unless it is exactly an emote's name (only chains yield
+/// to a same-named emote; the shared table tokens win, as in the extension).
+fn is_modifier(word: &str, look: &Lookup) -> bool {
+    classify(word).is_some_and(|c| c.exact || look.get(word).is_none())
+}
+
 /// parse message text into text + emote-stack segments. handles:
-///   - zero-width emotes overlaying the preceding base (`GAMBA notL`)
-///   - BTTV modifiers, bare (`w! KEKW`) and attached (`w!KEKW`, chains ok)
-///   - `z!` forcing any emote to overlay the preceding stack
-///   - FFZ effect words after the emote (`KEKW ffzX ffzRainbow`)
+///   - zero-width emotes overlaying the preceding base (`GAMBA notL`) and the
+///     `Name0` overlay convention
+///   - BTTV modifiers (`w! h! v! z! c! l! r! p! s! x! y!`, `c!#hex`) binding
+///     FORWARD to the next emote, bare (`w! KEKW`) or attached (`w!KEKW`)
+///   - FFZ words (`ffzX ffzW ffzRainbow …`) binding BACKWARD to the last
+///     layer of the stack (an overlay, not the base)
+///   - the opposite direction as fallback when the canonical side has no emote
+///   - glued suffixes (`Kappaw!`, `KappaffzX`, `Kappac!#888`) and chains
+///     (`w!h!ffzX`)
 ///
-/// modifier words that never find an emote degrade to literal text. adjacent
-/// text words coalesce single-spaced. input is assumed already sanitized.
+/// a modifier with no emote on either side stays literal text. adjacent text
+/// words coalesce single-spaced. input is assumed already sanitized.
 pub fn segments(content: &str, set: &EmoteSet) -> Vec<Segment> {
+    segments_with(content, set, &EmoteSet::new())
+}
+
+/// [`segments`] with a per-message ref set that outranks `set` — see [`Lookup`].
+pub fn segments_with(content: &str, set: &EmoteSet, refs: &EmoteSet) -> Vec<Segment> {
+    let look = Lookup { set, refs };
+    let words: Vec<&str> = content.split_whitespace().collect();
     let mut out: Vec<Segment> = Vec::new();
     let mut text = String::new();
-    // bare modifiers waiting for their emote, with the literal words to restore
-    // if the next word turns out to be text.
-    let mut pending: Vec<(Vec<Effect>, bool, String)> = Vec::new();
+    // forward modifiers waiting for their emote, plus their literal words to
+    // restore if it never comes.
+    let mut pending = Mods::default();
+    let mut pending_words: Vec<&str> = Vec::new();
 
     fn push_text(text: &mut String, w: &str) {
         if !text.is_empty() {
@@ -276,76 +669,69 @@ pub fn segments(content: &str, set: &EmoteSet) -> Vec<Segment> {
         }
         text.push_str(w);
     }
-    fn flush_pending(text: &mut String, pending: &mut Vec<(Vec<Effect>, bool, String)>) {
-        for (_, _, w) in pending.drain(..) {
-            push_text(text, &w);
-        }
-    }
-    fn flush_text(out: &mut Vec<Segment>, text: &mut String) {
-        if !text.is_empty() {
-            out.push(Segment::Text(std::mem::take(text)));
-        }
-    }
 
-    for word in content.split_whitespace() {
-        // FFZ effect word: applies to the immediately-preceding stack (nothing
-        // may sit between them — no text, no unconsumed modifiers).
-        if let Some(fx) = Effect::from_ffz(word) {
-            if text.is_empty() && pending.is_empty() {
+    for (i, &word) in words.iter().enumerate() {
+        if let Some(c) = classify(word).filter(|c| c.exact || look.get(word).is_none()) {
+            let ahead = emote_ahead(&words, i + 1, &look);
+            // the stack this word could modify: nothing may sit between them.
+            let back = text.is_empty() && matches!(out.last(), Some(Segment::Stack(_)));
+            // a bare `z!` means "overlay the next emote" — nothing to give a
+            // previous one.
+            let back_ok = back && (!c.mods.fx.is_empty() || c.mods.hue.is_some());
+            let fwd = if c.forward { ahead } else { !back_ok && ahead };
+            if fwd {
+                pending.merge(c.mods);
+                pending_words.push(word);
+                continue;
+            }
+            if back_ok {
                 if let Some(Segment::Stack(s)) = out.last_mut() {
-                    s.add_fx(fx);
-                    continue;
+                    if let Some(l) = s.layers.last_mut() {
+                        l.apply(&c.mods);
+                        continue;
+                    }
                 }
             }
-            flush_pending(&mut text, &mut pending);
+            // no emote either side — literal.
+            for w in pending_words.drain(..) {
+                push_text(&mut text, w);
+            }
+            pending = Mods::default();
             push_text(&mut text, word);
             continue;
         }
 
-        // exact name wins over prefix parsing (an emote could be NAMED "h!x").
-        let (fx, zw, rest) = if set.get(word).is_some() {
-            (Vec::new(), false, word)
-        } else {
-            strip_bttv(word)
-        };
-        if rest.is_empty() && (!fx.is_empty() || zw) {
-            // bare modifier(s) — hold for the next emote.
-            pending.push((fx, zw, word.to_string()));
+        let Some(r) = resolve(word, &look) else {
+            for w in pending_words.drain(..) {
+                push_text(&mut text, w);
+            }
+            pending = Mods::default();
+            push_text(&mut text, word);
             continue;
-        }
-        match set.get(rest) {
-            Some(e) => {
-                let mut all_fx = fx;
-                let mut force_zw = zw;
-                for (pfx, pzw, _) in pending.drain(..) {
-                    all_fx.extend(pfx);
-                    force_zw |= pzw;
-                }
-                let overlay = e.zero_width || force_zw;
-                // an overlay with NO effects of its own joins the previous
-                // stack; effects always start a fresh stack (they apply to a
-                // whole composite, and a per-layer op would corrupt the base).
-                if overlay && all_fx.is_empty() && text.is_empty() {
-                    if let Some(Segment::Stack(s)) = out.last_mut() {
-                        s.urls.push(e.url.clone());
-                        continue;
-                    }
-                }
-                flush_text(&mut out, &mut text);
-                let mut s = Stack::new(rest, e.url.clone());
-                for f in all_fx {
-                    s.add_fx(f);
-                }
-                out.push(Segment::Stack(s));
-            }
-            None => {
-                flush_pending(&mut text, &mut pending);
-                push_text(&mut text, word);
+        };
+        let mut mods = std::mem::take(&mut pending);
+        pending_words.clear();
+        mods.merge(r.mods);
+        let overlay = r.overlay || mods.zero;
+        let mut layer = Layer::new(r.emote.url.clone());
+        layer.apply(&mods);
+        if overlay && text.is_empty() {
+            if let Some(Segment::Stack(s)) = out.last_mut() {
+                s.layers.push(layer);
+                continue;
             }
         }
+        if !text.is_empty() {
+            out.push(Segment::Text(std::mem::take(&mut text)));
+        }
+        out.push(Segment::Stack(Stack::new(&r.emote.name, layer)));
     }
-    flush_pending(&mut text, &mut pending);
-    flush_text(&mut out, &mut text);
+    for w in pending_words.drain(..) {
+        push_text(&mut text, w);
+    }
+    if !text.is_empty() {
+        out.push(Segment::Text(text));
+    }
     out
 }
 
@@ -362,6 +748,70 @@ mod tests {
             animated: false,
             zero_width: false,
             global: false,
+        }
+    }
+
+    fn zw(name: &str) -> Emote {
+        Emote {
+            zero_width: true,
+            ..e(name)
+        }
+    }
+
+    fn native(name: &str, provider: &str) -> Emote {
+        Emote {
+            url: format!("https://native/{name}"),
+            provider: provider.into(),
+            ..e(name)
+        }
+    }
+
+    /// the standard cast: bases, an overlay, a literal `Name0`.
+    fn cast() -> EmoteSet {
+        EmoteSet::from_list([
+            e("KEKW"),
+            e("GAMBA"),
+            e("Kappa"),
+            e("Keepo"),
+            e("lerolero"),
+            zw("notL"),
+        ])
+    }
+
+    /// compact view of a parse: stacks as `base+overlay` with `[codes@hue]`
+    /// per layer, text in quotes, segments space-joined.
+    fn show_with(msg: &str, set: &EmoteSet, refs: &EmoteSet) -> String {
+        segments_with(msg, set, refs)
+            .iter()
+            .map(|s| match s {
+                Segment::Text(t) => format!("'{t}'"),
+                Segment::Stack(st) => st
+                    .layers
+                    .iter()
+                    .map(|l| {
+                        let name = l.url.rsplit('/').next().unwrap();
+                        let name = name.strip_suffix(".webp").unwrap_or(name);
+                        let codes = l.code_line().unwrap_or_default();
+                        match codes.strip_prefix('#') {
+                            Some(c) => format!("{name}[{c}]"),
+                            None => name.to_string(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("+"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn show(msg: &str) -> String {
+        show_with(msg, &cast(), &EmoteSet::new())
+    }
+
+    #[track_caller]
+    fn table(cases: &[(&str, &str)]) {
+        for (input, want) in cases {
+            assert_eq!(show(input), *want, "input: {input}");
         }
     }
 
@@ -404,120 +854,297 @@ mod tests {
     }
 
     #[test]
-    fn segments_text_and_emotes() {
-        let set = EmoteSet::from_list([e("KEKW"), e("GAMBA")]);
-        let segs = segments("lol KEKW that GAMBA moment", &set);
-        assert_eq!(
-            segs,
-            vec![
-                Segment::Text("lol".into()),
-                Segment::Stack(Stack::new("KEKW", "https://cdn/KEKW.webp".into())),
-                Segment::Text("that".into()),
-                Segment::Stack(Stack::new("GAMBA", "https://cdn/GAMBA.webp".into())),
-                Segment::Text("moment".into()),
-            ]
-        );
-    }
-
-    fn zw(name: &str) -> Emote {
-        Emote {
-            zero_width: true,
-            ..e(name)
-        }
-    }
-
-    fn stacks(msg: &str, set: &EmoteSet) -> Vec<Stack> {
-        segments(msg, set)
-            .into_iter()
-            .filter_map(|s| match s {
-                Segment::Stack(s) => Some(s),
-                _ => None,
-            })
-            .collect()
+    fn text_and_emotes_coalesce() {
+        table(&[
+            (
+                "lol KEKW that GAMBA moment",
+                "'lol' KEKW 'that' GAMBA 'moment'",
+            ),
+            ("a  b\tc", "'a b c'"),
+            ("", ""),
+        ]);
     }
 
     #[test]
-    fn zero_width_overlays_previous_base() {
-        let set = EmoteSet::from_list([e("GAMBA"), zw("notL")]);
-        let s = stacks("GAMBA notL", &set);
-        assert_eq!(s.len(), 1);
-        assert_eq!(
-            s[0].urls,
-            vec!["https://cdn/GAMBA.webp", "https://cdn/notL.webp"]
-        );
-        assert_eq!(s[0].key(), "https://cdn/GAMBA.webp\nhttps://cdn/notL.webp");
+    fn bttv_binds_forward() {
+        table(&[
+            ("w!KEKW", "KEKW[w]"),
+            ("w! KEKW", "KEKW[w]"),
+            ("w!h!KEKW", "KEKW[xw]"), // sorted = application order
+            ("x! KEKW", "KEKW[x]"),
+            ("y! KEKW", "KEKW[y]"),
+            ("v! KEKW", "KEKW[y]"),
+            ("l! KEKW", "KEKW[l]"),
+            ("r! KEKW", "KEKW[r]"),
+            ("c! KEKW", "KEKW[c]"),
+            ("p! KEKW", "KEKW[p]"),
+            ("s! KEKW", "KEKW[s]"),
+            // canonical side first: c! belongs to Keepo, not Kappa
+            ("Kappa c! Keepo", "Kappa Keepo[c]"),
+            // a run of modifiers all land on the emote ahead
+            ("c! ffzX Kappa", "Kappa[xc]"),
+            ("w! h! KEKW", "KEKW[xw]"),
+        ]);
     }
 
     #[test]
-    fn bttv_attached_prefix_chains() {
-        let set = EmoteSet::from_list([e("KEKW")]);
-        let s = stacks("w!h!KEKW", &set);
-        assert_eq!(s[0].fx, vec![Effect::FlipX, Effect::Wide]); // sorted apply order
-        assert!(s[0].wide());
-        assert_eq!(s[0].key(), "https://cdn/KEKW.webp\n#xw");
+    fn ffz_binds_backward() {
+        table(&[
+            ("KEKW ffzX", "KEKW[x]"),
+            ("KEKW ffzY", "KEKW[y]"),
+            ("KEKW ffzW", "KEKW[w]"),
+            ("KEKW ffzWide", "KEKW[w]"),
+            ("KEKW ffzTall", "KEKW[t]"),
+            ("KEKW ffzCursed", "KEKW[c]"),
+            ("KEKW ffzHyper", "KEKW[H]"),
+            ("KEKW ffzRainbow", "KEKW[R]"),
+            ("KEKW ffzBounce", "KEKW[b]"),
+            ("KEKW ffzJam", "KEKW[j]"),
+            ("KEKW ffzSlide", "KEKW[d]"),
+            ("KEKW ffzArrive", "KEKW[a]"),
+            ("KEKW ffzLeave", "KEKW[e]"),
+            ("KEKW ffzSpin", "KEKW[o]"),
+            ("KEKW ffzX ffzRainbow", "KEKW[xR]"),
+            // canonical side first: ffzX belongs to Kappa, not Keepo
+            ("Kappa ffzX Keepo", "Kappa[x] Keepo"),
+            // the LAST layer, not the base
+            ("GAMBA notL ffzX", "GAMBA+notL[x]"),
+        ]);
     }
 
     #[test]
-    fn bttv_bare_prefix_applies_to_next_emote() {
-        let set = EmoteSet::from_list([e("KEKW")]);
-        let s = stacks("w! KEKW", &set);
-        assert_eq!(s[0].fx, vec![Effect::Wide]);
+    fn fallback_direction_when_canonical_side_has_no_emote() {
+        table(&[
+            ("Kappa w!", "Kappa[w]"),   // bttv, nothing ahead → previous
+            ("ffzX Kappa", "Kappa[x]"), // ffz, nothing behind → next
+            ("Kappa c!#00f", "Kappa[@240]"),
+        ]);
     }
 
     #[test]
-    fn unused_modifier_degrades_to_text() {
-        let set = EmoteSet::from_list([e("KEKW")]);
-        let segs = segments("w! nothing here", &set);
-        assert_eq!(segs, vec![Segment::Text("w! nothing here".into())]);
+    fn orphan_modifier_stays_literal() {
+        table(&[
+            ("w! nothing here", "'w! nothing here'"),
+            ("lol ffzX", "'lol ffzX'"),
+            ("KEKW lol ffzX", "KEKW 'lol ffzX'"), // adjacency required
+            ("w! ffzX", "'w! ffzX'"),
+            ("c!#00f", "'c!#00f'"),
+            ("z!", "'z!'"),
+            ("hi w!h!ffzX", "'hi w!h!ffzX'"),
+        ]);
+    }
+
+    #[test]
+    fn glued_suffixes() {
+        table(&[
+            ("Kappaw!", "Kappa[w]"),
+            ("KappaffzX", "Kappa[x]"),
+            ("KappaffzRainbow", "Kappa[R]"),
+            ("KappaffzLeave", "Kappa[e]"),
+            ("Kappac!#0f0", "Kappa[@120]"),
+            ("Kappac!888", "Kappa[@0]"),
+            ("Kappaw!h!ffzX", "Kappa[xxw]"),
+            ("Kappaw!c!#00f", "Kappa[w@240]"),
+            // an overlay with a glued modifier still overlays
+            ("GAMBA notLw!", "GAMBA+notL[w]"),
+        ]);
+    }
+
+    #[test]
+    fn glued_prefixes_still_work() {
+        table(&[("w!h!KEKW", "KEKW[xw]"), ("z!KEKW", "KEKW")]);
+    }
+
+    #[test]
+    fn chained_words_follow_the_trailing_bang() {
+        table(&[
+            // ends in a letter → ffz-shaped → previous emote
+            ("Kappa w!h!ffzX", "Kappa[xxw]"),
+            ("Kappa Keepo w!h!ffzX", "Kappa Keepo[xxw]"),
+            // ends in `!` → bttv-shaped → next emote
+            ("Kappa w!h! Keepo", "Kappa Keepo[xw]"),
+            ("w!c!#00fh! Kappa", "Kappa[xw@240]"),
+        ]);
+    }
+
+    #[test]
+    fn hex_colors_tint_and_latest_wins() {
+        table(&[
+            ("c!#f00 Kappa", "Kappa[@0]"),
+            ("c!#0f0 Kappa", "Kappa[@120]"),
+            ("c!#0000ff Kappa", "Kappa[@240]"),
+            ("c!00f Kappa", "Kappa[@240]"), // `#` optional
+            ("c!#f00 c!#00f Kappa", "Kappa[@240]"),
+        ]);
+        assert_eq!(hex_hue("ff8700"), Some(32));
+        assert_eq!(hex_hue("zzz"), None);
+        assert_eq!(hex_hue("12"), None);
+    }
+
+    #[test]
+    fn composition_per_hscomposeall() {
+        // scales multiply and clamp to ±4, rotations add, effects dedupe
+        table(&[
+            ("w! w! KEKW", "KEKW[ww]"),
+            ("KEKW ffzRainbow ffzRainbow", "KEKW[R]"),
+            ("KEKW ffzHyper ffzHyper s!", "KEKW[Hs]"),
+            ("w!w!w!w!w!w!KEKW", "KEKW[wwww]"), // capped, keys stay bounded
+        ]);
+        let g = |fx: &[Effect]| compose(fx);
+        assert_eq!((g(&[]).sx, g(&[]).sy, g(&[]).rot), (1, 1, 0));
+        let wide3 = g(&[Effect::Wide; 3]);
+        assert_eq!(wide3.sx, 4); // 8 → clamped
+        assert_eq!(g(&[Effect::FlipX, Effect::FlipX]).sx, 1); // mirrors cancel
+        assert_eq!(g(&[Effect::FlipX, Effect::Wide]).sx, -2);
+        assert_eq!(g(&[Effect::Tall]).sy, 2);
+        assert_eq!(g(&[Effect::RotateL, Effect::RotateL]).rot, 180);
+        assert_eq!(g(&[Effect::RotateL, Effect::RotateR]).rot, 0);
+        assert_eq!(g(&[Effect::RotateL]).rot, 270);
+        assert_eq!(g(&[Effect::RotateR; 4]).rot, 0);
+    }
+
+    #[test]
+    fn wide_is_the_base_layers_footprint() {
+        let set = cast();
+        let wide = |m: &str| match &segments(m, &set)[0] {
+            Segment::Stack(s) => s.wide(),
+            _ => panic!("no stack"),
+        };
+        assert!(wide("w! KEKW"));
+        assert!(wide("KEKW ffzWide"));
+        assert!(!wide("KEKW ffzTall"));
+        assert!(wide("w! w! w! KEKW")); // clamped, still wide
+        assert!(wide("w! h! KEKW")); // mirrored 2x is still wide
+        assert!(!wide("GAMBA notL ffzW")); // overlay resizes onto the base
+        assert!(!wide("KEKW"));
+    }
+
+    #[test]
+    fn zero_width_overlays_stack() {
+        table(&[
+            ("GAMBA notL", "GAMBA+notL"),
+            ("GAMBA notL notL", "GAMBA+notL+notL"),
+            ("notL", "notL"), // nothing to overlay → base
+            ("GAMBA lol notL", "GAMBA 'lol' notL"),
+            ("GAMBA w! notL", "GAMBA+notL[w]"),
+            ("GAMBA notL w!", "GAMBA+notL[w]"),
+        ]);
     }
 
     #[test]
     fn z_forces_overlay() {
-        let set = EmoteSet::from_list([e("GAMBA"), e("KEKW")]);
-        let s = stacks("GAMBA z!KEKW", &set);
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].urls.len(), 2);
+        table(&[
+            ("GAMBA z!KEKW", "GAMBA+KEKW"),
+            ("GAMBA z! KEKW", "GAMBA+KEKW"),
+            ("GAMBA z!w!KEKW", "GAMBA+KEKW[w]"),
+            ("GAMBA z!", "GAMBA 'z!'"), // z! only looks forward
+        ]);
     }
 
     #[test]
-    fn ffz_effect_words_attach_to_previous_stack() {
-        let set = EmoteSet::from_list([e("KEKW")]);
-        let s = stacks("KEKW ffzX ffzRainbow", &set);
-        assert_eq!(s[0].fx, vec![Effect::FlipX, Effect::Rainbow]);
-    }
-
-    #[test]
-    fn ffz_effect_needs_adjacency() {
-        let set = EmoteSet::from_list([e("KEKW")]);
-        let segs = segments("KEKW lol ffzX", &set);
+    fn name0_overlay_convention() {
+        table(&[
+            ("GAMBA lerolero0", "GAMBA+lerolero"),
+            ("lerolero0", "lerolero"), // no previous stack → base
+        ]);
+        // an emote literally named lerolero0 is its own emote
+        let set = EmoteSet::from_list([e("GAMBA"), e("lerolero"), e("lerolero0")]);
         assert_eq!(
-            segs,
-            vec![
-                Segment::Stack(Stack::new("KEKW", "https://cdn/KEKW.webp".into())),
-                Segment::Text("lol ffzX".into()),
-            ]
+            show_with("GAMBA lerolero0", &set, &EmoteSet::new()),
+            "GAMBA lerolero0"
         );
+        // not an emote at all → text
+        assert_eq!(show("nope0"), "'nope0'");
+        assert_eq!(show("0"), "'0'");
     }
 
     #[test]
-    fn exact_emote_name_beats_prefix_parse() {
-        let set = EmoteSet::from_list([e("h!i")]);
-        let s = stacks("h!i", &set);
-        assert_eq!(s[0].base, "h!i");
-        assert!(s[0].fx.is_empty());
+    fn exact_emote_name_beats_chain_parse() {
+        let set = EmoteSet::from_list([e("h!i"), e("w!h!")]);
+        assert_eq!(show_with("h!i", &set, &EmoteSet::new()), "h!i");
+        // an emote named like a chain wins over parsing it as modifiers
+        assert_eq!(show_with("w!h!", &set, &EmoteSet::new()), "w!h!");
+    }
+
+    #[test]
+    fn refs_outrank_the_set_but_native_yields_to_it() {
+        let set = EmoteSet::from_list([e("Kappa")]);
+        let heat = Emote {
+            url: "https://hs/Kappa".into(),
+            provider: "heatsync".into(),
+            ..e("Kappa")
+        };
+        // inventory ref beats the channel emote of the same name
+        let refs = EmoteSet::from_list([heat]);
+        assert_eq!(show_with("Kappa", &set, &refs), "Kappa");
+        match &segments_with("Kappa", &set, &refs)[0] {
+            Segment::Stack(s) => assert_eq!(s.layers[0].url, "https://hs/Kappa"),
+            _ => panic!(),
+        }
+        // native twitch ref yields to the set's copy…
+        let refs = EmoteSet::from_list([native("Kappa", "twitch")]);
+        match &segments_with("Kappa", &set, &refs)[0] {
+            Segment::Stack(s) => assert_eq!(s.layers[0].url, "https://cdn/Kappa.webp"),
+            _ => panic!(),
+        }
+        // …but resolves a name the set doesn't have, with modifiers
+        let refs = EmoteSet::from_list([native("SubEmote", "twitch")]);
+        match &segments_with("w! SubEmote ffzX", &set, &refs)[0] {
+            Segment::Stack(s) => {
+                assert_eq!(s.layers[0].url, "https://native/SubEmote");
+                assert_eq!(s.layers[0].fx, vec![Effect::FlipX, Effect::Wide]);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn keys_are_unique_per_effect_and_roundtrip() {
+        let set = cast();
+        let mut keys = std::collections::HashSet::new();
+        for (name, _) in TOKENS.iter().filter(|(k, _)| *k != "z!") {
+            let msg = if name.ends_with('!') {
+                format!("{name} KEKW")
+            } else {
+                format!("KEKW {name}")
+            };
+            match &segments(&msg, &set)[0] {
+                Segment::Stack(s) => keys.insert(s.key()),
+                _ => panic!("{msg}"),
+            };
+        }
+        // 24 words alias into 17 effects (x!/h!/ffzX, y!/v!/ffzY, ffzW/ffzWide/w!)
+        assert_eq!(keys.len(), 17);
+        assert_eq!(CODES.len(), 17);
+        let codes: std::collections::HashSet<_> = CODES.iter().map(|c| c.1).collect();
+        assert_eq!(codes.len(), 17, "stack-key codes are unique");
     }
 
     #[test]
     fn key_roundtrips_through_split_key() {
-        let set = EmoteSet::from_list([e("GAMBA"), zw("notL")]);
-        let s = stacks("w!GAMBA notL ffzCursed", &set);
-        let key = s[0].key();
-        let (urls, fx) = split_key(&key);
+        let set = cast();
+        let s = match &segments("w!GAMBA notL ffzCursed c!#0f0", &set)[0] {
+            Segment::Stack(s) => s.clone(),
+            _ => panic!(),
+        };
         assert_eq!(
-            urls,
-            vec!["https://cdn/GAMBA.webp", "https://cdn/notL.webp"]
+            s.key(),
+            "https://cdn/GAMBA.webp\n#w\nhttps://cdn/notL.webp\n#c@120"
         );
-        assert_eq!(fx, vec![Effect::Wide, Effect::Cursed]);
+        assert_eq!(split_key(&s.key()), s.layers);
+        // plain stacks keep the old shape: urls only
+        let plain = match &segments("GAMBA notL", &set)[0] {
+            Segment::Stack(s) => s.key(),
+            _ => panic!(),
+        };
+        assert_eq!(plain, "https://cdn/GAMBA.webp\nhttps://cdn/notL.webp");
+        assert_eq!(
+            split_key("https://x/a\n#xw@7")[0].fx,
+            vec![Effect::FlipX, Effect::Wide]
+        );
+        assert_eq!(split_key("https://x/a\n#xw@7")[0].hue, Some(7));
+        // a stray effect line with no layer is ignored, not a panic
+        assert!(split_key("#xw").is_empty());
     }
 
     #[test]
