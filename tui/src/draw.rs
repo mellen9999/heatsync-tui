@@ -5,7 +5,7 @@ use crate::input::slot_of;
 use crate::layout::{fit, layout_message, layout_text, EmoteMode, Look, Place, RowPlan, Rows};
 use crate::palette;
 use heatsync_core::edit;
-use heatsync_core::emote::{segments, Segment};
+use heatsync_core::emote::{segments, EmoteSet, Segment};
 use heatsync_core::heat::Tier;
 use heatsync_core::scroll;
 use heatsync_core::{Channel, Platform};
@@ -132,7 +132,7 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let mut b = Rows::new(area.width);
     b.prefix(Span::styled(" ❯ ", palette::TEXT), 3);
     let text = app.line.text();
-    layout_text(&mut b, &text, set, mode);
+    layout_text(&mut b, &text, set, EmoteSet::none(), mode);
     if let Some(row) = b.finish().into_iter().next() {
         draw_planned(f, mode, area, area.y, row.line, &row.places, EMOTE_H);
     }

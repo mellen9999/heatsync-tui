@@ -98,7 +98,7 @@ pub(crate) fn drain_history(app: &mut App) {
             if i == *focus {
                 let from = channels[i].messages.len().saturating_sub(60);
                 for m in channels[i].messages.iter().skip(from) {
-                    request_stacks(store, fb, &emotes[i], &m.text);
+                    request_stacks(store, fb, &emotes[i], m.refs(), &m.text);
                 }
             }
         }
@@ -147,7 +147,7 @@ pub(crate) fn drain_emotes(app: &mut App) {
         let i = (*focus).min(channels.len() - 1);
         let from = channels[i].messages.len().saturating_sub(60);
         for m in channels[i].messages.iter().skip(from) {
-            request_stacks(store, fb, &emotes[i], &m.text);
+            request_stacks(store, fb, &emotes[i], m.refs(), &m.text);
         }
     }
 }
@@ -160,15 +160,17 @@ pub(crate) fn request_stacks(
     store: &mut Option<EmoteStore>,
     fb: &Option<FbEmotes>,
     set: &EmoteSet,
+    refs: &EmoteSet,
     text: &str,
 ) {
-    if set.is_empty() {
+    // per-message refs can resolve emotes the channel set doesn't have.
+    if set.is_empty() && refs.is_empty() {
         return;
     }
     if let Some(s) = store {
-        each_stack(text, set, |k| s.request(k));
+        each_stack(text, set, refs, |k| s.request(k));
     } else if let Some(f) = fb {
-        each_stack(text, set, |k| f.request(k));
+        each_stack(text, set, refs, |k| f.request(k));
     }
 }
 
@@ -214,8 +216,11 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
     if let Some(u) = &l.uid {
         paints.want(u);
     }
+    let refs = (!l.emotes.is_empty())
+        .then(|| std::sync::Arc::new(heatsync_core::emote::ref_set(&l.emotes)));
     if i == *focus {
-        request_stacks(store, fb, &emotes[i], &l.content);
+        let r = refs.as_deref().unwrap_or(EmoteSet::none());
+        request_stacks(store, fb, &emotes[i], r, &l.content);
     }
     let pinged = l.note.is_none()
         && !me.iter().any(|n| l.user.eq_ignore_ascii_case(n))
@@ -236,6 +241,7 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
                 ts: crate::clock::now_secs(),
                 ..l.extra
             },
+            emotes: refs,
             heat: 0.0,
             uid: l.uid,
         },
@@ -373,6 +379,7 @@ pub(crate) fn drain_twitch(app: &mut App) {
                         what: n.text.clone(),
                     }),
                     extra: Default::default(),
+                    emotes: None,
                     heat: 0.0,
                     uid: None,
                 });
@@ -419,6 +426,7 @@ pub(crate) fn drain_hs(app: &mut App) {
                     what: n.text.clone(),
                 }),
                 extra: Default::default(),
+                emotes: None,
                 heat: 0.0,
                 uid: None,
             });
@@ -465,7 +473,7 @@ pub(crate) fn tick_advance(app: &mut App) {
     if let Some(ch) = channels.get(*focus) {
         let from = ch.messages.len().saturating_sub(60);
         for m in ch.messages.iter().skip(from) {
-            request_stacks(store, fb, &emotes[*focus], &m.text);
+            request_stacks(store, fb, &emotes[*focus], m.refs(), &m.text);
         }
     }
 }

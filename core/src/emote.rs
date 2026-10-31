@@ -44,6 +44,12 @@ impl EmoteSet {
         EmoteSet::default()
     }
 
+    /// the shared empty set — "no per-message refs" without allocating one.
+    pub fn none() -> &'static EmoteSet {
+        static NONE: std::sync::OnceLock<EmoteSet> = std::sync::OnceLock::new();
+        NONE.get_or_init(EmoteSet::new)
+    }
+
     /// build from an API list. the server already ordered by precedence and
     /// deduped, but we defend with first-wins so a stray dup can't override.
     pub fn from_list(list: impl IntoIterator<Item = Emote>) -> EmoteSet {

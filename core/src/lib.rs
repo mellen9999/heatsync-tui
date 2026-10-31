@@ -254,6 +254,9 @@ pub struct Message {
     /// `yt_<UC id>`), when the relay sent one — keys name paints and colors.
     pub uid: Option<String>,
     pub extra: Extra,
+    /// this line's own emote refs (see [`emote::segments_with`]), built once
+    /// when the line lands; None for lines that carry none (history, system).
+    pub emotes: Option<std::sync::Arc<emote::EmoteSet>>,
     pub heat: f64,
 }
 
@@ -263,6 +266,13 @@ pub struct Pin {
     pub id: String,
     pub user: String,
     pub text: String,
+}
+
+impl Message {
+    /// the per-message ref set, empty when the line carries none.
+    pub fn refs(&self) -> &emote::EmoteSet {
+        self.emotes.as_deref().unwrap_or(emote::EmoteSet::none())
+    }
 }
 
 /// live state for a single channel. bounded ring buffer — a raid can flood
@@ -620,6 +630,7 @@ mod channel_tests {
             reply_to: None,
             note: None,
             extra: Default::default(),
+            emotes: None,
             heat: 0.0,
             uid: None,
         }

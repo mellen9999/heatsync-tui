@@ -63,6 +63,12 @@ const WORDS: &[&str] = &[
     "PogU",
     "sptvJAM",
     "Aware",
+    // modifier / overlay grammar, for any demo set that carries these names
+    "Kappa RainTime w!",
+    "KEKW ffzW ffzRainbow",
+    "w!h!ffzX KEKW",
+    "GAMBA notL ffzSpin",
+    "c!#0f0 PogU ffzBounce",
 ];
 
 /// per-channel baseline messages/tick — spreads channels across the ramp.
@@ -182,6 +188,7 @@ impl Driver {
                             what: what.to_string(),
                         }),
                         extra: Default::default(),
+                        emotes: None,
                         heat: 0.0,
                         uid: None,
                     },
@@ -231,6 +238,7 @@ impl Driver {
                             reply_to,
                             note: None,
                             extra,
+                            emotes: None,
                             heat: 0.0,
                             uid: None,
                         },

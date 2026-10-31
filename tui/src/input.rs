@@ -583,6 +583,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                 reply_to: None,
                 note: None,
                 extra: Default::default(),
+                emotes: None,
                 heat: 0.0,
                 uid: None,
             },

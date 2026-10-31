@@ -480,7 +480,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             let App {
                 store, fb, emotes, ..
             } = &mut app;
-            request_stacks(store, fb, &emotes[focus], &text);
+            request_stacks(store, fb, &emotes[focus], EmoteSet::none(), &text);
         }
         if dirty || emote_mode(&app).next_flip_in().is_some() {
             // snapshot the animation clock + reset the per-draw blit budget, so every

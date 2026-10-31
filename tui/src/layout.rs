@@ -2,7 +2,7 @@ use crate::emote::fb::FbEmotes;
 use crate::emote::render::{EmoteStore, EMOTE_H};
 use crate::paints::UserLook;
 use crate::palette;
-use heatsync_core::emote::{segments, EmoteSet, Segment};
+use heatsync_core::emote::{segments_with, EmoteSet, Segment};
 use heatsync_core::paint::Paint;
 use heatsync_core::{Badge, Message, Platform};
 use ratatui::style::{Color, Modifier, Style};
@@ -54,8 +54,8 @@ impl EmoteMode<'_> {
 /// walk a message's emote STACKS in order, yielding each stack's cache key.
 /// core's [`segments`] owns the grammar — zero-width overlays, `w!`-style BTTV
 /// prefixes, `z!` forcing, FFZ effect words. shared by layout and prefetch.
-pub(crate) fn each_stack(text: &str, set: &EmoteSet, mut f: impl FnMut(&str)) {
-    for seg in segments(text, set) {
+pub(crate) fn each_stack(text: &str, set: &EmoteSet, refs: &EmoteSet, mut f: impl FnMut(&str)) {
+    for seg in segments_with(text, set, refs) {
         if let Segment::Stack(s) = seg {
             f(&s.key());
         }
@@ -326,15 +326,28 @@ impl Rows {
 }
 
 /// flow `text`'s segments (words + emote stacks) into the layouter.
-pub(crate) fn layout_text(b: &mut Rows, text: &str, set: &EmoteSet, mode: EmoteMode) {
+pub(crate) fn layout_text(
+    b: &mut Rows,
+    text: &str,
+    set: &EmoteSet,
+    refs: &EmoteSet,
+    mode: EmoteMode,
+) {
     // message text is plain white — heat lives in the bar and tab numbers,
     // never in the reading surface.
-    layout_text_in(b, text, set, mode, palette::TEXT);
+    layout_text_in(b, text, set, refs, mode, palette::TEXT);
 }
 
 /// `layout_text` in a given style (`/me` and highlighted lines).
-fn layout_text_in(b: &mut Rows, text: &str, set: &EmoteSet, mode: EmoteMode, text_hue: Style) {
-    for seg in segments(text, set) {
+fn layout_text_in(
+    b: &mut Rows,
+    text: &str,
+    set: &EmoteSet,
+    refs: &EmoteSet,
+    mode: EmoteMode,
+    text_hue: Style,
+) {
+    for seg in segments_with(text, set, refs) {
         if b.full {
             break;
         }
@@ -433,7 +446,7 @@ pub(crate) fn layout_message(
         }
         if !m.text.is_empty() {
             b.word("·", palette::DIM);
-            layout_text(&mut b, &m.text, set, mode);
+            layout_text(&mut b, &m.text, set, m.refs(), mode);
         }
         return b.finish();
     }
@@ -465,7 +478,7 @@ pub(crate) fn layout_message(
     if m.extra.highlight {
         hue = hue.add_modifier(Modifier::REVERSED);
     }
-    layout_text_in(&mut b, &m.text, set, mode, hue);
+    layout_text_in(&mut b, &m.text, set, m.refs(), mode, hue);
     if m.extra.first {
         b.word("◇ first message", palette::DIM_TAG);
     }
@@ -625,6 +638,7 @@ mod wrap_tests {
             reply_to: None,
             note: None,
             extra: Default::default(),
+            emotes: None,
             heat: 0.0,
             uid: None,
         }
@@ -889,7 +903,9 @@ mod stack_tests {
     fn overlay_groups_onto_base() {
         let set = EmoteSet::from_list([em("GAMBA", false), em("notL", true)]);
         let mut keys = Vec::new();
-        each_stack("GAMBA notL", &set, |k| keys.push(k.to_string()));
+        each_stack("GAMBA notL", &set, EmoteSet::none(), |k| {
+            keys.push(k.to_string())
+        });
         assert_eq!(keys, vec!["u/GAMBA\nu/notL"]); // one stack, base + overlay
     }
 
@@ -897,7 +913,9 @@ mod stack_tests {
     fn text_breaks_stack() {
         let set = EmoteSet::from_list([em("GAMBA", false), em("KEKW", false)]);
         let mut keys = Vec::new();
-        each_stack("GAMBA lol KEKW", &set, |k| keys.push(k.to_string()));
+        each_stack("GAMBA lol KEKW", &set, EmoteSet::none(), |k| {
+            keys.push(k.to_string())
+        });
         assert_eq!(keys, vec!["u/GAMBA", "u/KEKW"]); // separate, text between
     }
 
@@ -905,7 +923,9 @@ mod stack_tests {
     fn multiple_overlays_stack() {
         let set = EmoteSet::from_list([em("A", false), em("h1", true), em("h2", true)]);
         let mut keys = Vec::new();
-        each_stack("A h1 h2", &set, |k| keys.push(k.to_string()));
+        each_stack("A h1 h2", &set, EmoteSet::none(), |k| {
+            keys.push(k.to_string())
+        });
         assert_eq!(keys, vec!["u/A\nu/h1\nu/h2"]);
     }
 }
