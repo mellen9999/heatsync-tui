@@ -5,6 +5,7 @@ use crate::http;
 use crate::layout::{each_stack, mentions};
 use crate::net::ChatEvent;
 use heatsync_core::emote::EmoteSet;
+use heatsync_core::proto::ChatLine;
 use heatsync_core::{Message, Platform};
 use std::sync::mpsc::Sender;
 
@@ -144,92 +145,131 @@ pub(crate) fn request_stacks(
     }
 }
 
-/// drain the live feed into the channel buffers. runs on every event-loop wake,
-/// so a chat line shows on the very next frame instead of the next data tick.
-pub(crate) fn drain_feed(app: &mut App) -> bool {
+/// land one line in its tab (if it has one): emote prefetch, the repeat-note
+/// guard, heat/unread, ping and stream-event flags.
+fn deliver(app: &mut App, l: ChatLine, now: u64) {
     let App {
         channels,
         emotes,
-        feed,
         store,
         fb,
-        status,
         focus,
         me,
         paints,
         ..
     } = app;
-    let Feed::Live {
-        rx,
-        start,
-        connected,
-    } = feed
+    let Some(i) = channels
+        .iter()
+        .position(|c| c.matches(l.platform, &l.channel))
     else {
+        return;
+    };
+    // fetch starts the instant the line lands — but only for
+    // the channel on screen. prefetching every background
+    // channel's emotes burned network + decode for images
+    // that might never be looked at; a switched-to channel is
+    // filled by the tick sweep within 200ms instead.
+    // the relay double-broadcasts some event frames (usernotice
+    // arrives twice with the same id) — drop a note identical
+    // to one already in the recent tail.
+    // 16 covers a spam-speed channel filling the gap between
+    // the two broadcasts (~200ms apart).
+    if l.note.is_some()
+        && channels[i].messages.iter().rev().take(16).any(|e| {
+            e.platform == l.platform
+                && e.user == l.user
+                && e.text == l.content
+                && e.note.as_ref() == l.note.as_ref()
+        })
+    {
+        return;
+    }
+    if let Some(u) = &l.uid {
+        paints.want(u);
+    }
+    if i == *focus {
+        request_stacks(store, fb, &emotes[i], &l.content);
+    }
+    let pinged = l.note.is_none()
+        && me
+            .as_deref()
+            .is_some_and(|me| !l.user.eq_ignore_ascii_case(me) && mentions(&l.content, me));
+    let evented = l.stream.is_some();
+    channels[i].record(
+        Message {
+            platform: l.platform,
+            user: l.user,
+            text: l.content,
+            color: l.color,
+            badges: l.badges,
+            id: l.id,
+            gone: None,
+            reply_to: l.reply_to,
+            note: l.note,
+            heat: 0.0,
+            uid: l.uid,
+        },
+        now,
+    );
+    if pinged {
+        channels[i].ping();
+    }
+    if evented {
+        channels[i].flag_event();
+    }
+}
+
+/// a live line through the stream-event guards. a followed-channel twin of an
+/// open tab is dropped (the room's own event lands there); one for a channel
+/// with no tab becomes a status flash. returns what to deliver now.
+fn route(app: &mut App, l: ChatLine, now: u64) -> Vec<ChatLine> {
+    let follow = l.stream.as_ref().is_some_and(|s| s.follow);
+    if follow {
+        // live list changed — the picker's cached rows are now stale.
+        app.pick_cache.stale();
+        if app
+            .channels
+            .iter()
+            .any(|c| c.matches(l.platform, &l.channel))
+        {
+            return Vec::new();
+        }
+    }
+    let out = app.streams.push(l, now);
+    if follow {
+        for l in &out {
+            if let Some(n) = &l.note {
+                app.status = Some(format!("{} {}", l.channel, n.what));
+            }
+        }
+        return Vec::new();
+    }
+    out
+}
+
+/// drain the live feed into the channel buffers. runs on every event-loop wake,
+/// so a chat line shows on the very next frame instead of the next data tick.
+pub(crate) fn drain_feed(app: &mut App) -> bool {
+    let Feed::Live { rx, start, .. } = &app.feed else {
         return false; // mock advances on the tick — it's a synthetic cadence
     };
     let now = start.elapsed().as_millis() as u64;
     let mut got = false;
+    let mut evs = Vec::new();
     while let Ok(ev) = rx.try_recv() {
+        evs.push(ev);
+    }
+    for ev in evs {
         got = true;
         match ev {
             ChatEvent::Line(l) => {
-                if let Some(i) = channels
-                    .iter()
-                    .position(|c| c.matches(l.platform, &l.channel))
-                {
-                    // fetch starts the instant the line lands — but only for
-                    // the channel on screen. prefetching every background
-                    // channel's emotes burned network + decode for images
-                    // that might never be looked at; a switched-to channel is
-                    // filled by the tick sweep within 200ms instead.
-                    // the relay double-broadcasts some event frames (usernotice
-                    // arrives twice with the same id) — drop a note identical
-                    // to one already in the recent tail.
-                    // 16 covers a spam-speed channel filling the gap between
-                    // the two broadcasts (~200ms apart).
-                    if l.note.is_some()
-                        && channels[i].messages.iter().rev().take(16).any(|e| {
-                            e.platform == l.platform
-                                && e.user == l.user
-                                && e.text == l.content
-                                && e.note.as_ref() == l.note.as_ref()
-                        })
-                    {
-                        continue;
-                    }
-                    if let Some(u) = &l.uid {
-                        paints.want(u);
-                    }
-                    if i == *focus {
-                        request_stacks(store, fb, &emotes[i], &l.content);
-                    }
-                    let pinged = l.note.is_none()
-                        && me.as_deref().is_some_and(|me| {
-                            !l.user.eq_ignore_ascii_case(me) && mentions(&l.content, me)
-                        });
-                    channels[i].record(
-                        Message {
-                            platform: l.platform,
-                            user: l.user,
-                            text: l.content,
-                            color: l.color,
-                            badges: l.badges,
-                            id: l.id,
-                            gone: None,
-                            reply_to: l.reply_to,
-                            note: l.note,
-                            heat: 0.0,
-                            uid: None,
-                        },
-                        now,
-                    );
-                    if pinged {
-                        channels[i].ping();
-                    }
+                for l in route(app, l, now) {
+                    deliver(app, l, now);
                 }
             }
+            ChatEvent::FollowLive(live) => app.streams.seed_live(live),
             ChatEvent::Delete(d) => {
-                for c in channels.iter_mut() {
+                for c in app.channels.iter_mut() {
                     // youtube's frame names a video; an empty channel = any tab
                     // of that platform (the id still has to match a line).
                     let here = if d.channel.is_empty() {
@@ -242,12 +282,15 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                     }
                 }
             }
-            ChatEvent::Color { id, color } => paints.set_color(&id, &color),
-            ChatEvent::Cosmetic(ids) => paints.invalidate(&ids),
-            ChatEvent::Connected => *connected = true,
-            ChatEvent::Disconnected => *connected = false,
+            ChatEvent::Color { id, color } => app.paints.set_color(&id, &color),
+            ChatEvent::Cosmetic(ids) => app.paints.invalidate(&ids),
+            ChatEvent::Connected | ChatEvent::Disconnected => {
+                if let Feed::Live { connected, .. } = &mut app.feed {
+                    *connected = matches!(ev, ChatEvent::Connected);
+                }
+            }
             ChatEvent::Auth(ok) => {
-                *status = Some(if ok {
+                app.status = Some(if ok {
                     "authenticated".into()
                 } else {
                     "auth failed — check HEATSYNC_TOKEN".into()
@@ -255,10 +298,15 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
             }
             ChatEvent::SendResult { ok, error } => {
                 if !ok {
-                    *status = Some(format!("send failed: {}", error.unwrap_or_default()));
+                    app.status = Some(format!("send failed: {}", error.unwrap_or_default()));
                 }
             }
         }
+    }
+    // first-game updates whose wait for a go-live ran out.
+    for l in app.streams.tick(now) {
+        got = true;
+        deliver(app, l, now);
     }
     got
 }

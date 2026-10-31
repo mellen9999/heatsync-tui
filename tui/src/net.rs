@@ -4,6 +4,7 @@
 //! backoff and re-subscribes; a read timeout lets the same thread heartbeat.
 //! anon read — no auth needed to consume chat.
 
+use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -11,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use heatsync_core::proto::{self, Event};
+use heatsync_core::streamev::StreamEvents;
 use heatsync_core::Platform;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message as WsMsg;
@@ -20,7 +22,8 @@ const READ_TIMEOUT: Duration = Duration::from_millis(800);
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const BACKOFF_MAX: Duration = Duration::from_secs(15);
 /// gap between join/part frames — the extension spaces its connect burst 80ms
-/// apart so the server's per-handler limits never drop a join.
+/// apart so the server's per-handler limits never drop a join. frames wait in
+/// a queue and go out one per gap from the read loop, which never blocks.
 const FRAME_GAP: Duration = Duration::from_millis(80);
 
 type Socket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
@@ -63,6 +66,8 @@ pub enum ChatEvent {
     Line(proto::ChatLine),
     /// a mod removed lines (the mod-log note, if any, arrives as a Line).
     Delete(proto::Delete),
+    /// followed channels already live at connect (the server's catch-up).
+    FollowLive(Vec<Sub>),
     Connected,
     Disconnected,
     Auth(bool),
@@ -83,8 +88,10 @@ pub enum ChatEvent {
 fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
     match ev {
         Event::Chat(l) => tx.send(ChatEvent::Line(l)).is_ok(),
+        // a went-live never replays from a backfill (it was shown when it happened).
         Event::Backfill(lines) => lines
             .into_iter()
+            .filter(|l| StreamEvents::replay_keeps(l, None))
             .all(|l| tx.send(ChatEvent::Line(l)).is_ok()),
         Event::Delete { line, del } => {
             line.is_none_or(|l| tx.send(ChatEvent::Line(l)).is_ok())
@@ -101,8 +108,8 @@ fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
         }
         Event::Color { id, color } => tx.send(ChatEvent::Color { id, color }).is_ok(),
         Event::Cosmetic(ids) => tx.send(ChatEvent::Cosmetic(ids)).is_ok(),
-        // the tui doesn't consume the followed-live snapshot yet.
-        Event::FollowLive(_) | Event::Pong | Event::Ignore => true,
+        Event::FollowLive(v) => tx.send(ChatEvent::FollowLive(v)).is_ok(),
+        Event::Pong | Event::Ignore => true,
     }
 }
 
@@ -148,17 +155,24 @@ fn session(
             return SessionEnd::Dropped;
         }
     }
-    for (platform, channel) in subs.iter() {
-        if !send_paced(&mut ws, proto::join(*platform, channel)) {
-            return SessionEnd::Dropped;
-        }
-    }
+    // resubscribe through the paced queue, not inline: 20+ tabs would stall
+    // the loop (pings, heartbeat) for seconds.
+    let mut queue: VecDeque<String> = subs.iter().flat_map(|(p, c)| proto::join(*p, c)).collect();
+    let mut fast = false;
+    let mut last_frame = Instant::now();
     if tx.send(ChatEvent::Connected).is_err() {
         return SessionEnd::ReceiverGone;
     }
 
     let mut last_hb = Instant::now();
     loop {
+        // wake at the queue's cadence while frames wait, idle cadence otherwise.
+        if fast != !queue.is_empty() {
+            fast = !queue.is_empty();
+            if let Ok(sock) = tcp_of(&mut ws) {
+                let _ = sock.set_read_timeout(Some(if fast { FRAME_GAP } else { READ_TIMEOUT }));
+            }
+        }
         match ws.read() {
             Ok(WsMsg::Text(t)) => {
                 if !forward(proto::parse(t.as_str()), tx) {
@@ -178,6 +192,7 @@ fn session(
 
         // drain queued outbound requests.
         while let Ok(o) = out.try_recv() {
+            // chat goes out at once; only join/part frames wait their turn.
             let frames = match o {
                 Outbound::Chat {
                     platform: Platform::Kick,
@@ -185,7 +200,13 @@ fn session(
                     text,
                 } => {
                     *req += 1;
-                    vec![proto::send_kick(&channel, &text, *req)]
+                    if ws
+                        .send(WsMsg::Text(proto::send_kick(&channel, &text, *req)))
+                        .is_err()
+                    {
+                        return SessionEnd::Dropped;
+                    }
+                    continue;
                 }
                 Outbound::Chat {
                     platform: Platform::Youtube,
@@ -193,7 +214,13 @@ fn session(
                     text,
                 } => {
                     *req += 1;
-                    vec![proto::send_youtube(&channel, &text, *req)]
+                    if ws
+                        .send(WsMsg::Text(proto::send_youtube(&channel, &text, *req)))
+                        .is_err()
+                    {
+                        return SessionEnd::Dropped;
+                    }
+                    continue;
                 }
                 // twitch has no relay send path — silently drop.
                 Outbound::Chat {
@@ -211,8 +238,15 @@ fn session(
                     proto::part(platform, &channel)
                 }
             };
-            if !send_paced(&mut ws, frames) {
-                return SessionEnd::Dropped;
+            queue.extend(frames);
+        }
+
+        if last_frame.elapsed() >= FRAME_GAP {
+            if let Some(f) = queue.pop_front() {
+                if ws.send(WsMsg::Text(f)).is_err() {
+                    return SessionEnd::Dropped;
+                }
+                last_frame = Instant::now();
             }
         }
 
@@ -223,19 +257,6 @@ fn session(
             last_hb = Instant::now();
         }
     }
-}
-
-/// send frames in order, `FRAME_GAP` apart. false = the socket is dead.
-fn send_paced(ws: &mut Socket, frames: Vec<String>) -> bool {
-    for (i, f) in frames.into_iter().enumerate() {
-        if i > 0 {
-            thread::sleep(FRAME_GAP);
-        }
-        if ws.send(WsMsg::Text(f)).is_err() {
-            return false;
-        }
-    }
-    true
 }
 
 /// borrow the underlying TcpStream to set a read timeout, through TLS or plain.

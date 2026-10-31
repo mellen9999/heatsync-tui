@@ -476,6 +476,16 @@ impl Cache {
             .filter(|(t, _)| t.elapsed() < CACHE_FOR)
             .map(|(_, f)| f)
     }
+    /// a followed channel went live / offline: keep the rows for display but
+    /// make the next open refetch.
+    pub fn stale(&mut self) {
+        if let (Some((t, _)), Some(old)) = (
+            self.0.as_mut(),
+            Instant::now().checked_sub(CACHE_FOR + Duration::from_secs(1)),
+        ) {
+            *t = old;
+        }
+    }
     pub fn any(&self) -> Option<&Fetched> {
         self.0.as_ref().map(|(_, f)| f)
     }

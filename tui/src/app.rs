@@ -7,6 +7,7 @@ use crate::{hsauth, kick, net, picker, twitch};
 use heatsync_core::complete::Completion;
 use heatsync_core::edit;
 use heatsync_core::emote::EmoteSet;
+use heatsync_core::streamev::StreamEvents;
 use heatsync_core::{mock, Channel, Message, Platform};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
@@ -86,4 +87,6 @@ pub(crate) struct App {
     pub(crate) pick_inflight: bool,
     /// name paints + heatsync name colors, by sender id.
     pub(crate) paints: Paints,
+    /// stream-event pairing + anti-wall guards, between the feed and the tabs.
+    pub(crate) streams: StreamEvents,
 }

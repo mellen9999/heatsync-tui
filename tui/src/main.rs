@@ -43,6 +43,7 @@ use feed::{
 };
 use heatsync_core::edit;
 use heatsync_core::emote::EmoteSet;
+use heatsync_core::streamev::StreamEvents;
 use heatsync_core::{mock, Channel, Platform};
 use input::{drain_picker, handle_key, Flow};
 use net::Sub;
@@ -170,6 +171,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             hist_rx,
             picker: None,
             pick_cache: picker::Cache(None),
+            streams: StreamEvents::new(),
             pick_tx,
             pick_rx,
             pick_inflight: false,
@@ -313,6 +315,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         hist_rx,
         picker: None,
         pick_cache: picker::Cache(None),
+        streams: StreamEvents::new(),
         pick_tx,
         pick_rx,
         pick_inflight: false,
