@@ -14,6 +14,9 @@ pub struct Queued {
     pub rect: Rect,
     pub key: String,
     pub idx: usize,
+    /// same emote, same rect, only the animation frame advanced: the cells
+    /// under it are untouched, so the frame can be painted in place.
+    pub in_place: bool,
 }
 
 #[derive(Default)]
@@ -30,6 +33,7 @@ impl Blitter {
             rect,
             key: key.to_owned(),
             idx,
+            in_place: false,
         });
     }
 
@@ -47,13 +51,16 @@ impl Blitter {
         let mut emits = Vec::new();
         for q in std::mem::take(&mut self.queue) {
             let ident = (q.key, q.idx);
-            let same = self.last.get(&q.rect) == Some(&ident);
+            let prev = self.last.get(&q.rect);
+            let same = prev == Some(&ident);
+            let in_place = prev.is_some_and(|p| p.0 == ident.0);
             next.insert(q.rect, ident.clone());
             if !same {
                 emits.push(Queued {
                     rect: q.rect,
                     key: ident.0,
                     idx: ident.1,
+                    in_place,
                 });
             }
         }
@@ -77,6 +84,24 @@ mod tests {
             b.push(*rect, key, *idx);
         }
         b.take_emits(area).len()
+    }
+
+    fn in_place(b: &mut Blitter, ps: &[(Rect, &str, usize)]) -> Vec<bool> {
+        for (rect, key, idx) in ps {
+            b.push(*rect, key, *idx);
+        }
+        b.take_emits(A).iter().map(|q| q.in_place).collect()
+    }
+
+    #[test]
+    fn only_a_frame_advance_is_in_place() {
+        let mut b = Blitter::default();
+        assert_eq!(in_place(&mut b, &[(r(1, 1), "k", 0)]), [false]); // first
+        assert_eq!(in_place(&mut b, &[(r(1, 1), "k", 1)]), [true]); // frame++
+        assert_eq!(in_place(&mut b, &[(r(1, 2), "k", 1)]), [false]); // moved
+        assert_eq!(in_place(&mut b, &[(r(1, 2), "j", 1)]), [false]); // other emote
+        assert_eq!(in_place(&mut b, &[]), Vec::<bool>::new());
+        assert_eq!(in_place(&mut b, &[(r(1, 2), "j", 2)]), [false]); // overwritten
     }
 
     #[test]

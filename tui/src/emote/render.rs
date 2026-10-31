@@ -441,10 +441,22 @@ impl EmoteStore {
                 continue;
             };
             if let Protocol::Sixel(s) = &f.proto {
+                // under tmux-native sixel a fresh image over tmux's stored one
+                // makes tmux delete and repaint it — a flash per animation
+                // frame. frames that only replace the previous one in place go
+                // around tmux as passthrough instead: foot paints over the
+                // old pixels, tmux never sees an overlap.
+                let wrapped;
+                let data = if q.in_place && self.tmux && self.native {
+                    wrapped = passthrough_in_place(&s.data);
+                    wrapped.as_str()
+                } else {
+                    s.data.as_str()
+                };
                 crossterm::queue!(
                     out,
                     crossterm::cursor::MoveTo(q.rect.x, q.rect.y),
-                    crossterm::style::Print(&s.data)
+                    crossterm::style::Print(data)
                 )?;
             }
         }
@@ -591,6 +603,14 @@ fn fix_tmux_passthrough(proto: &mut Protocol) {
         erase_block(s.area.width, s.area.height),
         sixel.replace('\x1b', "\x1b\x1b")
     );
+}
+
+/// a native-mode sixel (erase block + plain sixel) as tmux passthrough: the
+/// erase is dropped (the cells are already blank, the opaque frame covers the
+/// old one) and every ESC doubled so tmux forwards the sixel intact.
+fn passthrough_in_place(native: &str) -> String {
+    let sixel = native.find("\x1bP").map_or(native, |i| &native[i..]);
+    format!("\x1bPtmux;{}\x1b\\", sixel.replace('\x1b', "\x1b\x1b"))
 }
 
 /// blank a `w`x`h` cell block at the cursor and leave the cursor exactly where
@@ -1049,6 +1069,13 @@ fn build(picker: &Picker, key: &str, flatten: bool, wrap: SixelWrap) -> Option<B
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn in_place_frame_is_doubled_passthrough_without_the_erase() {
+        let native = format!("{}\x1bPq#0;2;0;0;0~\x1b\\", super::erase_block(2, 2));
+        let got = super::passthrough_in_place(&native);
+        assert_eq!(got, "\x1bPtmux;\x1b\x1bPq#0;2;0;0;0~\x1b\x1b\\\x1b\\");
+    }
+
     use super::*;
     use image::{Rgba, RgbaImage};
 
