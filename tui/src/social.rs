@@ -20,6 +20,10 @@ pub(crate) enum Msg {
         rows: Vec<Row>,
     },
     Hits(Vec<Hit>),
+    /// a whisper / dm went out to them — remembered so the next one skips any lookup.
+    Sent(Contact),
+    /// the name matched nobody: why, and the command to put back in the composer.
+    Missing(String, String),
     /// a line for the status bar (a send's outcome, or why a load failed).
     Say(String),
 }
@@ -136,6 +140,28 @@ impl Client {
             .collect()
     }
 
+    /// who `login` is on twitch / heatsync. `Ok(None)` = unknown, or not a name
+    /// worth asking about (the login goes into a URL, so only plain names do).
+    pub(crate) fn lookup(&self, login: &str, dm: bool) -> Result<Option<Contact>, String> {
+        let plain = !login.is_empty()
+            && login.len() <= 25
+            && login
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if !plain {
+            return Ok(None);
+        }
+        match self.call(
+            "GET",
+            &format!("/api/cli/users/lookup?login={login}&platform=twitch"),
+            None,
+        )? {
+            (200, v) => Ok(social::lookup_contact(&v, login, dm)),
+            (404, _) => Ok(None),
+            (st, v) => Err(fail(self.base(), st, &v, false)),
+        }
+    }
+
     /// what your mention rules caught (the server keeps hits while you're away).
     pub(crate) fn mention_hits(&self) -> Result<Vec<Hit>, String> {
         self.read("/api/cli/mention-rules/hits?limit=100")
@@ -195,6 +221,29 @@ mod tests {
         );
         assert_eq!(seen[1].1, "https://h.test/api/cli/dm");
         assert_eq!(seen[1].3, Some(json!({"toUserId": "u_7", "content": "yo"})));
+    }
+
+    #[test]
+    fn lookup_asks_by_login_and_reads_404_as_nobody() {
+        let f = Fake::new(vec![
+            Ok((200, json!({"twitch_id": "42", "display_name": "Bob"}))),
+            Ok((404, json!({"error": "unknown"}))),
+            Ok((200, json!({"twitch_id": "42"}))),
+        ]);
+        let cl = client(&f);
+        assert_eq!(cl.lookup("Bob", false).unwrap().unwrap().id, "42");
+        assert!(cl.lookup("ghost", false).unwrap().is_none());
+        // a heatsync dm needs the heatsync id: a twitch-only answer is nobody
+        assert!(cl.lookup("bob", true).unwrap().is_none());
+        // never put a weird name in a URL
+        assert!(cl.lookup("a/../b", false).unwrap().is_none());
+        assert!(cl.lookup("", false).unwrap().is_none());
+        let seen = f.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(
+            seen[0].1,
+            "https://h.test/api/cli/users/lookup?login=Bob&platform=twitch"
+        );
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub struct Mention {
     pub text: String,
     /// the platform message id when known — dedupe only, never persisted.
     pub id: Option<String>,
+    /// unix seconds it happened; 0 = a line saved before times were kept.
+    pub at: i64,
 }
 
 pub struct Log {
@@ -50,14 +52,17 @@ fn plat_of(s: &str) -> Platform {
 }
 
 fn to_line(m: &Mention) -> String {
-    json!({
+    let mut v = json!({
         "p": plat_str(m.platform),
         "c": m.channel,
         "u": m.user,
         "k": m.color,
         "t": m.text,
-    })
-    .to_string()
+    });
+    if m.at > 0 {
+        v["a"] = json!(m.at);
+    }
+    v.to_string()
 }
 
 /// one jsonl row back into a mention. the file is ours but still untrusted
@@ -74,6 +79,11 @@ fn from_line(line: &str) -> Option<Mention> {
         color: s("k").filter(|c| c.starts_with('#')),
         text,
         id: None,
+        at: v
+            .get("a")
+            .and_then(Value::as_i64)
+            .filter(|a| *a > 0)
+            .unwrap_or(0),
     })
 }
 
@@ -136,6 +146,25 @@ impl Log {
         }
     }
 
+    /// fold in mentions the log missed (the server's hits): every row ends up
+    /// in time order — lines with no time keep their place at the front — and
+    /// the file is rewritten whole.
+    pub fn merge(&mut self, more: Vec<Mention>) {
+        if more.is_empty() {
+            return;
+        }
+        let mut all: Vec<Mention> = self.rows.drain(..).chain(more).collect();
+        all.sort_by_key(|m| m.at); // stable: equal times keep arrival order
+        let skip = all.len().saturating_sub(CAP);
+        self.rows = all.into_iter().skip(skip).collect();
+        if let Some(p) = self.path.clone() {
+            if let Some(dir) = p.parent() {
+                let _ = fs::create_dir_all(dir);
+            }
+            self.rewrite(&p);
+        }
+    }
+
     /// atomically replace the file with just the retained rows.
     fn rewrite(&mut self, p: &PathBuf) {
         let tmp = p.with_extension("tmp");
@@ -167,6 +196,7 @@ mod tests {
             color: Some("#ff0000".into()),
             text: format!("hey {i}"),
             id: None,
+            at: 1_000 + i as i64,
         }
     }
 
@@ -241,5 +271,40 @@ mod tests {
         let mut log = Log::open(None);
         log.push(m(1));
         assert_eq!(log.rows().count(), 1);
+    }
+
+    #[test]
+    fn times_persist_and_old_lines_without_one_still_read() {
+        let p = scratch("times");
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(
+            &p,
+            "{\"p\":\"kick\",\"c\":\"c\",\"u\":\"u\",\"t\":\"old\"}\n",
+        )
+        .unwrap();
+        let mut log = Log::open(Some(p.clone()));
+        assert_eq!(log.rows().next().unwrap().at, 0);
+        log.push(m(5));
+        let back = Log::open(Some(p.clone()));
+        let at: Vec<_> = back.rows().map(|r| r.at).collect();
+        assert_eq!(at, vec![0, 1_005]);
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn merge_interleaves_by_time_and_keeps_the_cap() {
+        let p = scratch("merge");
+        let mut log = Log::open(Some(p.clone()));
+        log.push(m(1));
+        log.push(m(5));
+        log.merge(vec![m(3), m(0)]);
+        let at: Vec<_> = log.rows().map(|r| r.at).collect();
+        assert_eq!(at, vec![1_000, 1_001, 1_003, 1_005]);
+        assert_eq!(Log::open(Some(p.clone())).rows().count(), 4);
+        let many: Vec<_> = (0..CAP + 10).map(m).collect();
+        log.merge(many);
+        assert_eq!(log.rows().count(), CAP);
+        assert_eq!(log.rows().last().unwrap().at, 1_000 + CAP as i64 + 9);
+        let _ = fs::remove_dir_all(p.parent().unwrap());
     }
 }

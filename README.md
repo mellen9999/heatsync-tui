@@ -42,7 +42,7 @@ open with `/mentions`, `/feed`, `/whispers` — they pin left and stay open next
 
 - `/w <user> <msg>` twitch whisper · `/dm <user> <msg>` heatsync dm — works from any tab
 - `/op <text>` post to the feed · `/re <text>` reply to the newest OP in the feed tab
-- `/w` finds anyone whose chat line is on screen or who you've whispered; `/dm` finds your dm threads and the people you follow on heatsync. whispering needs twitch linked with whispers allowed (the tui prints the exact link if not).
+- `/w` and `/dm` look the name up on heatsync (and remember it); an unknown name leaves your text in the composer. whispering needs twitch linked with whispers allowed (the tui prints the exact link if not).
 - sends and reads need the matching tick above; if one is missing the tui says so in a line and which command fixes it.
 
 ## emotes

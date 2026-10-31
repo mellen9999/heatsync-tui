@@ -41,8 +41,6 @@ pub(crate) struct State {
     pub(crate) social_rx: Receiver<Msg>,
     /// people `/w` and `/dm` can address: your threads, follows, live senders.
     pub(crate) contacts: Vec<Contact>,
-    /// the conversation list has loaded at least once.
-    pub(crate) loaded: bool,
 }
 
 impl State {
@@ -66,7 +64,6 @@ impl State {
             social_tx,
             social_rx,
             contacts: Vec::new(),
-            loaded: false,
         }
     }
 }
@@ -287,6 +284,7 @@ pub(crate) fn event(app: &mut App, ev: ChatEvent) {
                     color: s.line.color,
                     text: s.line.content,
                     id: s.line.id,
+                    at: crate::clock::now_secs() as i64,
                 },
             ),
             TabKind::Feed | TabKind::Whispers => {
@@ -409,26 +407,33 @@ pub(crate) fn backfill_whispers(app: &mut App, rows: Vec<Row>) {
     }
 }
 
-/// the server's rule hits landed: any the local log doesn't already hold join
-/// it (and the tab) as history — not news, so nothing flashes.
+/// the server's rule hits landed: any the local log doesn't already hold are
+/// merged in by time (history, not news — nothing flashes) and the tab is
+/// rebuilt from the log so they sit where they happened.
 pub(crate) fn backfill_mentions(app: &mut App, hits: Vec<Mention>) {
-    // the server lists newest first; the tab reads oldest first.
-    for m in hits.into_iter().rev() {
-        if app.special.log.rows().any(|r| same_mention(r, &m)) {
-            continue;
+    let mut fresh: Vec<Mention> = Vec::new();
+    for m in hits {
+        let held = app
+            .special
+            .log
+            .rows()
+            .chain(fresh.iter())
+            .any(|r| same_mention(r, &m));
+        if !held {
+            fresh.push(m);
         }
-        if let Some(i) = find(app, TabKind::Mentions) {
-            app.channels[i].deliver(mention_msg(&m));
-            if app.focus == i {
-                app.channels[i].mark_seen();
-            }
-        }
-        app.special.log.push(m);
     }
+    if fresh.is_empty() {
+        return;
+    }
+    app.special.log.merge(fresh);
     if let Some(i) = find(app, TabKind::Mentions) {
-        if app.focus != i {
-            app.channels[i].mark_seen(); // history isn't news
+        let mut ch = Channel::special(TabKind::Mentions, CAP);
+        for m in app.special.log.rows() {
+            ch.deliver(mention_msg(m));
         }
+        ch.mark_seen();
+        app.channels[i] = ch;
     }
 }
 
@@ -520,6 +525,7 @@ pub(crate) mod tests {
             color: None,
             text: "hey me".into(),
             id: None,
+            at: 0,
         }
     }
 
@@ -532,6 +538,7 @@ pub(crate) mod tests {
             color: None,
             text: "hey".into(),
             id: None,
+            at: 0,
         });
         assert_eq!(m.tags[0].kind, TagKind::Platform);
         assert_eq!(m.tags[1], Tag::new("[xqc]", TagKind::Origin));

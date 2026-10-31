@@ -99,45 +99,50 @@ fn find(app: &App, dm: bool, who: &str) -> Option<Contact> {
         })
 }
 
-/// `/w` and `/dm`. true = the line went (the composer clears).
+/// `/w` and `/dm`. a name we don't know yet is looked up first (and
+/// remembered); if that finds nobody the text goes back in the composer.
+/// true = the line was taken (the composer clears).
 pub(crate) fn direct(app: &mut App, dm: bool, to: &str, text: &str) -> bool {
     let Some(c) = client(app) else {
         app.status = Some(NO_LOGIN.into());
         return false;
     };
-    let Some(who) = find(app, dm, to) else {
-        app.status = Some(unknown(app, dm, to));
-        return false;
-    };
-    let words = format!("{} → {}", if dm { "dm" } else { "whisper" }, who.login);
-    app.status = Some(words);
-    let text = text.to_string();
+    let known = find(app, dm, to);
+    let verb = if dm { "dm" } else { "whisper" };
+    app.status = Some(match &known {
+        Some(w) => format!("{verb} → {}", w.login),
+        None => format!("looking up {to}…"),
+    });
+    let (to, text) = (
+        to.trim().trim_start_matches('@').to_string(),
+        text.to_string(),
+    );
     spawn(app, c, move |c| {
+        let who = match known {
+            Some(w) => w,
+            None => match c.lookup(&to, dm) {
+                Ok(Some(w)) => w,
+                Ok(None) => {
+                    let side = if dm { "heatsync" } else { "twitch" };
+                    return Msg::Missing(
+                        format!("no {side} user {to}"),
+                        format!("/{} {to} {text}", if dm { "dm" } else { "w" }),
+                    );
+                }
+                Err(e) => return Msg::Say(e),
+            },
+        };
         let r = if who.dm {
             c.dm(&who, &text)
         } else {
             c.whisper(&who, &text)
         };
         match r {
-            Ok(()) => Msg::Say(String::new()),
+            Ok(()) => Msg::Sent(who),
             Err(e) => Msg::Say(e),
         }
     });
     true
-}
-
-/// why `/w name` / `/dm name` found nobody — in words that say what to do.
-fn unknown(app: &App, dm: bool, to: &str) -> String {
-    if !app.special.loaded {
-        return "still loading your conversations — try again in a moment".into();
-    }
-    if dm {
-        format!(
-            "no heatsync user {to} among your dms or follows — follow them on heatsync.org first"
-        )
-    } else {
-        format!("haven't seen {to} — whisper someone whose chat line is on screen, or who whispered you")
-    }
 }
 
 /// a feed post: `reply` is the base36 id being answered. true = it went.
@@ -216,6 +221,13 @@ pub(crate) fn drain(app: &mut App) {
     while let Ok(m) = app.special.social_rx.try_recv() {
         match m {
             Msg::Say(t) if t.is_empty() => {}
+            Msg::Sent(c) => learn(app, c),
+            Msg::Missing(why, draft) => {
+                app.status = Some(why);
+                if app.line.is_empty() {
+                    app.line.replace_range(0, 0, &draft);
+                }
+            }
             Msg::Say(t) => {
                 if hsauth::is_logged_out(&t) {
                     app.hs = None;
@@ -223,7 +235,6 @@ pub(crate) fn drain(app: &mut App) {
                 app.status = Some(t);
             }
             Msg::History { contacts, rows } => {
-                app.special.loaded = true;
                 for c in contacts {
                     learn(app, c);
                 }
@@ -239,6 +250,7 @@ pub(crate) fn drain(app: &mut App) {
                         color: None,
                         text: h.text,
                         id: h.id,
+                        at: h.at,
                     })
                     .collect();
                 special::backfill_mentions(app, rows);
@@ -332,7 +344,7 @@ mod tests {
         let mut a = live(&f);
         chat_line(&mut a, "Bob", "42");
         assert!(direct(&mut a, false, "@bob", "hi"));
-        assert!(matches!(answer(&a), Msg::Say(t) if t.is_empty()));
+        assert!(matches!(answer(&a), Msg::Sent(c) if c.id == "42"));
         let seen = f.seen.lock().unwrap();
         assert_eq!(seen[0].1, "https://h.test/api/cli/twitch/whisper");
         assert_eq!(
@@ -342,17 +354,62 @@ mod tests {
     }
 
     #[test]
-    fn w_to_a_stranger_says_why_and_keeps_the_draft() {
-        let f = Fake::new(vec![]);
+    fn w_to_a_stranger_looks_them_up_and_remembers_them() {
+        let f = Fake::new(vec![
+            Ok((200, json!({"twitch_id": "77", "display_name": "Ghost"}))),
+            Ok((200, json!({"ok": true}))),
+            Ok((200, json!({"ok": true}))),
+        ]);
         let mut a = live(&f);
-        assert!(!direct(&mut a, false, "ghost", "hi"));
-        assert!(a.status.as_deref().unwrap().contains("still loading"));
-        a.special.loaded = true;
-        assert!(!direct(&mut a, false, "ghost", "hi"));
-        assert!(a.status.as_deref().unwrap().contains("haven't seen ghost"));
-        assert!(!direct(&mut a, true, "ghost", "hi"));
-        assert!(a.status.as_deref().unwrap().contains("follow them"));
-        assert!(f.seen.lock().unwrap().is_empty());
+        assert!(direct(&mut a, false, "ghost", "hi"));
+        assert!(matches!(answer(&a), Msg::Sent(_)));
+        drain(&mut a); // nothing left; Sent was taken by answer(), so learn by hand
+        learn(&mut a, find_sent(&f));
+        // the second whisper needs no lookup
+        assert!(direct(&mut a, false, "ghost", "again"));
+        answer(&a);
+        let seen = f.seen.lock().unwrap();
+        assert!(seen[0]
+            .1
+            .contains("/users/lookup?login=ghost&platform=twitch"));
+        assert_eq!(
+            seen[1].3,
+            Some(json!({"to_user_id": "77", "message": "hi"}))
+        );
+        assert_eq!(seen[2].1, "https://h.test/api/cli/twitch/whisper");
+    }
+
+    /// the contact the first send went to, rebuilt from its request body.
+    fn find_sent(f: &Arc<Fake>) -> Contact {
+        let id = f.seen.lock().unwrap()[1].3.as_ref().unwrap()["to_user_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        Contact {
+            name: "Ghost".into(),
+            login: "ghost".into(),
+            id,
+            dm: false,
+        }
+    }
+
+    #[test]
+    fn an_unknown_name_gives_the_draft_back() {
+        let f = Fake::new(vec![Ok((404, json!({}))), Ok((404, json!({})))]);
+        let mut a = live(&f);
+        assert!(direct(&mut a, false, "ghost", "hi there"));
+        let m = answer(&a);
+        a.special.social_tx.send(m).unwrap();
+        drain(&mut a);
+        assert_eq!(a.status.as_deref(), Some("no twitch user ghost"));
+        assert_eq!(a.line.text(), "/w ghost hi there");
+        a.line.accept();
+        assert!(direct(&mut a, true, "ghost", "yo"));
+        let m = answer(&a);
+        a.special.social_tx.send(m).unwrap();
+        drain(&mut a);
+        assert_eq!(a.status.as_deref(), Some("no heatsync user ghost"));
+        assert_eq!(a.line.text(), "/dm ghost yo");
     }
 
     #[test]
@@ -467,7 +524,6 @@ mod tests {
             .map(|m| m.text.as_str())
             .collect();
         assert_eq!(texts, ["old", "new"]); // history first, the live row not doubled
-        assert!(a.special.loaded);
         assert_eq!(find(&a, false, "bob").unwrap().id, "42"); // learned from the live frame
     }
 
@@ -482,6 +538,7 @@ mod tests {
             color: None,
             text: "hey mellen long message here".into(),
             id: None,
+            at: 100,
         };
         special::mention(&mut a, local);
         let hit = |user: &str, text: &str, id: &str| heatsync_core::social::Hit {
@@ -502,6 +559,8 @@ mod tests {
             .unwrap();
         drain(&mut a);
         assert_eq!(a.channels[i].messages.len(), 2);
+        // amy's hit is older than the local line (at 0 < 100): it sits before it
+        assert_eq!(a.channels[i].messages[0].user, "amy");
         // opening again brings the same hits: nothing doubles
         a.special
             .social_tx

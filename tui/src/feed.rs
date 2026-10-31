@@ -262,6 +262,7 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
             color: m.color.clone(),
             text: m.text.clone(),
             id: m.id.clone(),
+            at: crate::clock::now_secs() as i64,
         });
     if pinged {
         channels[i].ping();

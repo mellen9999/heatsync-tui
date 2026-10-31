@@ -114,6 +114,13 @@ pub fn dm_contacts(v: &Value) -> Vec<Contact> {
         .collect()
 }
 
+/// `GET /api/cli/users/lookup` → the id `/w` (twitch) or `/dm` (heatsync) needs.
+/// `None` when the person has no account on that side.
+pub fn lookup_contact(v: &Value, login: &str, dm: bool) -> Option<Contact> {
+    let id = str_or_num(v, &[if dm { "heatsync_user_id" } else { "twitch_id" }])?;
+    contact(field(v, "display_name"), login, id, dm)
+}
+
 /// `GET /api/cli/following`: the people you follow on heatsync — the only
 /// directory a terminal login can read, so it is how `/dm <user>` finds an id
 /// for someone you have not messaged yet.
@@ -327,6 +334,20 @@ mod tests {
             (c[0].id.as_str(), c[0].name.as_str(), c[0].dm),
             ("12", "Cat", true)
         );
+    }
+
+    #[test]
+    fn lookup_picks_the_id_for_the_side_asked() {
+        let v = json!({"twitch_id": "42", "heatsync_user_id": "u_7", "display_name": "Bob"});
+        let w = lookup_contact(&v, "Bob", false).unwrap();
+        assert_eq!(
+            (w.id.as_str(), w.name.as_str(), w.login.as_str()),
+            ("42", "Bob", "bob")
+        );
+        assert_eq!(lookup_contact(&v, "bob", true).unwrap().id, "u_7");
+        let only_twitch = json!({"twitch_id": 42});
+        assert!(lookup_contact(&only_twitch, "bob", true).is_none());
+        assert!(lookup_contact(&json!({"twitch_id": "a/b"}), "bob", false).is_none());
     }
 
     #[test]
