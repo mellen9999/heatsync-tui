@@ -38,6 +38,22 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+/// the channel's current pin (`/api/pin`), if it has one. twitch + kick only.
+pub fn pin(platform: Platform, channel: &str) -> Option<heatsync_core::Pin> {
+    if platform == Platform::Youtube {
+        return None;
+    }
+    let v: serde_json::Value = agent()
+        .get(&format!("{BASE}/api/pin"))
+        .query("platform", platform_q(platform))
+        .query("channel", &channel.to_lowercase())
+        .call()
+        .ok()?
+        .into_json()
+        .ok()?;
+    heatsync_core::proto::pin_from(v.get("pin")?)
+}
+
 /// the pooled global emote set (/api/emotes): twitch globals + event-unlocked
 /// emotes, and the bttv/ffz/7tv global sets — merged and deduped server-side.
 pub fn global_emotes() -> Option<EmoteSet> {

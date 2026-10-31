@@ -39,8 +39,8 @@ use draw::{emote_mode, ui};
 use emote::fb::FbEmotes;
 use emote::render::EmoteStore;
 use feed::{
-    drain_emotes, drain_feed, drain_history, drain_hs, drain_twitch, pump_loads, request_stacks,
-    spawn_emote_fetch, spawn_global_emotes, spawn_history, tick_advance,
+    drain_emotes, drain_feed, drain_history, drain_hs, drain_pins, drain_twitch, pump_loads,
+    request_stacks, spawn_emote_fetch, spawn_global_emotes, spawn_history, spawn_pin, tick_advance,
 };
 use heatsync_core::edit;
 use heatsync_core::emote::EmoteSet;
@@ -181,6 +181,8 @@ fn chat(args: &[String]) -> io::Result<()> {
             pick_rx,
             pick_inflight: false,
             paints: paints::Paints::new(),
+            pin_tx: std::sync::mpsc::channel().0,
+            pin_rx: std::sync::mpsc::channel().1,
         }
     } else {
         build_live(&chan_args, cfg.tab_pos, cfg.timestamps, cfg.channels)
@@ -249,6 +251,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, stamps: bool, saved: Vec<V
     // background thread and merged in via emote_rx once it lands (no UI stall).
     let (emote_tx, emote_rx) = std::sync::mpsc::channel();
     let (hist_tx, hist_rx) = std::sync::mpsc::channel();
+    let (pin_tx, pin_rx) = std::sync::mpsc::channel();
     let mut channels = Vec::new();
     let mut emotes = Vec::new();
     for tab in &tabs {
@@ -263,6 +266,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, stamps: bool, saved: Vec<V
             if *p != Platform::Youtube {
                 spawn_emote_fetch(&emote_tx, *p, n.clone());
                 spawn_history(&hist_tx, *p, n.clone());
+                spawn_pin(&pin_tx, *p, n.clone());
             }
         }
     }
@@ -338,6 +342,8 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, stamps: bool, saved: Vec<V
         pick_rx,
         pick_inflight: false,
         paints: paints::Paints::new(),
+        pin_tx,
+        pin_rx,
     }
 }
 
@@ -439,6 +445,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     loop {
         drain_emotes(&mut app);
         drain_history(&mut app);
+        drain_pins(&mut app);
         drain_twitch(&mut app);
         drain_hs(&mut app);
         drain_picker(&mut app);

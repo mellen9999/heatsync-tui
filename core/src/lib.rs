@@ -256,6 +256,14 @@ pub struct Message {
     pub heat: f64,
 }
 
+/// a channel's pinned message — one line in a bar above chat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pin {
+    pub id: String,
+    pub user: String,
+    pub text: String,
+}
+
 /// live state for a single channel. bounded ring buffer — a raid can flood
 /// forever and we never grow past `cap` (mele is 8GB; resource-conscious).
 /// heat is a decaying counter driven by message arrivals.
@@ -277,6 +285,10 @@ pub struct Channel {
     pinged: bool,
     /// one of them was a stream event.
     evented: bool,
+    /// the channel's pinned message, while it has one.
+    pin: Option<Pin>,
+    /// id of the pin the user dismissed — it stays hidden until a new one lands.
+    pin_dismissed: Option<String>,
     /// lines ever appended at the live end — a monotonic clock for "how many
     /// arrived since", unaffected by the ring evicting old ones.
     pub seq: u64,
@@ -305,6 +317,8 @@ impl Channel {
             unread: 0,
             pinged: false,
             evented: false,
+            pin: None,
+            pin_dismissed: None,
             seq: 0,
             cap,
         }
@@ -326,6 +340,28 @@ impl Channel {
     /// flag the most recent line as a ping (caller knows who "me" is).
     pub fn ping(&mut self) {
         self.pinged = true;
+    }
+
+    /// a pin arrived (`Some`) or was cleared (`None`).
+    pub fn set_pin(&mut self, pin: Option<Pin>) {
+        self.pin = pin;
+    }
+
+    /// the pin to show, unless the user dismissed this very one.
+    pub fn visible_pin(&self) -> Option<&Pin> {
+        self.pin
+            .as_ref()
+            .filter(|p| self.pin_dismissed.as_deref() != Some(p.id.as_str()))
+    }
+
+    /// hide the current pin (a newer one will show again). false = none shown.
+    pub fn dismiss_pin(&mut self) -> bool {
+        let id = self.visible_pin().map(|p| p.id.clone());
+        let some = id.is_some();
+        if some {
+            self.pin_dismissed = id;
+        }
+        some
     }
 
     /// flag the tab as holding an unseen stream event.
@@ -463,6 +499,27 @@ mod channel_tests {
         );
         c.mark_seen();
         assert_eq!(c.unread(), Unread::None);
+    }
+
+    #[test]
+    fn a_dismissed_pin_stays_hidden_until_a_new_one_lands() {
+        let pin = |id: &str| Pin {
+            id: id.into(),
+            user: "u".into(),
+            text: "t".into(),
+        };
+        let mut c = Channel::new("x", Platform::Twitch, 8);
+        assert!(!c.dismiss_pin(), "nothing to dismiss");
+        c.set_pin(Some(pin("a")));
+        assert_eq!(c.visible_pin().map(|p| p.id.as_str()), Some("a"));
+        assert!(c.dismiss_pin());
+        assert!(c.visible_pin().is_none());
+        c.set_pin(Some(pin("a")));
+        assert!(c.visible_pin().is_none(), "same pin re-sent stays hidden");
+        c.set_pin(Some(pin("b")));
+        assert!(c.visible_pin().is_some());
+        c.set_pin(None);
+        assert!(c.visible_pin().is_none());
     }
 
     fn gone_after(c: &Channel) -> Vec<Option<String>> {

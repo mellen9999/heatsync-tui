@@ -1,4 +1,4 @@
-use crate::app::{App, Feed};
+use crate::app::{App, Feed, PinMsg};
 use crate::emote::fb::FbEmotes;
 use crate::emote::render::EmoteStore;
 use crate::http;
@@ -49,6 +49,33 @@ pub(crate) fn spawn_history(
             let _ = tx.send((platform, name, msgs));
         }
     });
+}
+
+/// fetch a channel's pin on a detached thread; a channel with none sends nothing.
+pub(crate) fn spawn_pin(tx: &Sender<PinMsg>, platform: Platform, name: String) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        if let Some(pin) = http::pin(platform, &name) {
+            let _ = tx.send((platform, name, Some(pin)));
+        }
+    });
+}
+
+/// land fetched pins in their tabs.
+pub(crate) fn drain_pins(app: &mut App) {
+    while let Ok((platform, name, pin)) = app.pin_rx.try_recv() {
+        set_pin(app, platform, &name, pin);
+    }
+}
+
+fn set_pin(app: &mut App, platform: Platform, name: &str, pin: Option<heatsync_core::Pin>) {
+    for c in app
+        .channels
+        .iter_mut()
+        .filter(|c| c.matches(platform, name))
+    {
+        c.set_pin(pin.clone());
+    }
 }
 
 /// merge fetched history behind whatever live lines already landed, and start
@@ -271,6 +298,7 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                 }
             }
             ChatEvent::FollowLive(live) => app.streams.seed_live(live),
+            ChatEvent::Pin(p, c, pin) => set_pin(app, p, &c, pin),
             ChatEvent::Room(c, r) => {
                 for l in app.rooms.update(&c, r) {
                     deliver(app, l, now);

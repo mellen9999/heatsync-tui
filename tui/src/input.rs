@@ -1,5 +1,5 @@
 use crate::app::{App, Feed, InputMode};
-use crate::feed::{spawn_emote_fetch, spawn_history};
+use crate::feed::{spawn_emote_fetch, spawn_history, spawn_pin};
 use crate::net::Sub;
 use crate::{hsauth, key, modcmd, net, picker};
 use crate::{parse_sub, parse_tab, save_state, yt_video_id};
@@ -145,6 +145,14 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         KeyCode::Char('m') => {
             app.mode = InputMode::Manage;
             app.manage_cursor = app.focus;
+            Flow::Continue
+        }
+        KeyCode::Char('P') => {
+            let hid = app
+                .channels
+                .get_mut(app.focus)
+                .is_some_and(|c| c.dismiss_pin());
+            app.status = Some(if hid { "pin hidden" } else { "no pin here" }.into());
             Flow::Continue
         }
         KeyCode::Char('t') => {
@@ -316,6 +324,7 @@ fn start_sub(app: &App, p: Platform, n: &str) {
     if p != Platform::Youtube {
         spawn_emote_fetch(&app.emote_tx, p, n.to_string());
         spawn_history(&app.hist_tx, p, n.to_string());
+        spawn_pin(&app.pin_tx, p, n.to_string());
     }
 }
 

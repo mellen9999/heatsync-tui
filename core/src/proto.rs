@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 
-use crate::{sanitize, Badge, Extra, Note, NoteKind, Platform, Tint};
+use crate::{sanitize, Badge, Extra, Note, NoteKind, Pin, Platform, Tint};
 
 /// a normalized chat line, ready for a channel buffer.
 #[derive(Clone, Debug, PartialEq)]
@@ -91,6 +91,8 @@ pub enum Event {
     /// followed channels already live at connect (`follow:live:snapshot`) —
     /// catch-up, never lines.
     FollowLive(Vec<(Platform, String)>),
+    /// a channel pin was set (`Some`) or cleared (`None`).
+    Pin(Platform, String, Option<Pin>),
     /// a twitch ROOMSTATE: the channel's current chat modes.
     Room(String, RoomState),
     Pong,
@@ -148,6 +150,7 @@ pub fn parse(raw: &str) -> Event {
         "follow:stream:online" | "follow:stream:offline" | "follow:stream:update" => {
             stream_line(&v).map(Event::Chat).unwrap_or(Event::Ignore)
         }
+        "pin:set" | "pin:clear" => pin_event(&v),
         "follow:live:snapshot" => follow_snapshot(&v),
         "kick-sub-event" => kick_sub_line(&v).map(Event::Chat).unwrap_or(Event::Ignore),
         "kick-kicks-event" => kick_kicks_line(&v)
@@ -440,6 +443,49 @@ fn usernotice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
     let channel = channel.and_then(Value::as_str).unwrap_or("").to_string();
     let color = color_of(m);
     note_line(Platform::Twitch, channel, user, color, kind, what, text)
+}
+
+/// a pin object (`pin:set`'s `pin`, or `/api/pin`'s) → [`Pin`]; none without text.
+pub fn pin_from(p: &Value) -> Option<Pin> {
+    let user = {
+        let d = field(p, "display_name");
+        if d.is_empty() {
+            field(p, "username")
+        } else {
+            d
+        }
+    };
+    let text = field(p, "content");
+    (!text.is_empty()).then(|| Pin {
+        id: field(p, "id"),
+        user,
+        text,
+    })
+}
+
+fn platform_of(s: &str) -> Option<Platform> {
+    match s {
+        "twitch" => Some(Platform::Twitch),
+        "kick" => Some(Platform::Kick),
+        "youtube" => Some(Platform::Youtube),
+        _ => None,
+    }
+}
+
+fn pin_event(v: &Value) -> Event {
+    let (Some(p), ch) = (platform_of(&field(v, "platform")), field(v, "channel")) else {
+        return Event::Ignore;
+    };
+    if ch.is_empty() {
+        return Event::Ignore;
+    }
+    match v.get("type").and_then(Value::as_str) {
+        Some("pin:set") => match v.get("pin").and_then(pin_from) {
+            Some(pin) => Event::Pin(p, ch, Some(pin)),
+            None => Event::Ignore,
+        },
+        _ => Event::Pin(p, ch, None),
+    }
 }
 
 fn roomstate_event(v: &Value) -> Event {
@@ -1164,6 +1210,35 @@ mod tests {
         assert_eq!(parse("not json"), Event::Ignore);
         assert_eq!(parse(r#"{"type":"whatever"}"#), Event::Ignore);
         assert_eq!(parse(r#"{"type":"pong"}"#), Event::Pong);
+    }
+
+    #[test]
+    fn pin_frames_set_and_clear() {
+        let set = r#"{"type":"pin:set","platform":"twitch","channel":"c","pin":{
+            "id":"p1","message_id":"m","username":"bob","display_name":"Bob",
+            "content":"read the rules","ts":1,"pinned_at":2}}"#;
+        match parse(set) {
+            Event::Pin(Platform::Twitch, c, Some(p)) => {
+                assert_eq!(c, "c");
+                assert_eq!((p.id.as_str(), p.user.as_str()), ("p1", "Bob"));
+                assert_eq!(p.text, "read the rules");
+            }
+            e => panic!("{e:?}"),
+        }
+        assert_eq!(
+            parse(r#"{"type":"pin:clear","platform":"kick","channel":"c"}"#),
+            Event::Pin(Platform::Kick, "c".into(), None)
+        );
+        for bad in [
+            r#"{"type":"pin:set","platform":"mars","channel":"c","pin":{"content":"x"}}"#,
+            r#"{"type":"pin:set","platform":"twitch","channel":"c","pin":{"content":""}}"#,
+            r#"{"type":"pin:set","platform":"twitch","channel":"c"}"#,
+            r#"{"type":"pin:clear","platform":"twitch"}"#,
+        ] {
+            assert_eq!(parse(bad), Event::Ignore, "{bad}");
+        }
+        let anon = serde_json::json!({"id":"i","username":"bob","content":"hey\u{1b}[2J"});
+        assert_eq!(pin_from(&anon).unwrap().text, "hey[2J");
     }
 
     #[test]

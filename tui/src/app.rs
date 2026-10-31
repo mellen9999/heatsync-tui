@@ -39,6 +39,9 @@ pub(crate) enum InputMode {
     Pick,
 }
 
+/// a fetched pin for (platform, channel); `None` = the channel has none.
+pub(crate) type PinMsg = (Platform, String, Option<heatsync_core::Pin>);
+
 pub(crate) struct App {
     pub(crate) channels: Vec<Channel>,
     pub(crate) emotes: Vec<EmoteSet>, // index-aligned with channels
@@ -92,6 +95,9 @@ pub(crate) struct App {
     pub(crate) pick_inflight: bool,
     /// name paints + heatsync name colors, by sender id.
     pub(crate) paints: Paints,
+    /// pins fetched on join arrive here from their own threads.
+    pub(crate) pin_tx: Sender<PinMsg>,
+    pub(crate) pin_rx: Receiver<PinMsg>,
     /// stream-event pairing + anti-wall guards, between the feed and the tabs.
     pub(crate) streams: StreamEvents,
     /// last-seen room modes per channel, for `slow mode 30s`-style notes.

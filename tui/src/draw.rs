@@ -199,11 +199,24 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
 fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let ch = &app.channels[app.focus];
     let set = &app.emotes[app.focus];
-    let [barrow, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let pin = ch.visible_pin();
+    let [barrow, pinrow, body] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(u16::from(pin.is_some())),
+        Constraint::Min(0),
+    ])
+    .areas(area);
     f.render_widget(
         Paragraph::new(heat_bar(ch.heat, barrow.width as usize)),
         barrow,
     );
+    if let Some(p) = pin {
+        let line = fit(format!("◉ {}: {}", p.user, p.text), pinrow.width);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(line, palette::DIM_TAG))),
+            pinrow,
+        );
+    }
     if body.height == 0 || body.width == 0 {
         return;
     }
