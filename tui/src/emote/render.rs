@@ -17,7 +17,7 @@
 //!   * FULL FPS — the event loop sleeps until the next frame boundary of the
 //!     soonest-flipping emote, so playback runs at the emote's authored rate.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::blit::Blitter;
 use image::imageops::FilterType;
 use image::{DynamicImage, RgbaImage};
 use ratatui::layout::Rect;
@@ -127,6 +128,8 @@ pub struct EmoteStore {
     /// visible emote is exactly the name↔image flicker we removed).
     frame_mark: Cell<u64>,
     live_frames: usize,
+    /// sixel placements queued by this draw (see blit.rs).
+    blit: RefCell<Blitter>,
 }
 
 impl EmoteStore {
@@ -228,6 +231,7 @@ impl EmoteStore {
             lru: Cell::new(0),
             frame_mark: Cell::new(0),
             live_frames: 0,
+            blit: RefCell::new(Blitter::default()),
         })
     }
 
@@ -405,6 +409,46 @@ impl EmoteStore {
         };
         a.shown.set(idx);
         Some(&a.frames[idx].proto)
+    }
+
+    /// is this emote's current frame a sixel? those skip the widget path: draw
+    /// reserves NBSP cells and queues the image for `blit` instead.
+    pub fn is_sixel(&self, key: &str) -> bool {
+        matches!(self.cache.get(key), Some(Entry::Ready(a))
+            if matches!(a.frames[a.shown.get().min(a.frames.len() - 1)].proto, Protocol::Sixel(_)))
+    }
+
+    /// queue the emote's current frame (the one `frame` just picked) at `rect`.
+    pub fn queue_blit(&self, rect: Rect, key: &str) {
+        if let Some(Entry::Ready(a)) = self.cache.get(key) {
+            self.blit.borrow_mut().push(rect, key, a.shown.get());
+        }
+    }
+
+    /// after the text of a draw has flushed: write the queued sixels that
+    /// changed, and only those. `area` is the frame size (a resize repaints
+    /// everything, so everything is re-emitted).
+    pub fn blit(&self, area: Rect, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        let emits = self.blit.borrow_mut().take_emits(area);
+        if emits.is_empty() {
+            return Ok(());
+        }
+        for q in emits {
+            let Some(Entry::Ready(a)) = self.cache.get(&q.key) else {
+                continue;
+            };
+            let Some(f) = a.frames.get(q.idx) else {
+                continue;
+            };
+            if let Protocol::Sixel(s) = &f.proto {
+                crossterm::queue!(
+                    out,
+                    crossterm::cursor::MoveTo(q.rect.x, q.rect.y),
+                    crossterm::style::Print(&s.data)
+                )?;
+            }
+        }
+        out.flush()
     }
 
     fn touch(&self, a: &Anim) {

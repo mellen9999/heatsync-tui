@@ -328,15 +328,20 @@ fn draw_planned(
         match mode {
             EmoteMode::Term(store) => {
                 if let Some(proto) = store.frame(&p.key) {
-                    f.render_widget(
-                        Image::new(proto),
-                        Rect {
-                            x,
-                            y,
-                            width: p.w,
-                            height: h,
-                        },
-                    );
+                    let rect = Rect {
+                        x,
+                        y,
+                        width: p.w,
+                        height: h,
+                    };
+                    if store.is_sixel(&p.key) {
+                        // NBSP cells diff like text; the sixel itself is queued
+                        // and written once, after the text (see emote/blit.rs).
+                        fill_nbsp(f, rect);
+                        store.queue_blit(rect, &p.key);
+                    } else {
+                        f.render_widget(Image::new(proto), rect);
+                    }
                 }
             }
             EmoteMode::Fb(fb) => {
@@ -347,10 +352,8 @@ fn draw_planned(
                 // pixels before we blit. plain spaces diff as "unchanged",
                 // the console never repaints them, and old emote pixels
                 // smear across the screen during fast scroll.
-                let pad = "\u{a0}".repeat(p.w as usize);
-                let lines: Vec<Line> = (0..h).map(|_| Line::raw(pad.clone())).collect();
-                f.render_widget(
-                    Paragraph::new(lines),
+                fill_nbsp(
+                    f,
                     Rect {
                         x,
                         y,
@@ -363,6 +366,15 @@ fn draw_planned(
             EmoteMode::Text => {}
         }
     }
+}
+
+/// fill `rect` with NBSP: blank like a space, but different from the space that
+/// scrolls in behind a departing emote, so ratatui's diff rewrites exactly those
+/// cells and the terminal erases the stale pixels.
+fn fill_nbsp(f: &mut Frame, rect: Rect) {
+    let pad = "\u{a0}".repeat(rect.width as usize);
+    let lines: Vec<Line> = (0..rect.height).map(|_| Line::raw(pad.clone())).collect();
+    f.render_widget(Paragraph::new(lines), rect);
 }
 
 /// rover-style channel manager: a single-pane list, cursor row highlighted, the

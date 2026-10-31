@@ -537,10 +537,17 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
                 crossterm::execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
             let drew = terminal.draw(|f| ui(f, &app));
+            // sixels go out after the text, inside the sync window: only the
+            // placements that changed (see emote/blit.rs).
+            let blit = match (&drew, &app.store) {
+                (Ok(done), Some(store)) => store.blit(done.area, &mut io::stdout()),
+                _ => Ok(()),
+            };
             if sync {
                 crossterm::execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
             }
             drew?;
+            blit?;
             dlog.draw();
             // exponential moving average — one slow frame shouldn't throttle us, a
             // sustained slow terminal should.
