@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 
 const API: &str = "https://api.kick.com/public/v1";
 
-/// (channel slug, text) to post.
-pub type Send = (String, String);
+/// (channel slug, text, reply-parent message id) to post.
+pub type Send = (String, String, Option<String>);
 
 /// spawn the kick sender; runs until the handle is dropped.
 pub fn spawn(token: String) -> Sender<Send> {
@@ -29,7 +29,7 @@ fn agent() -> ureq::Agent {
 
 fn run(token: String, rx: Receiver<Send>) {
     let mut ids: HashMap<String, u64> = HashMap::new();
-    while let Ok((slug, text)) = rx.recv() {
+    while let Ok((slug, text, reply)) = rx.recv() {
         let id = match ids.get(&slug) {
             Some(&id) => id,
             None => match resolve(&token, &slug) {
@@ -40,7 +40,7 @@ fn run(token: String, rx: Receiver<Send>) {
                 None => continue,
             },
         };
-        let _ = post(&token, id, &text);
+        let _ = post(&token, id, &text, reply.as_deref());
     }
 }
 
@@ -61,11 +61,32 @@ fn resolve(token: &str, slug: &str) -> Option<u64> {
 
 // Boxed: ureq::Error is a large enum, and returning it bare makes every Ok
 // carry that width too.
-fn post(token: &str, id: u64, text: &str) -> Result<(), Box<ureq::Error>> {
+fn post(token: &str, id: u64, text: &str, reply: Option<&str>) -> Result<(), Box<ureq::Error>> {
     agent()
         .post(&format!("{API}/chat"))
         .set("Authorization", &format!("Bearer {token}"))
-        .send_json(json!({ "content": text, "type": "user", "broadcaster_user_id": id }))
+        .send_json(body(id, text, reply))
         .map_err(Box::new)?;
     Ok(())
+}
+
+/// the chat POST body; a reply adds the parent's id.
+fn body(id: u64, text: &str, reply: Option<&str>) -> Value {
+    let mut b = json!({ "content": text, "type": "user", "broadcaster_user_id": id });
+    if let Some(r) = reply.filter(|r| !r.is_empty()) {
+        b["reply_to_message_id"] = json!(r);
+    }
+    b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_adds_the_parent_id_and_a_plain_send_does_not() {
+        assert_eq!(body(7, "hi", None).get("reply_to_message_id"), None);
+        assert_eq!(body(7, "hi", Some("")).get("reply_to_message_id"), None);
+        assert_eq!(body(7, "hi", Some("m1"))["reply_to_message_id"], "m1");
+    }
 }

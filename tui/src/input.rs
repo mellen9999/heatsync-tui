@@ -5,7 +5,7 @@ use crate::{hsauth, key, modcmd, net, picker};
 use crate::{parse_sub, parse_tab, save_state, yt_video_id};
 use crossterm::event::{KeyCode, KeyModifiers};
 use heatsync_core::complete::Completion;
-use heatsync_core::{edit, slash};
+use heatsync_core::{clip, edit, scroll, slash};
 use heatsync_core::{Channel, Message, Platform};
 use std::time::Instant;
 
@@ -50,10 +50,14 @@ pub(crate) fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             match app.line.key(ck) {
                 edit::Act::Continue => {}
                 edit::Act::Send => return send_focused(app),
-                edit::Act::Leave => app.mode = InputMode::Normal,
+                edit::Act::Leave => {
+                    app.mode = InputMode::Normal;
+                    app.reply = None;
+                }
             }
         }
         InputMode::Pick => pick_key(app, k),
+        InputMode::Cursor => return cursor_key(app, k),
         // rover-style channel manager: j/k move, enter open, a add, x leave,
         // e edit slots, K/J reorder, esc back.
         InputMode::Manage => {
@@ -114,8 +118,8 @@ pub(crate) fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
     Flow::Continue
 }
 
-/// Normal mode: switch channels and enter the other modes. chat has no message
-/// cursor — j/k and h/l (and arrows, tab/shift-tab) all move between tabs.
+/// Normal mode: switch channels and enter the other modes. j/k and h/l (and
+/// arrows, tab/shift-tab) move between tabs; `v` starts the message cursor.
 fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
     match k.code {
         KeyCode::Char('q') => Flow::Quit,
@@ -145,6 +149,18 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         KeyCode::Char('m') => {
             app.mode = InputMode::Manage;
             app.manage_cursor = app.focus;
+            Flow::Continue
+        }
+        KeyCode::Char('v') => {
+            if let Some(ch) = app
+                .channels
+                .get(app.focus)
+                .filter(|c| !c.messages.is_empty())
+            {
+                app.cursor = scroll::abs_of(ch.seq, ch.messages.len(), ch.messages.len() - 1);
+                app.mode = InputMode::Cursor;
+                app.status = None;
+            }
             Flow::Continue
         }
         KeyCode::Char('P') => {
@@ -512,6 +528,16 @@ fn close_channel(app: &mut App) {
 /// enter in the composer. a leading `/` is a command — ours are handled here,
 /// everything else (mod actions, /me) goes to the platform verbatim.
 fn send_focused(app: &mut App) -> Flow {
+    let reply = app.reply.as_ref().map(|(id, _)| id.clone());
+    let flow = send_line(app, reply);
+    // the line went (the composer emptied) — the reply went with it.
+    if app.line.is_empty() {
+        app.reply = None;
+    }
+    flow
+}
+
+fn send_line(app: &mut App, reply: Option<String>) -> Flow {
     let text = match slash::parse(&app.line.text()) {
         slash::Cmd::Join(ch) => {
             app.line.accept();
@@ -572,14 +598,14 @@ fn send_focused(app: &mut App) -> Flow {
     match platform {
         Platform::Twitch => {
             if let Some(client) = app.hs.clone() {
-                send_via_heatsync(app, client, platform, name.clone(), text);
+                send_via_heatsync(app, client, platform, name.clone(), text, reply);
                 app.line.accept();
                 app.status = Some(format!("sent → {name}"));
             } else {
                 match &app.twitch_tx {
                     Some(tx) => {
                         // a dead sender (auth failed for good) must not look like a send.
-                        if tx.send((name.clone(), text)).is_ok() {
+                        if tx.send((name.clone(), text, reply)).is_ok() {
                             app.line.accept();
                             app.status = Some(format!("sent → {name}"));
                         } else {
@@ -594,11 +620,11 @@ fn send_focused(app: &mut App) -> Flow {
         // heatsync login first; then a kick token the user supplied; then the ext relay.
         Platform::Kick => {
             if let Some(client) = app.hs.clone() {
-                send_via_heatsync(app, client, platform, name.clone(), text);
+                send_via_heatsync(app, client, platform, name.clone(), text, reply);
                 app.line.accept();
                 app.status = Some(format!("sent → {name}"));
             } else if let Some(ktx) = &app.kick_tx {
-                let _ = ktx.send((name.clone(), text));
+                let _ = ktx.send((name.clone(), text, reply));
                 app.line.accept();
                 app.status = Some(format!("sent → {name}"));
             } else if let Some(out) = &app.out {
@@ -637,10 +663,11 @@ fn send_via_heatsync(
     platform: Platform,
     name: String,
     text: String,
+    reply: Option<String>,
 ) {
     let chan = name.clone();
     hsauth::spawn_note(app.hs_tx.clone(), platform, name, move || {
-        match client.send(platform, &chan, &text) {
+        match client.send(platform, &chan, &text, reply.as_deref()) {
             Ok(()) => hsauth::Outcome {
                 ok: true,
                 text: String::new(),
@@ -689,6 +716,11 @@ fn complete_step(app: &mut App, dir: i32) {
 
 /// a mod command typed in the composer → a real mod action through heatsync.
 fn run_mod(app: &mut App, parsed: modcmd::Parsed) {
+    run_mod_from(app, parsed, true)
+}
+
+/// `from_composer`: the action was typed in the composer, so a start clears it.
+fn run_mod_from(app: &mut App, parsed: modcmd::Parsed, from_composer: bool) {
     let (action, target) = match parsed {
         modcmd::Parsed::Usage(u) => {
             app.status = Some(u.into()); // keep the draft so it can be fixed
@@ -719,7 +751,9 @@ fn run_mod(app: &mut App, parsed: modcmd::Parsed) {
         app.status = Some("log in first to use mod tools — run: heatsync-tui login".into());
         return;
     };
-    app.line.accept();
+    if from_composer {
+        app.line.accept();
+    }
     app.status = Some("working…".into());
     let chan = name.clone();
     hsauth::spawn_note(app.hs_tx.clone(), platform, name, move || {
@@ -736,4 +770,79 @@ fn last_id_of(app: &App, user: &str) -> Option<String> {
         .rev()
         .find(|m| m.user.eq_ignore_ascii_case(user) && m.id.is_some())
         .and_then(|m| m.id.clone())
+}
+
+/// the message cursor: j/k step a line, ctrl-d/u half a page, g top, G (or esc)
+/// back to live. r replies, y yanks, d deletes (mod) — on the line under it.
+fn cursor_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
+    let Some(ch) = app.channels.get(app.focus) else {
+        app.mode = InputMode::Normal;
+        return Flow::Continue;
+    };
+    let (seq, len) = (ch.seq, ch.messages.len());
+    let half = i64::from((app.view_h.get() / 2).max(1));
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let mv = |app: &mut App, d: i64| app.cursor = scroll::step(seq, len, app.cursor, d);
+    match k.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('G') => app.mode = InputMode::Normal,
+        KeyCode::Char('d') if ctrl => mv(app, half),
+        KeyCode::Char('u') if ctrl => mv(app, -half),
+        KeyCode::Char('j') | KeyCode::Down => mv(app, 1),
+        KeyCode::Char('k') | KeyCode::Up => mv(app, -1),
+        KeyCode::Char('g') | KeyCode::Home => mv(app, i64::MIN),
+        KeyCode::Char('r') => cursor_reply(app),
+        KeyCode::Char('y') => cursor_yank(app),
+        KeyCode::Char('d') => cursor_delete(app),
+        _ => {}
+    }
+    Flow::Continue
+}
+
+/// the line under the cursor.
+fn cursor_line(app: &App) -> Option<&Message> {
+    let ch = app.channels.get(app.focus)?;
+    let i = scroll::index_of(ch.seq, ch.messages.len(), app.cursor)?;
+    ch.messages.get(i)
+}
+
+/// `r`: compose a reply to the line under the cursor.
+fn cursor_reply(app: &mut App) {
+    let target = cursor_line(app)
+        .filter(|m| m.note.is_none() && !m.user.is_empty())
+        .and_then(|m| Some((m.id.clone()?, m.user.clone())));
+    match target {
+        Some(t) => {
+            app.reply = Some(t);
+            app.mode = InputMode::Insert;
+            app.line.focus();
+            app.status = None;
+        }
+        None => app.status = Some("can't reply to that line".into()),
+    }
+}
+
+/// `y`: copy the line's text.
+fn cursor_yank(app: &mut App) {
+    let Some(m) = cursor_line(app) else { return };
+    let text = if m.text.is_empty() {
+        m.note.as_ref().map(|n| n.what.clone()).unwrap_or_default()
+    } else {
+        m.text.clone()
+    };
+    app.status = Some(match clip::copy(&text) {
+        Ok(via) => format!("yanked ({via})"),
+        Err(e) => e,
+    });
+}
+
+/// `d`: delete the line (a mod action) — only when it has an id.
+fn cursor_delete(app: &mut App) {
+    match cursor_line(app).and_then(|m| m.id.clone()) {
+        Some(id) => run_mod_from(
+            app,
+            modcmd::Parsed::Run(hsauth::ModAction::Delete, id),
+            false,
+        ),
+        None => app.status = Some("can't delete that line".into()),
+    }
 }

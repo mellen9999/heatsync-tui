@@ -17,7 +17,8 @@ const IRC_URL: &str = "wss://irc-ws.chat.twitch.tv:443";
 const READ_TIMEOUT: Duration = Duration::from_millis(400);
 
 /// (channel, text) to post.
-pub type Send = (String, String);
+/// (channel, text, reply-parent message id).
+pub type Send = (String, String, Option<String>);
 
 /// something the sender wants the user to see. `channel` is the tab it belongs
 /// to (lowercase, no #); None = about the connection as a whole.
@@ -153,14 +154,14 @@ fn run(user: String, oauth: String, rx: Receiver<Send>, notes: Sender<Note>) {
                     channel: None,
                     text: "twitch auth failed — run: heatsync-tui login".into(),
                 });
-                for (chan, _) in gate.fail() {
+                for (chan, _, _) in gate.fail() {
                     let _ = notes.send(Note {
                         channel: Some(chan.to_lowercase()),
                         text: "not sent — twitch auth failed".into(),
                     });
                 }
                 // anything typed from now on is refused the same way.
-                while let Ok((chan, _)) = rx.recv() {
+                while let Ok((chan, _, _)) = rx.recv() {
                     let _ = notes.send(Note {
                         channel: Some(chan.to_lowercase()),
                         text: "not sent — twitch auth failed".into(),
@@ -221,8 +222,8 @@ fn session(
                     if line.starts_with("PING") {
                         let _ = ws.send(WsMsg::Text("PONG :tmi.twitch.tv\r\n".into()));
                     } else if is_welcome(line) {
-                        for (chan, text) in gate.open() {
-                            if post(&mut ws, &mut joined, &chan, &text).is_err() {
+                        for (chan, text, reply) in gate.open() {
+                            if post(&mut ws, &mut joined, &chan, &text, reply.as_deref()).is_err() {
                                 return End::Dropped;
                             }
                         }
@@ -247,8 +248,8 @@ fn session(
         loop {
             match rx.try_recv() {
                 Ok(send) => {
-                    if let Some((chan, text)) = gate.submit(send) {
-                        if post(&mut ws, &mut joined, &chan, &text).is_err() {
+                    if let Some((chan, text, reply)) = gate.submit(send) {
+                        if post(&mut ws, &mut joined, &chan, &text, reply.as_deref()).is_err() {
                             return End::Dropped;
                         }
                     }
@@ -260,18 +261,27 @@ fn session(
     }
 }
 
+/// one PRIVMSG line; a reply carries the parent's id as a client tag.
+fn privmsg(chan: &str, text: &str, reply: Option<&str>) -> String {
+    match reply.filter(|id| !id.is_empty() && !id.contains([' ', ';', '\r', '\n'])) {
+        Some(id) => format!("@reply-parent-msg-id={id} PRIVMSG #{chan} :{text}\r\n"),
+        None => format!("PRIVMSG #{chan} :{text}\r\n"),
+    }
+}
+
 /// JOIN (once per connection) + PRIVMSG one message.
 fn post(
     ws: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>,
     joined: &mut HashSet<String>,
     channel: &str,
     text: &str,
+    reply: Option<&str>,
 ) -> Result<(), ()> {
     let chan = channel.to_lowercase();
     if joined.insert(chan.clone()) && ws.send(WsMsg::Text(format!("JOIN #{chan}\r\n"))).is_err() {
         return Err(());
     }
-    ws.send(WsMsg::Text(format!("PRIVMSG #{chan} :{text}\r\n")))
+    ws.send(WsMsg::Text(privmsg(&chan, text, reply)))
         .map_err(|_| ())
 }
 
@@ -361,7 +371,23 @@ mod tests {
     }
 
     fn s(c: &str, t: &str) -> Send {
-        (c.into(), t.into())
+        (c.into(), t.into(), None)
+    }
+
+    #[test]
+    fn a_reply_carries_the_parent_id_tag_and_a_bad_id_is_dropped() {
+        assert_eq!(
+            privmsg("c", "hi", Some("abc-123")),
+            "@reply-parent-msg-id=abc-123 PRIVMSG #c :hi\r\n"
+        );
+        assert_eq!(privmsg("c", "hi", None), "PRIVMSG #c :hi\r\n");
+        for bad in ["", "a b", "a;b", "a\r\nJOIN #x"] {
+            assert_eq!(
+                privmsg("c", "hi", Some(bad)),
+                "PRIVMSG #c :hi\r\n",
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

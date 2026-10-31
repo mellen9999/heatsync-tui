@@ -427,17 +427,19 @@ impl Client {
     }
 
     /// send chat through heatsync. Ok = posted (nothing to show), Err = words for the user.
-    pub fn send(&self, platform: Platform, channel: &str, text: &str) -> Result<(), String> {
+    pub fn send(
+        &self,
+        platform: Platform,
+        channel: &str,
+        text: &str,
+        reply: Option<&str>,
+    ) -> Result<(), String> {
         let path = match platform {
             Platform::Twitch => "/api/cli/twitch/send",
             Platform::Kick => "/api/cli/kick/send",
             Platform::Youtube => return Err("youtube sends need the extension".into()),
         };
-        match self.call(
-            "POST",
-            path,
-            Some(json!({ "channel": channel, "text": text })),
-        ) {
+        match self.call("POST", path, Some(send_body(channel, text, reply))) {
             Ok((200, _)) => Ok(()),
             Ok((st, v)) => {
                 Err(scope_note(&v, "chat").unwrap_or_else(|| explain(st, &v, &self.base)))
@@ -445,6 +447,15 @@ impl Client {
             Err(e) => Err(e),
         }
     }
+}
+
+/// the send request body; a reply names its parent message.
+fn send_body(channel: &str, text: &str, reply: Option<&str>) -> Value {
+    let mut b = json!({ "channel": channel, "text": text });
+    if let Some(r) = reply.filter(|r| !r.is_empty()) {
+        b["reply_to_message_id"] = json!(r);
+    }
+    b
 }
 
 pub fn mod_body(channel: &str, target: &str, action: &ModAction) -> Value {
@@ -885,6 +896,18 @@ mod tests {
     }
 
     #[test]
+    fn send_body_names_the_parent_only_on_a_reply() {
+        assert_eq!(
+            send_body("c", "hi", None),
+            json!({"channel":"c","text":"hi"})
+        );
+        assert_eq!(
+            send_body("c", "hi", Some("m1")),
+            json!({"channel":"c","text":"hi","reply_to_message_id":"m1"})
+        );
+    }
+
+    #[test]
     fn my_names_reads_twitch_and_kick_logins() {
         let me =
             json!({"twitch":{"linked":true,"login":"mel"},"kick":{"linked":false,"login":null}});
@@ -960,10 +983,10 @@ mod tests {
             Ok((400, json!({"error":"slow mode","error_code":"rejected"}))),
         ]);
         let c = client(&f);
-        assert!(c.send(Platform::Twitch, "chan", "hi").is_ok());
-        assert!(c.send(Platform::Kick, "chan", "hi").is_ok());
+        assert!(c.send(Platform::Twitch, "chan", "hi", None).is_ok());
+        assert!(c.send(Platform::Kick, "chan", "hi", None).is_ok());
         assert_eq!(
-            c.send(Platform::Twitch, "chan", "hi"),
+            c.send(Platform::Twitch, "chan", "hi", None),
             Err("slow mode".into())
         );
         let seen = f.seen.lock().unwrap();
@@ -984,7 +1007,7 @@ mod tests {
         let o = c.mod_action(Platform::Twitch, "c", "t", &ModAction::Ban);
         assert_eq!(o.text, "this terminal wasn't given mod permission — run `heatsync-tui login` again and tick mod");
         assert!(c
-            .send(Platform::Twitch, "c", "x")
+            .send(Platform::Twitch, "c", "x", None)
             .unwrap_err()
             .contains("chat permission"));
     }
@@ -999,7 +1022,7 @@ mod tests {
                 .text
         ));
         assert!(is_logged_out(
-            &c.send(Platform::Kick, "c", "x").unwrap_err()
+            &c.send(Platform::Kick, "c", "x", None).unwrap_err()
         ));
         assert!(is_logged_out(&c.me().unwrap_err()));
         // a platform refusal is NOT a dead login

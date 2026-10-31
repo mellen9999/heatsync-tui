@@ -37,6 +37,8 @@ pub(crate) enum InputMode {
     SlotEdit(Platform),
     /// the live-channel picker (`o`).
     Pick,
+    /// the message cursor (`v`): move through scrollback, reply, yank, delete.
+    Cursor,
 }
 
 /// a fetched pin for (platform, channel); `None` = the channel has none.
@@ -98,6 +100,12 @@ pub(crate) struct App {
     /// pins fetched on join arrive here from their own threads.
     pub(crate) pin_tx: Sender<PinMsg>,
     pub(crate) pin_rx: Receiver<PinMsg>,
+    /// the message cursor's line, as an absolute sequence number (core::scroll).
+    pub(crate) cursor: u64,
+    /// the line being replied to: (message id, user). set by `r` in cursor mode.
+    pub(crate) reply: Option<(String, String)>,
+    /// rows the chat pane had at the last draw — half a page for ctrl-d/u.
+    pub(crate) view_h: std::cell::Cell<u16>,
     /// stream-event pairing + anti-wall guards, between the feed and the tabs.
     pub(crate) streams: StreamEvents,
     /// last-seen room modes per channel, for `slow mode 30s`-style notes.

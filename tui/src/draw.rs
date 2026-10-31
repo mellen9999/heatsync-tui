@@ -7,8 +7,10 @@ use crate::palette;
 use heatsync_core::edit;
 use heatsync_core::emote::{segments, Segment};
 use heatsync_core::heat::Tier;
+use heatsync_core::scroll;
 use heatsync_core::{Channel, Platform};
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -228,7 +230,16 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     // viewport is ever laid out or drawn.
     let mut plan: Vec<Vec<RowPlan>> = Vec::new();
     let mut used = 0usize;
-    for m in ch.messages.iter().rev() {
+    // live: the newest line sits at the bottom. with the message cursor up, the
+    // cursor's line does — only the lines from there up are ever laid out.
+    app.view_h.set(body.height);
+    let cursor_on = app.mode == InputMode::Cursor;
+    let end = if cursor_on {
+        scroll::index_of(ch.seq, ch.messages.len(), app.cursor).map_or(0, |i| i + 1)
+    } else {
+        ch.messages.len()
+    };
+    for (n, m) in ch.messages.range(..end).rev().enumerate() {
         let user = m.uid.as_deref().and_then(|u| app.paints.get(u));
         let mut rows = layout_message(
             m,
@@ -242,6 +253,13 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
                 user,
             },
         );
+        if cursor_on && n == 0 {
+            for r in rows.iter_mut() {
+                for sp in r.line.spans.iter_mut() {
+                    sp.style = sp.style.add_modifier(Modifier::REVERSED);
+                }
+            }
+        }
         let h: usize = rows.iter().map(|r| r.h as usize).sum();
         if used + h > cap {
             // the newest message alone can exceed the pane — keep its tail.
@@ -521,6 +539,10 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             Span::styled(prompt, tag),
             Span::styled(" ❯ ", palette::TEXT),
         ];
+        // replying: a dim chip names who, and goes with the message.
+        if let Some((_, user)) = &app.reply {
+            spans.push(Span::styled(format!("↪@{user} "), palette::DIM_TAG));
+        }
         if readonly {
             spans.push(Span::styled(
                 "read-only — no send token · esc",
@@ -575,6 +597,30 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         } => ("\u{25cf} ", palette::WARN, "connecting".to_string()),
     };
     let mut spans = vec![Span::styled(" heatsync ", palette::TAG)];
+    // message cursor: how much arrived while parked, and the keys that work here.
+    if app.mode == InputMode::Cursor {
+        if let Some(ch) = app.channels.get(app.focus) {
+            let newer = scroll::newer(ch.seq, ch.messages.len(), app.cursor);
+            spans.push(Span::styled(
+                format!(" -- {newer} new --  "),
+                palette::DIM_TAG,
+            ));
+        }
+        for pair in [
+            hint("jk", "move"),
+            hint("r", "reply"),
+            hint("y", "yank"),
+            hint("d", "delete"),
+            hint("G", "live"),
+        ] {
+            spans.extend(pair);
+        }
+        if let Some(msg) = &app.status {
+            spans.push(Span::styled(format!("  {msg}"), palette::WARN));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     // a message (search miss, send error) takes the front of the line the way
     // vi's command line does — appended after the key hints it was simply
     // truncated away on anything narrower than ~110 columns.

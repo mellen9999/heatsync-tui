@@ -183,6 +183,9 @@ fn chat(args: &[String]) -> io::Result<()> {
             paints: paints::Paints::new(),
             pin_tx: std::sync::mpsc::channel().0,
             pin_rx: std::sync::mpsc::channel().1,
+            cursor: 0,
+            reply: None,
+            view_h: std::cell::Cell::new(0),
         }
     } else {
         build_live(&chan_args, cfg.tab_pos, cfg.timestamps, cfg.channels)
@@ -344,6 +347,9 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, stamps: bool, saved: Vec<V
         paints: paints::Paints::new(),
         pin_tx,
         pin_rx,
+        cursor: 0,
+        reply: None,
+        view_h: std::cell::Cell::new(0),
     }
 }
 

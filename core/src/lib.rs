@@ -18,6 +18,7 @@ pub mod paint;
 pub mod proto;
 pub mod room;
 pub mod sanitize;
+pub mod scroll;
 pub mod slash;
 pub mod streamev;
 pub mod vi;
