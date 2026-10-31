@@ -106,6 +106,8 @@ pub(crate) struct App {
     pub(crate) reply: Option<(String, String)>,
     /// rows the chat pane had at the last draw — half a page for ctrl-d/u.
     pub(crate) view_h: std::cell::Cell<u16>,
+    /// where the chat body sat in the last drawn frame (empty when none was drawn).
+    pub(crate) chat_body: std::cell::Cell<ratatui::layout::Rect>,
     /// stream-event pairing + anti-wall guards, between the feed and the tabs.
     pub(crate) streams: StreamEvents,
     /// last-seen room modes per channel, for `slow mode 30s`-style notes.

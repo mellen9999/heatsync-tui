@@ -14,6 +14,7 @@ mod draw;
 mod drawlog;
 mod emote;
 mod feed;
+mod held;
 mod hsauth;
 mod http;
 mod input;
@@ -28,6 +29,7 @@ mod paints;
 mod palette;
 mod picker;
 mod sched;
+mod scroll;
 mod social;
 mod special;
 mod talk;
@@ -191,6 +193,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             cursor: 0,
             reply: None,
             view_h: std::cell::Cell::new(0),
+            chat_body: Default::default(),
             special: special::State::new(false),
         }
     } else {
@@ -208,7 +211,10 @@ fn chat(args: &[String]) -> io::Result<()> {
 
     // must probe the terminal for graphics BEFORE raw mode / alt screen.
     let had_fb = app.fb.is_some();
-    let mut terminal = ratatui::init();
+    // init() for raw mode, the alternate screen and the panic hook; the terminal
+    // itself runs on the held backend (see held.rs).
+    drop(ratatui::init());
+    let mut terminal = Terminal::new(held::HeldBackend::new())?;
     intr::tui_phase();
     let res = run(&mut terminal, app);
     ratatui::restore();
@@ -375,6 +381,7 @@ fn build_live(
         cursor: 0,
         reply: None,
         view_h: std::cell::Cell::new(0),
+        chat_body: Default::default(),
         special: special::State::new(ws_cli),
     }
 }
@@ -459,7 +466,7 @@ pub(crate) fn yt_video_id(tok: &str) -> String {
         .collect()
 }
 
-fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+fn run(terminal: &mut Terminal<held::HeldBackend>, mut app: App) -> io::Result<()> {
     // data cadence: pull chat + decay heat every `tick`. draw cadence: while an
     // animated emote is on the store, redraw every `anim_frame` (~20fps) so the
     // animation is smooth — ratatui diffs the buffer, so an idle frame re-emits
@@ -476,6 +483,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     // instead of queueing writes the terminal renders as tearing. self-tuning, so
     // no protocol gets a hardcoded fps penalty.
     let mut draw_cost = Duration::ZERO;
+    let mut scroller = scroll::Scroller::default();
     let mut dlog = drawlog::DrawLog::from_env();
     let mut gate = sched::ChatGate::default();
     // true when something visible may have changed since the last draw: a key,
@@ -537,16 +545,37 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
                 crossterm::execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
             let drew = terminal.draw(|f| ui(f, &app));
+            // the diff is held, not yet written. chat that is just last frame's
+            // chat moved up is scrolled for real, so the terminal moves its own
+            // pixels and only the new rows are written (see scroll.rs).
+            let (plan, area) = match &drew {
+                Ok(done) => (
+                    scroller.observe(done.buffer, scroll_body(&app, done.area)),
+                    Some(done.area),
+                ),
+                Err(_) => (None, None),
+            };
+            let drew = drew.map(|_| ());
+            let plan = plan.filter(|(s, _)| {
+                app.store
+                    .as_ref()
+                    .is_some_and(|st| st.shift_blits(s.top, s.h, s.k))
+            });
+            let wrote = match plan {
+                Some((s, cells)) => terminal.backend_mut().scroll_then_paint(s, &cells),
+                None => terminal.backend_mut().release(),
+            };
             // sixels go out after the text, inside the sync window: only the
             // placements that changed (see emote/blit.rs).
-            let blit = match (&drew, &app.store) {
-                (Ok(done), Some(store)) => store.blit(done.area, &mut io::stdout()),
+            let blit = match (area, &app.store) {
+                (Some(area), Some(store)) => store.blit(area, &mut io::stdout()),
                 _ => Ok(()),
             };
             if sync {
                 crossterm::execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
             }
             drew?;
+            wrote?;
             blit?;
             dlog.draw();
             // exponential moving average — one slow frame shouldn't throttle us, a
@@ -597,6 +626,15 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             woke = true;
         }
     }
+}
+
+/// the chat body when it may be scrolled for real: sixel emotes that the
+/// terminal (or tmux itself) keeps in its own grid, a chat spanning the full
+/// width (a scroll region is whole rows, so side tab bars opt out).
+fn scroll_body(app: &App, area: ratatui::layout::Rect) -> Option<ratatui::layout::Rect> {
+    let body = app.chat_body.get();
+    let ok = matches!(emote_mode(app), layout::EmoteMode::Term(s) if s.scroll_ok());
+    (ok && body.width == area.width && body.height > 0).then_some(body)
 }
 
 #[cfg(test)]

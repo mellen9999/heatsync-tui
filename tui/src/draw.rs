@@ -34,6 +34,7 @@ pub(crate) fn emote_mode(app: &App) -> EmoteMode<'_> {
 }
 
 pub(crate) fn ui(f: &mut Frame, app: &App) {
+    app.chat_body.set(Rect::default());
     let mode = emote_mode(app);
     // wysiwyg strip: while composing, a draft that resolves an emote gets a
     // live preview row above the footer — the message as it will actually
@@ -240,6 +241,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     // live: the newest line sits at the bottom. with the message cursor up, the
     // cursor's line does — only the lines from there up are ever laid out.
     app.view_h.set(body.height);
+    app.chat_body.set(body);
     let cursor_on = app.mode == InputMode::Cursor;
     let end = if cursor_on {
         scroll::index_of(ch.seq, ch.messages.len(), app.cursor).map_or(0, |i| i + 1)

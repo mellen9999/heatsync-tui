@@ -491,6 +491,7 @@ pub(crate) mod tests {
             cursor: 0,
             reply: None,
             view_h: std::cell::Cell::new(0),
+            chat_body: Default::default(),
             emote_tx,
             emote_rx,
             hist_tx,

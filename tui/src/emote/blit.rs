@@ -37,6 +37,27 @@ impl Blitter {
         });
     }
 
+    /// the terminal scrolled rows `top..top+h` up by `k`: move what we know is on
+    /// screen with it. an image half scrolled off the top is forgotten (the
+    /// frame's diff rewrites its remaining rows). false (nothing changed) when
+    /// an image straddles the region's own edge — the caller then doesn't scroll.
+    pub fn shift_up(&mut self, top: u16, h: u16, k: u16) -> bool {
+        let (end, cut) = (top + h, top + k);
+        let mut next = HashMap::with_capacity(self.last.len());
+        for (r, id) in &self.last {
+            let (y0, y1) = (r.y, r.y + r.height);
+            if y1 <= top || y0 >= end {
+                next.insert(*r, id.clone()); // untouched by the scroll
+            } else if y0 < top || y1 > end {
+                return false; // straddles an edge of the region
+            } else if y0 >= cut {
+                next.insert(Rect { y: y0 - k, ..*r }, id.clone());
+            } // else: scrolled off the top, gone
+        }
+        self.last = next;
+        true
+    }
+
     /// the placements that must be written this frame. a rect whose emote and
     /// frame match what is already on screen is skipped: its NBSP cells did not
     /// change, so ratatui left the pixels alone. anything not queued this frame
@@ -102,6 +123,35 @@ mod tests {
         assert_eq!(in_place(&mut b, &[(r(1, 2), "j", 1)]), [false]); // other emote
         assert_eq!(in_place(&mut b, &[]), Vec::<bool>::new());
         assert_eq!(in_place(&mut b, &[(r(1, 2), "j", 2)]), [false]); // overwritten
+    }
+
+    #[test]
+    fn scroll_moves_known_placements() {
+        let mut b = Blitter::default();
+        frame(
+            &mut b,
+            A,
+            &[(r(1, 2), "k", 0), (r(1, 5), "j", 0), (r(1, 20), "f", 0)],
+        );
+        // region rows 2..12 scrolled up 3: k scrolls off, j lands on row 2
+        assert!(b.shift_up(2, 10, 3));
+        assert_eq!(
+            frame(
+                &mut b,
+                A,
+                &[(r(1, 2), "j", 0), (r(1, 20), "f", 0), (r(1, 9), "n", 0)]
+            ),
+            1, // only the new image at the bottom is written
+        );
+        // half scrolled off: forgotten, so it is re-sent if it is still wanted
+        let mut b = Blitter::default();
+        frame(&mut b, A, &[(r(1, 3), "k", 0)]);
+        assert!(b.shift_up(2, 10, 2)); // rows 3..5 cross the cut at row 4
+        assert_eq!(frame(&mut b, A, &[(r(1, 1), "k", 0)]), 1);
+        // an image across the region's own edge forbids scrolling
+        let mut b = Blitter::default();
+        frame(&mut b, A, &[(r(1, 1), "k", 0)]);
+        assert!(!b.shift_up(2, 10, 2));
     }
 
     #[test]

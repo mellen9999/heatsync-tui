@@ -436,6 +436,18 @@ impl EmoteStore {
             if matches!(a.frames[a.shown.get().min(a.frames.len() - 1)].proto, Protocol::Sixel(_)))
     }
 
+    /// can rows of this pane be scrolled for real? sixel only, and only where
+    /// the terminal (or tmux, which keeps sixel in its own grid) owns the
+    /// pixels — passthrough images are invisible to tmux's scroll.
+    pub fn scroll_ok(&self) -> bool {
+        self.proto == ProtocolType::Sixel && self.sync_ok()
+    }
+
+    /// the terminal scrolled rows `top..top+h` up by `k` (see blit.rs).
+    pub fn shift_blits(&self, top: u16, h: u16, k: u16) -> bool {
+        self.blit.borrow_mut().shift_up(top, h, k)
+    }
+
     /// queue the emote's current frame (the one `frame` just picked) at `rect`.
     pub fn queue_blit(&self, rect: Rect, key: &str) {
         if let Some(Entry::Ready(a)) = self.cache.get(key) {
