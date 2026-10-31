@@ -91,6 +91,8 @@ pub enum Event {
     /// followed channels already live at connect (`follow:live:snapshot`) —
     /// catch-up, never lines.
     FollowLive(Vec<(Platform, String)>),
+    /// a twitch ROOMSTATE: the channel's current chat modes.
+    Room(String, RoomState),
     Pong,
     /// `profile:color`: a user's picked name color, by paint-space id.
     Color {
@@ -100,6 +102,15 @@ pub enum Event {
     /// `cosmetic:changed`: paints changed for these paint-space ids.
     Cosmetic(Vec<String>),
     Ignore,
+}
+
+/// a channel's chat modes. `followers` is minutes (-1 = off, 0 = any follower).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoomState {
+    pub slow: u32,
+    pub followers: i32,
+    pub emote_only: bool,
+    pub subs_only: bool,
 }
 
 /// parse one inbound text frame. unknown / malformed frames become `Ignore`
@@ -115,6 +126,7 @@ pub fn parse(raw: &str) -> Event {
         // roomstate/clearmsg are state we don't surface as lines.
         "irc:message" if is_irc(&v, "clearmsg") => clearmsg_event(&v),
         "irc:message" if is_irc(&v, "clearchat") => clearchat_event(&v),
+        "irc:message" if is_irc(&v, "roomstate") => roomstate_event(&v),
         "irc:message" => v
             .get("message")
             .and_then(|m| match m.get("type").and_then(Value::as_str) {
@@ -350,7 +362,7 @@ fn split_headline(user: &mut String, what: &str) -> String {
 }
 
 /// terse duration for timeouts: 45s, 10m, 2h, 1d.
-fn fmt_secs(s: u64) -> String {
+pub(crate) fn fmt_secs(s: u64) -> String {
     if s >= 86_400 && s.is_multiple_of(86_400) {
         format!("{}d", s / 86_400)
     } else if s >= 3_600 && s.is_multiple_of(3_600) {
@@ -363,7 +375,7 @@ fn fmt_secs(s: u64) -> String {
 }
 
 /// a bare note line — no chat text, just the event.
-fn note_line(
+pub(crate) fn note_line(
     platform: Platform,
     channel: String,
     user: String,
@@ -428,6 +440,23 @@ fn usernotice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
     let channel = channel.and_then(Value::as_str).unwrap_or("").to_string();
     let color = color_of(m);
     note_line(Platform::Twitch, channel, user, color, kind, what, text)
+}
+
+fn roomstate_event(v: &Value) -> Event {
+    let (Some(m), Some(ch)) = (v.get("message"), v.get("channel").and_then(Value::as_str)) else {
+        return Event::Ignore;
+    };
+    let flag = |k: &str| m.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let n = |k: &str, d: i64| m.get(k).and_then(Value::as_i64).unwrap_or(d);
+    Event::Room(
+        ch.to_string(),
+        RoomState {
+            slow: n("slow", 0).clamp(0, u32::MAX as i64) as u32,
+            followers: n("followersOnly", -1).clamp(-1, i32::MAX as i64) as i32,
+            emote_only: flag("emoteOnly"),
+            subs_only: flag("subsOnly"),
+        },
+    )
 }
 
 fn is_irc(v: &Value, kind: &str) -> bool {
@@ -1401,10 +1430,10 @@ mod tests {
     }
 
     #[test]
-    fn roomstate_stays_silent() {
+    fn roomstate_is_state_not_a_line_and_clearmsg_needs_a_target() {
         let rs = r#"{"type":"irc:message","channel":"c","message":{
             "type":"roomstate","emoteOnly":false,"slow":0}}"#;
-        assert_eq!(parse(rs), Event::Ignore);
+        assert!(matches!(parse(rs), Event::Room(..)));
         let cm = r#"{"type":"irc:message","channel":"c","message":{
             "type":"clearmsg","targetMsgId":""}}"#;
         assert_eq!(parse(cm), Event::Ignore, "no target id, nothing to strike");

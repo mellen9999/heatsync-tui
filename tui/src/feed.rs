@@ -271,6 +271,11 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                 }
             }
             ChatEvent::FollowLive(live) => app.streams.seed_live(live),
+            ChatEvent::Room(c, r) => {
+                for l in app.rooms.update(&c, r) {
+                    deliver(app, l, now);
+                }
+            }
             ChatEvent::Delete(d) => {
                 for c in app.channels.iter_mut() {
                     // youtube's frame names a video; an empty channel = any tab

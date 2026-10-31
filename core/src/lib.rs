@@ -16,6 +16,7 @@ pub mod key;
 pub mod mock;
 pub mod paint;
 pub mod proto;
+pub mod room;
 pub mod sanitize;
 pub mod slash;
 pub mod streamev;

@@ -7,6 +7,7 @@ use crate::{hsauth, kick, net, picker, twitch};
 use heatsync_core::complete::Completion;
 use heatsync_core::edit;
 use heatsync_core::emote::EmoteSet;
+use heatsync_core::room::RoomModes;
 use heatsync_core::streamev::StreamEvents;
 use heatsync_core::{mock, Channel, Message, Platform};
 use std::sync::mpsc::{Receiver, Sender};
@@ -93,4 +94,6 @@ pub(crate) struct App {
     pub(crate) paints: Paints,
     /// stream-event pairing + anti-wall guards, between the feed and the tabs.
     pub(crate) streams: StreamEvents,
+    /// last-seen room modes per channel, for `slow mode 30s`-style notes.
+    pub(crate) rooms: RoomModes,
 }
