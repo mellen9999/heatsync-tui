@@ -22,7 +22,26 @@ pub struct ChatLine {
     pub note: Option<Note>,
     /// sender id in paint space (see `Message::uid`).
     pub uid: Option<String>,
+    /// raw stream lifecycle facts behind a go-live / offline / game-switch
+    /// note — what `streamev` pairs and dedupes on.
+    pub stream: Option<StreamEv>,
     pub content: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamKind {
+    Online,
+    Offline,
+    Update,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamEv {
+    pub kind: StreamKind,
+    pub game: String,
+    pub prev_game: String,
+    /// from a followed-channel push (`follow:stream:*`), not a joined room.
+    pub follow: bool,
 }
 
 /// whose lines a moderation event removes.
@@ -68,6 +87,9 @@ pub enum Event {
         ok: bool,
         error: Option<String>,
     },
+    /// followed channels already live at connect (`follow:live:snapshot`) —
+    /// catch-up, never lines.
+    FollowLive(Vec<(Platform, String)>),
     Pong,
     /// `profile:color`: a user's picked name color, by paint-space id.
     Color {
@@ -110,6 +132,10 @@ pub fn parse(raw: &str) -> Event {
         | "stream:hype-start" | "stream:hype-end" | "moment:spike" => {
             stream_line(&v).map(Event::Chat).unwrap_or(Event::Ignore)
         }
+        "follow:stream:online" | "follow:stream:offline" | "follow:stream:update" => {
+            stream_line(&v).map(Event::Chat).unwrap_or(Event::Ignore)
+        }
+        "follow:live:snapshot" => follow_snapshot(&v),
         "kick-sub-event" => kick_sub_line(&v).map(Event::Chat).unwrap_or(Event::Ignore),
         "kick-kicks-event" => kick_kicks_line(&v)
             .map(Event::Chat)
@@ -239,6 +265,7 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
             .map(sanitize::clean)
             .filter(|s| !s.is_empty()),
         note,
+        stream: None,
         content,
         uid: uid_of(m, platform),
     })
@@ -349,6 +376,7 @@ fn note_line(
         badges: Vec::new(),
         reply_to: None,
         note: Some(Note { kind, what }),
+        stream: None,
         content,
         uid: None,
     })
@@ -500,6 +528,38 @@ fn notice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
     )
 }
 
+fn stream_ev(kind: StreamKind, game: String, prev_game: String, follow: bool) -> StreamEv {
+    StreamEv {
+        kind,
+        game,
+        prev_game,
+        follow,
+    }
+}
+
+/// `follow:live:snapshot` → the (platform, channel) pairs already live.
+fn follow_snapshot(v: &Value) -> Event {
+    let live = v
+        .get("streams")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| {
+                    let platform = match field(s, "platform").to_lowercase().as_str() {
+                        "twitch" => Platform::Twitch,
+                        "kick" => Platform::Kick,
+                        "youtube" => Platform::Youtube,
+                        _ => return None,
+                    };
+                    let user = field(s, "username").to_lowercase();
+                    (!user.is_empty()).then_some((platform, user))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Event::FollowLive(live)
+}
+
 /// stream lifecycle / hype / redemption / heat-spike frames. these carry
 /// their platform + channel — the receiver routes them like chat.
 fn stream_line(v: &Value) -> Option<ChatLine> {
@@ -514,69 +574,69 @@ fn stream_line(v: &Value) -> Option<ChatLine> {
         return None;
     }
     let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
-    match v.get("type").and_then(Value::as_str).unwrap_or("") {
+    let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
+    // followed-channel pushes carry the same fields under a `follow:` prefix.
+    let (ty, follow) = match ty.strip_prefix("follow:") {
+        Some(t) => (t, true),
+        None => (ty, false),
+    };
+    let color = if follow { color_of(v) } else { None };
+    match ty {
         "stream:online" => {
             let game = field(v, "game");
             let what = if game.is_empty() {
-                "live".to_string()
+                "went live".to_string()
             } else {
-                format!("live — {game}")
+                format!("went live — {game}")
             };
-            note_line(
+            let mut l = note_line(
                 platform,
                 channel,
                 String::new(),
-                None,
+                color,
                 NoteKind::Live,
                 what,
                 field(v, "title"),
-            )
+            )?;
+            l.stream = Some(stream_ev(StreamKind::Online, game, String::new(), follow));
+            Some(l)
         }
-        "stream:offline" => note_line(
-            platform,
-            channel,
-            String::new(),
-            None,
-            NoteKind::Offline,
-            "offline".into(),
-            String::new(),
-        ),
+        "stream:offline" => {
+            let mut l = note_line(
+                platform,
+                channel,
+                String::new(),
+                color,
+                NoteKind::Offline,
+                "went offline".into(),
+                String::new(),
+            )?;
+            l.stream = Some(stream_ev(
+                StreamKind::Offline,
+                String::new(),
+                String::new(),
+                follow,
+            ));
+            Some(l)
+        }
+        // only a new game is worth a line; a title-only change is dropped
+        // (the extension drops it too).
         "stream:update" => {
             let (game, prev) = (field(v, "game"), field(v, "prevGame"));
-            let (title, prev_t) = (field(v, "title"), field(v, "prevTitle"));
-            if !game.is_empty() && game != prev {
-                let what = if prev.is_empty() {
-                    format!("→ {game}")
-                } else {
-                    format!("{prev} → {game}")
-                };
-                let t = if title != prev_t {
-                    title
-                } else {
-                    String::new()
-                };
-                note_line(
-                    platform,
-                    channel,
-                    String::new(),
-                    None,
-                    NoteKind::Category,
-                    what,
-                    t,
-                )
-            } else if !title.is_empty() && title != prev_t {
-                note_line(
-                    platform,
-                    channel,
-                    String::new(),
-                    None,
-                    NoteKind::Category,
-                    "title".into(),
-                    title,
-                )
-            } else {
-                None
+            if game.is_empty() || game == prev {
+                return None;
             }
+            let mut l = note_line(
+                platform,
+                channel,
+                String::new(),
+                color,
+                NoteKind::Category,
+                format!("switched to {game}"),
+                String::new(),
+            )?;
+            l.stream = Some(stream_ev(StreamKind::Update, game, prev, follow));
+            Some(l)
         }
         "stream:raid" => {
             let target = field(v, "target");
@@ -585,9 +645,9 @@ fn stream_line(v: &Value) -> Option<ChatLine> {
             }
             let viewers = n("viewers");
             let what = if viewers > 0 {
-                format!("raiding {target} — {viewers} viewers")
+                format!("raided {target} with {viewers} viewers")
             } else {
-                format!("raiding {target}")
+                format!("raided {target}")
             };
             note_line(
                 platform,
@@ -827,6 +887,7 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
         badges: Vec::new(),
         reply_to: None,
         note,
+        stream: None,
         content,
         uid: m
             .get("authorChannelId")
@@ -868,30 +929,42 @@ pub fn badges_from(v: Option<&Value>) -> Vec<Badge> {
 
 /// outbound: subscribe to a channel's live chat. youtube subscribes by watch
 /// url (the server resolves it); our channel name IS the video id.
-pub fn join(platform: Platform, channel: &str) -> String {
+/// twitch needs BOTH: `irc:join` for chat, `channel:join` for the room the
+/// server pushes stream:online/offline/update/raid/redeem into.
+pub fn join(platform: Platform, channel: &str) -> Vec<String> {
     match platform {
-        Platform::Twitch => json!({ "type": "irc:join", "channel": channel }),
+        Platform::Twitch => vec![
+            json!({ "type": "channel:join", "platform": "twitch", "channel": channel }),
+            json!({ "type": "irc:join", "channel": channel }),
+        ],
         Platform::Kick => {
-            json!({ "type": "channel:join", "platform": "kick", "channel": channel })
+            vec![json!({ "type": "channel:join", "platform": "kick", "channel": channel })]
         }
-        Platform::Youtube => json!({
+        Platform::Youtube => vec![json!({
             "type": "youtube:subscribe",
             "url": format!("https://www.youtube.com/watch?v={channel}"),
-        }),
+        })],
     }
-    .to_string()
+    .iter()
+    .map(Value::to_string)
+    .collect()
 }
 
 /// outbound: unsubscribe.
-pub fn part(platform: Platform, channel: &str) -> String {
+pub fn part(platform: Platform, channel: &str) -> Vec<String> {
     match platform {
-        Platform::Twitch => json!({ "type": "irc:part", "channel": channel }),
+        Platform::Twitch => vec![
+            json!({ "type": "channel:leave", "platform": "twitch", "channel": channel }),
+            json!({ "type": "irc:part", "channel": channel }),
+        ],
         Platform::Kick => {
-            json!({ "type": "channel:leave", "platform": "kick", "channel": channel })
+            vec![json!({ "type": "channel:leave", "platform": "kick", "channel": channel })]
         }
-        Platform::Youtube => json!({ "type": "youtube:unsubscribe", "videoId": channel }),
+        Platform::Youtube => vec![json!({ "type": "youtube:unsubscribe", "videoId": channel })],
     }
-    .to_string()
+    .iter()
+    .map(Value::to_string)
+    .collect()
 }
 
 /// outbound: keepalive, send every ~10s (server replies `pong`).
@@ -951,6 +1024,7 @@ mod tests {
                 badges: vec![],
                 reply_to: None,
                 note: None,
+                stream: None,
                 content: "hello GAMBA".into(),
                 uid: None,
             })
@@ -1033,13 +1107,25 @@ mod tests {
     fn join_frames_are_correct() {
         assert_eq!(
             join(Platform::Twitch, "xqc"),
-            r#"{"channel":"xqc","type":"irc:join"}"#
+            [
+                r#"{"channel":"xqc","platform":"twitch","type":"channel:join"}"#,
+                r#"{"channel":"xqc","type":"irc:join"}"#,
+            ]
         );
-        assert!(join(Platform::Kick, "x").contains("channel:join"));
+        assert_eq!(
+            part(Platform::Twitch, "xqc"),
+            [
+                r#"{"channel":"xqc","platform":"twitch","type":"channel:leave"}"#,
+                r#"{"channel":"xqc","type":"irc:part"}"#,
+            ]
+        );
+        assert_eq!(join(Platform::Kick, "x").len(), 1);
+        assert!(join(Platform::Kick, "x")[0].contains("channel:join"));
         let yt = join(Platform::Youtube, "dQw4w9WgXcQ");
-        assert!(yt.contains("youtube:subscribe"));
-        assert!(yt.contains("watch?v=dQw4w9WgXcQ"));
-        assert!(part(Platform::Youtube, "dQw4w9WgXcQ").contains(r#""videoId":"dQw4w9WgXcQ""#));
+        assert_eq!(yt.len(), 1);
+        assert!(yt[0].contains("youtube:subscribe"));
+        assert!(yt[0].contains("watch?v=dQw4w9WgXcQ"));
+        assert!(part(Platform::Youtube, "dQw4w9WgXcQ")[0].contains(r#""videoId":"dQw4w9WgXcQ""#));
     }
 
     #[test]
@@ -1237,7 +1323,7 @@ mod tests {
                 assert_eq!(l.channel, "xqc");
                 let n = l.note.unwrap();
                 assert_eq!(n.kind, NoteKind::Live);
-                assert_eq!(n.what, "live — Just Chatting");
+                assert_eq!(n.what, "went live — Just Chatting");
                 assert_eq!(l.content, "BIG DAY");
             }
             _ => panic!(),
@@ -1248,7 +1334,7 @@ mod tests {
             Event::Chat(l) => {
                 let n = l.note.unwrap();
                 assert_eq!(n.kind, NoteKind::Category);
-                assert_eq!(n.what, "Just Chatting → Elden Ring");
+                assert_eq!(n.what, "switched to Elden Ring");
                 assert_eq!(l.content, "", "unchanged title not repeated");
             }
             _ => panic!(),
@@ -1266,10 +1352,88 @@ mod tests {
             Event::Chat(l) => {
                 let n = l.note.unwrap();
                 assert_eq!(n.kind, NoteKind::Offline);
-                assert_eq!(n.what, "offline");
+                assert_eq!(n.what, "went offline");
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn title_only_update_and_same_game_make_no_line() {
+        let t = r#"{"type":"stream:update","platform":"twitch","channel":"c",
+            "game":"A","prevGame":"A","title":"new","prevTitle":"old"}"#;
+        assert_eq!(parse(t), Event::Ignore);
+        let e = r#"{"type":"stream:update","platform":"twitch","channel":"c",
+            "game":"","prevGame":"A","title":"new","prevTitle":"old"}"#;
+        assert_eq!(parse(e), Event::Ignore);
+    }
+
+    #[test]
+    fn online_without_game_and_first_game_update() {
+        let on = r#"{"type":"stream:online","platform":"twitch","channel":"c","game":""}"#;
+        match parse(on) {
+            Event::Chat(l) => assert_eq!(l.note.unwrap().what, "went live"),
+            _ => panic!(),
+        }
+        let up = r#"{"type":"stream:update","platform":"twitch","channel":"c",
+            "game":"X","prevGame":""}"#;
+        match parse(up) {
+            Event::Chat(l) => {
+                assert_eq!(l.note.unwrap().what, "switched to X");
+                let s = l.stream.unwrap();
+                assert_eq!(
+                    (s.kind, s.game.as_str(), s.prev_game.as_str()),
+                    (StreamKind::Update, "X", "")
+                );
+                assert!(!s.follow);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn follow_events_carry_flag_and_color() {
+        let raw = r##"{"type":"follow:stream:online","platform":"twitch","channel":"cyr",
+            "game":"Chess","title":"t","color":"#ff0000"}"##;
+        match parse(raw) {
+            Event::Chat(l) => {
+                assert_eq!(l.color.as_deref(), Some("#ff0000"));
+                assert_eq!(l.note.unwrap().what, "went live — Chess");
+                let s = l.stream.unwrap();
+                assert!(s.follow);
+                assert_eq!(s.kind, StreamKind::Online);
+            }
+            _ => panic!(),
+        }
+        match parse(r#"{"type":"follow:stream:offline","platform":"kick","channel":"cyr"}"#) {
+            Event::Chat(l) => {
+                assert_eq!(l.platform, Platform::Kick);
+                assert!(l.stream.unwrap().follow);
+            }
+            _ => panic!(),
+        }
+        match parse(
+            r#"{"type":"follow:stream:update","platform":"twitch","channel":"c","game":"B","prevGame":"A"}"#,
+        ) {
+            Event::Chat(l) => assert_eq!(l.note.unwrap().what, "switched to B"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn follow_snapshot_lists_live_channels() {
+        let raw = r#"{"type":"follow:live:snapshot","streams":[
+            {"username":"Cyr","platform":"twitch","viewerCount":5},
+            {"username":"xqc","platform":"KICK"},
+            {"username":"","platform":"twitch"},
+            {"username":"y","platform":"mars"}]}"#;
+        assert_eq!(
+            parse(raw),
+            Event::FollowLive(vec![
+                (Platform::Twitch, "cyr".into()),
+                (Platform::Kick, "xqc".into())
+            ])
+        );
     }
 
     #[test]
@@ -1288,7 +1452,7 @@ mod tests {
             "target":"friend","viewers":500}"##;
         match parse(raid) {
             Event::Chat(l) => {
-                assert_eq!(l.note.unwrap().what, "raiding friend — 500 viewers");
+                assert_eq!(l.note.unwrap().what, "raided friend with 500 viewers");
             }
             _ => panic!(),
         }

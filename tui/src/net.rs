@@ -19,6 +19,11 @@ const WS_URL: &str = "wss://heatsync.org/ws";
 const READ_TIMEOUT: Duration = Duration::from_millis(800);
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const BACKOFF_MAX: Duration = Duration::from_secs(15);
+/// gap between join/part frames — the extension spaces its connect burst 80ms
+/// apart so the server's per-handler limits never drop a join.
+const FRAME_GAP: Duration = Duration::from_millis(80);
+
+type Socket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 
 /// a channel to subscribe to.
 pub type Sub = (Platform, String);
@@ -96,7 +101,8 @@ fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
         }
         Event::Color { id, color } => tx.send(ChatEvent::Color { id, color }).is_ok(),
         Event::Cosmetic(ids) => tx.send(ChatEvent::Cosmetic(ids)).is_ok(),
-        Event::Pong | Event::Ignore => true,
+        // the tui doesn't consume the followed-live snapshot yet.
+        Event::FollowLive(_) | Event::Pong | Event::Ignore => true,
     }
 }
 
@@ -143,10 +149,7 @@ fn session(
         }
     }
     for (platform, channel) in subs.iter() {
-        if ws
-            .send(WsMsg::Text(proto::join(*platform, channel)))
-            .is_err()
-        {
+        if !send_paced(&mut ws, proto::join(*platform, channel)) {
             return SessionEnd::Dropped;
         }
     }
@@ -175,14 +178,14 @@ fn session(
 
         // drain queued outbound requests.
         while let Ok(o) = out.try_recv() {
-            let frame = match o {
+            let frames = match o {
                 Outbound::Chat {
                     platform: Platform::Kick,
                     channel,
                     text,
                 } => {
                     *req += 1;
-                    proto::send_kick(&channel, &text, *req)
+                    vec![proto::send_kick(&channel, &text, *req)]
                 }
                 Outbound::Chat {
                     platform: Platform::Youtube,
@@ -190,7 +193,7 @@ fn session(
                     text,
                 } => {
                     *req += 1;
-                    proto::send_youtube(&channel, &text, *req)
+                    vec![proto::send_youtube(&channel, &text, *req)]
                 }
                 // twitch has no relay send path — silently drop.
                 Outbound::Chat {
@@ -208,7 +211,7 @@ fn session(
                     proto::part(platform, &channel)
                 }
             };
-            if ws.send(WsMsg::Text(frame)).is_err() {
+            if !send_paced(&mut ws, frames) {
                 return SessionEnd::Dropped;
             }
         }
@@ -222,8 +225,21 @@ fn session(
     }
 }
 
+/// send frames in order, `FRAME_GAP` apart. false = the socket is dead.
+fn send_paced(ws: &mut Socket, frames: Vec<String>) -> bool {
+    for (i, f) in frames.into_iter().enumerate() {
+        if i > 0 {
+            thread::sleep(FRAME_GAP);
+        }
+        if ws.send(WsMsg::Text(f)).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 /// borrow the underlying TcpStream to set a read timeout, through TLS or plain.
-fn tcp_of(ws: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>) -> Result<&TcpStream, ()> {
+fn tcp_of(ws: &mut Socket) -> Result<&TcpStream, ()> {
     match ws.get_mut() {
         MaybeTlsStream::Plain(s) => Ok(s),
         MaybeTlsStream::Rustls(s) => Ok(s.get_ref()),

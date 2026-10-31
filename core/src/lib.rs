@@ -23,7 +23,7 @@ pub mod vi;
 use std::collections::VecDeque;
 
 /// where a channel's chat comes from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Platform {
     Twitch,
     Kick,
