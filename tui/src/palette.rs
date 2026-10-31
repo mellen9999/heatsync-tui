@@ -32,12 +32,13 @@ pub const READ: Color = Color::Rgb(128, 128, 128);
 pub const GONE: Style = Style::new().fg(READ).add_modifier(Modifier::CROSSED_OUT);
 pub const GONE_TAG: Style = Style::new().fg(READ);
 
-/// a background tab by what it holds: read = gray, unread = white, a ping =
-/// bold red. the focused tab is `TAG` (reversed).
+/// a background tab by what it holds: read = gray, unread = white, a stream
+/// event = yellow, a ping = bold red. the focused tab is `TAG` (reversed).
 pub fn tab(u: Unread) -> Style {
     match u {
         Unread::None => Style::new().fg(READ),
         Unread::Chat => TEXT,
+        Unread::Event => Style::new().fg(Color::Yellow),
         Unread::Ping => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
     }
 }
@@ -147,6 +148,7 @@ mod tests {
     fn tab_states_read_gray_unread_white_ping_bold_red() {
         assert_eq!(tab(Unread::None).fg, Some(READ));
         assert_eq!(tab(Unread::Chat), TEXT);
+        assert_eq!(tab(Unread::Event).fg, Some(Color::Yellow));
         let p = tab(Unread::Ping);
         assert_eq!(p.fg, Some(Color::Red));
         assert!(p.add_modifier.contains(Modifier::BOLD));

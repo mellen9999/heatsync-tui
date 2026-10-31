@@ -143,7 +143,7 @@ impl Driver {
             // rare inline events so the offline feed exercises note rendering.
             if self.rng.unit() < 0.008 {
                 let user = self.rng.pick(USERS).to_string();
-                let (kind, what, text) = match (self.rng.unit() * 5.0) as u32 {
+                let (kind, what, text) = match (self.rng.unit() * 8.0) as u32 {
                     0 => (
                         crate::NoteKind::Sub,
                         "subscribed at Tier 1. They've subscribed for 14 months!",
@@ -152,12 +152,21 @@ impl Driver {
                     1 => (crate::NoteKind::Gift, "is gifting 5 Tier 1 Subs!", ""),
                     2 => (crate::NoteKind::Raid, "12 raiders have joined!", ""),
                     3 => (crate::NoteKind::Redeem, "redeemed Hydrate (500)", ""),
+                    4 => (crate::NoteKind::Live, "went live — Just Chatting", ""),
+                    5 => (crate::NoteKind::Category, "switched to Elden Ring", ""),
+                    6 => (crate::NoteKind::Offline, "went offline", ""),
                     _ => (crate::NoteKind::Cheer, "cheered 100 bits", "gg"),
                 };
                 ch.record(
                     Message {
                         platform: ch.platform,
-                        user: if matches!(kind, crate::NoteKind::Raid) {
+                        user: if matches!(
+                            kind,
+                            crate::NoteKind::Raid
+                                | crate::NoteKind::Live
+                                | crate::NoteKind::Category
+                                | crate::NoteKind::Offline
+                        ) {
                             String::new()
                         } else {
                             user
@@ -177,6 +186,12 @@ impl Driver {
                     },
                     now,
                 );
+                if matches!(
+                    kind,
+                    crate::NoteKind::Live | crate::NoteKind::Category | crate::NoteKind::Offline
+                ) {
+                    ch.flag_event();
+                }
             }
             while budget > 0.0 {
                 if self.rng.unit() < budget.min(1.0) {

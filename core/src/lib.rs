@@ -177,17 +177,21 @@ pub struct Channel {
     unread: u32,
     /// one of them pinged the user.
     pinged: bool,
+    /// one of them was a stream event.
+    evented: bool,
     /// lines ever appended at the live end — a monotonic clock for "how many
     /// arrived since", unaffected by the ring evicting old ones.
     pub seq: u64,
     cap: usize,
 }
 
-/// what a tab has waiting, for its color: nothing, chat, or a ping.
+/// what a tab has waiting, for its color: nothing, chat, a stream event, or a ping.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unread {
     None,
     Chat,
+    /// a stream event (went live / offline / game switch) landed unseen.
+    Event,
     Ping,
 }
 
@@ -202,6 +206,7 @@ impl Channel {
             messages: VecDeque::with_capacity(cap),
             unread: 0,
             pinged: false,
+            evented: false,
             seq: 0,
             cap,
         }
@@ -211,6 +216,8 @@ impl Channel {
     pub fn unread(&self) -> Unread {
         if self.pinged {
             Unread::Ping
+        } else if self.evented {
+            Unread::Event
         } else if self.unread > 0 {
             Unread::Chat
         } else {
@@ -221,6 +228,11 @@ impl Channel {
     /// flag the most recent line as a ping (caller knows who "me" is).
     pub fn ping(&mut self) {
         self.pinged = true;
+    }
+
+    /// flag the tab as holding an unseen stream event.
+    pub fn flag_event(&mut self) {
+        self.evented = true;
     }
 
     /// add a client-side line (a send rejection, a connection notice): keeps the
@@ -259,6 +271,7 @@ impl Channel {
     pub fn mark_seen(&mut self) {
         self.unread = 0;
         self.pinged = false;
+        self.evented = false;
     }
 
     /// every source feeding this tab, primary first.
@@ -334,6 +347,14 @@ mod channel_tests {
         assert_eq!(c.unread(), Unread::None);
         c.record(msg("a", "hi"), 1);
         assert_eq!(c.unread(), Unread::Chat);
+        c.flag_event();
+        assert_eq!(c.unread(), Unread::Event);
+        c.record(msg("a", "again"), 1);
+        assert_eq!(
+            c.unread(),
+            Unread::Event,
+            "chat does not downgrade an event"
+        );
         c.ping();
         assert_eq!(c.unread(), Unread::Ping);
         c.record(msg("b", "yo"), 2);
