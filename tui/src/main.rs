@@ -468,8 +468,8 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
     let tick = Duration::from_millis(200);
     let mut last = Instant::now();
     // see the frame loop below: synchronized output is a win everywhere EXCEPT
-    // inside tmux, where it costs us every emote on screen.
-    let sync = std::env::var_os("TMUX").is_none();
+    // inside tmux with passthrough emotes, where it costs us every emote on screen.
+    let sync = std::env::var_os("TMUX").is_none() || app.store.as_ref().is_none_or(|s| s.sync_ok());
     // smoothed cost of one draw. animations run at their authored rate, but never
     // faster than the terminal can actually paint — if a draw starts costing real
     // time (a slow pty, a screenful of sixels), the cadence stretches to match
@@ -527,7 +527,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -
             // until the frame is complete, so a frame's blits land at once instead
             // of streaming in as visible tearing. foot/kitty/wezterm honour it.
             //
-            // NOT inside tmux. tmux doesn't pass the mode through — it implements
+            // NOT inside tmux unless tmux draws the sixel itself. tmux implements
             // it, and its implementation repaints the WHOLE pane when the frame
             // ends. our emotes reach the terminal as passthrough, which tmux cannot
             // see, so that repaint paints tmux's own blank cells straight over

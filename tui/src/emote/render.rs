@@ -102,6 +102,8 @@ pub struct EmoteStore {
     /// and stores the answer here; the render thread only ever reads the flag,
     /// so the subprocess spawn can never hitch a frame.
     tmux: bool,
+    /// tmux draws sixel itself (raw sixel in, tmux's own grid owns the pixels).
+    native: bool,
     outer_ok: Arc<AtomicBool>,
     /// footprint of a 1:1 emote in cells. the layout reserves this BEFORE an
     /// emote finishes loading, so nothing reflows when the image lands.
@@ -145,7 +147,7 @@ impl EmoteStore {
         // env-detected is_tmux, so output is wrapped in tmux passthrough and
         // reaches the outer terminal intact.
         let picker = if std::env::var_os("TMUX").is_some() {
-            let proto = tmux_outer_protocol()?;
+            let (proto, _) = tmux_outer_protocol()?;
             let mut p = Picker::from_fontsize(cell_pixels()?);
             p.set_protocol_type(proto);
             p
@@ -178,12 +180,21 @@ impl EmoteStore {
         let tmux = std::env::var_os("TMUX").is_some();
         // sixel through tmux needs its passthrough wrapper re-escaped before it
         // is a legal escape sequence at all — see fix_tmux_passthrough.
-        let fix_passthrough = tmux && proto == ProtocolType::Sixel;
+        // unless tmux owns sixel itself (see tmux_outer_protocol_now): then the
+        // crate's wrapper is peeled off and tmux gets the plain sixel.
+        let native = tmux
+            && proto == ProtocolType::Sixel
+            && tmux_outer_protocol_now().is_some_and(|o| o.is_some_and(|(_, n)| n));
+        let wrap = match (tmux && proto == ProtocolType::Sixel, native) {
+            (true, true) => SixelWrap::Native,
+            (true, false) => SixelWrap::Passthrough,
+            _ => SixelWrap::Bare,
+        };
         for _ in 0..workers {
             let rx = Arc::clone(&jobs_rx);
             let tx = done_tx.clone();
             let p = picker.clone();
-            thread::spawn(move || loader(p, rx, tx, fix_passthrough));
+            thread::spawn(move || loader(p, rx, tx, wrap));
         }
         let outer_ok = Arc::new(AtomicBool::new(true));
         if tmux {
@@ -193,14 +204,18 @@ impl EmoteStore {
             thread::spawn(move || loop {
                 thread::sleep(Duration::from_secs(2));
                 // no client attached → keep the last answer (nobody is looking).
-                if let Some(p) = tmux_outer_protocol_now() {
-                    flag.store(p == Some(proto), Ordering::Relaxed);
+                if let Some(o) = tmux_outer_protocol_now() {
+                    let same = o.is_some_and(|(p, n)| {
+                        p == proto && (n == native || proto != ProtocolType::Sixel)
+                    });
+                    flag.store(same, Ordering::Relaxed);
                 }
             });
         }
         Some(EmoteStore {
             proto,
             tmux,
+            native,
             outer_ok,
             square_w,
             cache: HashMap::new(),
@@ -234,6 +249,13 @@ impl EmoteStore {
     /// a single atomic load: nothing here can stall a frame.
     pub fn usable(&self) -> bool {
         !self.tmux || self.outer_ok.load(Ordering::Relaxed)
+    }
+
+    /// is it safe to wrap frames in synchronized output? bare terminals: yes.
+    /// tmux repaints the whole pane when a sync frame ends, which wipes passthrough
+    /// images tmux can't see — but images tmux owns survive its own repaint.
+    pub fn sync_ok(&self) -> bool {
+        !self.tmux || self.native
     }
 
     /// a short label for the detected graphics protocol (startup tier readout).
@@ -407,7 +429,7 @@ fn cell_pixels() -> Option<(u16, u16)> {
 /// protocol: kitty for kitty/ghostty, sixel for foot/wezterm/mlterm/contour.
 /// None → the outer terminal isn't a known graphics-capable one → text tier.
 /// this is how we get inline emotes in tmux without a stdin-stealing query.
-fn tmux_outer_protocol() -> Option<ProtocolType> {
+fn tmux_outer_protocol() -> Option<(ProtocolType, bool)> {
     tmux_outer_protocol_now().flatten()
 }
 
@@ -415,26 +437,68 @@ fn tmux_outer_protocol() -> Option<ProtocolType> {
 /// attached" (outer None) apart from "a client is attached and it has no
 /// graphics" (Some(None)) — the runtime re-check must not flip the tier on a
 /// momentary detach.
-fn tmux_outer_protocol_now() -> Option<Option<ProtocolType>> {
+///
+/// the bool is "tmux draws sixel itself": tmux >= 3.4 built with sixel lists
+/// `sixel` in the client's termfeatures, parses sixel an app prints into the
+/// pane, keeps it in its own grid and re-emits it on every redraw. raw sixel
+/// then survives pane repaints; passthrough sixel (invisible to tmux) doesn't.
+fn tmux_outer_protocol_now() -> Option<Option<(ProtocolType, bool)>> {
     let out = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "#{client_termname}"])
+        .args([
+            "display-message",
+            "-p",
+            "#{client_termname}|#{client_termfeatures}",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let term = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+    let (term, feats) = text.split_once('|').unwrap_or((&text, ""));
+    let native = feats.split(',').any(|f| f == "sixel");
     // prefer kitty (flicker-free, in-place image updates) wherever the outer
     // terminal supports it; sixel only where that's the terminal's best option.
     Some(
         if term.contains("kitty") || term.contains("ghostty") || term.contains("wezterm") {
-            Some(ProtocolType::Kitty)
+            Some((ProtocolType::Kitty, false))
         } else if term.starts_with("foot") || term.contains("mlterm") || term.contains("contour") {
-            Some(ProtocolType::Sixel)
+            Some((ProtocolType::Sixel, native))
         } else {
             None
         },
     )
+}
+
+/// how a frame's sixel reaches the outer terminal.
+#[derive(Clone, Copy)]
+enum SixelWrap {
+    /// no tmux: the crate's output as is.
+    Bare,
+    /// tmux without sixel support: DCS passthrough, re-escaped (see below).
+    Passthrough,
+    /// tmux that draws sixel itself: plain sixel, tmux owns the pixels.
+    Native,
+}
+
+/// peel the crate's passthrough wrapper off a sixel so tmux sees the plain
+/// sixel and keeps it in its own grid (redrawn with the pane, never torn by a
+/// repaint). cleared cells first, same as the passthrough path, so a loading
+/// placeholder name can't show through. non-matching shapes are left alone.
+fn unwrap_tmux_passthrough(proto: &mut Protocol) {
+    let Protocol::Sixel(s) = proto else {
+        return;
+    };
+    let Some(sixel) = s
+        .data
+        .strip_prefix("\x1bPtmux;\x1b\x1b")
+        .and_then(|d| d.strip_suffix("\x1b\\"))
+        .filter(|d| d.starts_with("\x1bP") && d.ends_with("\x1b\\"))
+    else {
+        return;
+    };
+    s.data = format!("{}{sixel}", erase_block(s.area.width, s.area.height));
+    s.is_tmux = false;
 }
 
 /// re-escape ratatui-image's tmux passthrough wrapper. THIS is the flicker.
@@ -786,12 +850,7 @@ pub(crate) fn subsample(frames: Vec<(RgbaImage, u32)>, max: usize) -> Vec<(RgbaI
         .collect()
 }
 
-fn loader(
-    picker: Picker,
-    jobs: Arc<Mutex<Receiver<Job>>>,
-    done: Sender<Done>,
-    fix_passthrough: bool,
-) {
+fn loader(picker: Picker, jobs: Arc<Mutex<Receiver<Job>>>, done: Sender<Done>, wrap: SixelWrap) {
     // sixel drops the alpha channel (to_rgb8) so a transparent pixel falls back to
     // its raw rgb — often a colored fringe or box. flatten onto black first so
     // emotes sit cleanly on a dark terminal. kitty/iterm2 keep true transparency.
@@ -806,7 +865,7 @@ fn loader(
             },
             Err(_) => return,
         };
-        let built = build(&picker, &job.key, flatten, fix_passthrough);
+        let built = build(&picker, &job.key, flatten, wrap);
         if done
             .send(Done {
                 key: job.key,
@@ -893,7 +952,7 @@ pub fn composite_frames(key: &str, min_px: u32) -> Option<Vec<(RgbaImage, u32)>>
 /// composite a stack (see [`composite_frames`]), scale every frame to exactly its
 /// cell block, share one palette across the animation, and encode to the
 /// terminal's inline-graphics protocol. any failure → None.
-fn build(picker: &Picker, key: &str, flatten: bool, fix_passthrough: bool) -> Option<Built> {
+fn build(picker: &Picker, key: &str, flatten: bool, wrap: SixelWrap) -> Option<Built> {
     let (cw, ch) = picker.font_size();
     let block_h = EMOTE_H as u32 * ch.max(1) as u32;
     let frames = subsample(composite_frames(key, block_h)?, MAX_FRAMES);
@@ -924,8 +983,10 @@ fn build(picker: &Picker, key: &str, flatten: bool, fix_passthrough: bool) -> Op
         let mut proto = picker
             .new_protocol(DynamicImage::ImageRgba8(canvas), size, Resize::Fit(None))
             .ok()?;
-        if fix_passthrough {
-            fix_tmux_passthrough(&mut proto);
+        match wrap {
+            SixelWrap::Passthrough => fix_tmux_passthrough(&mut proto),
+            SixelWrap::Native => unwrap_tmux_passthrough(&mut proto),
+            SixelWrap::Bare => {}
         }
         let delay_ms = (*delay_ms).max(MIN_DELAY_MS);
         total_ms += delay_ms as u64;
@@ -970,6 +1031,24 @@ mod tests {
             }
         }
         out
+    }
+
+    /// native tmux sixel: the wrapper is gone, the sixel is intact and
+    /// ST-terminated, and the block is cleared first.
+    #[test]
+    fn native_unwrap_yields_plain_sixel() {
+        use ratatui_image::protocol::sixel::Sixel;
+        let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, Rgba([255, 135, 0, 255])));
+        let area = Rect::new(0, 0, 2, 2);
+        let plain = Sixel::new(img.clone(), area, false).expect("encode");
+        let mut p = Protocol::Sixel(Sixel::new(img, area, true).expect("encode"));
+        unwrap_tmux_passthrough(&mut p);
+        let Protocol::Sixel(s) = &p else {
+            unreachable!()
+        };
+        assert!(!s.is_tmux);
+        assert!(!s.data.contains("tmux;"));
+        assert_eq!(s.data, format!("{}{}", erase_block(2, 2), plain.data));
     }
 
     /// the whole bug in one assertion: what tmux hands the outer terminal must
