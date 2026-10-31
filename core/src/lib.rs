@@ -42,52 +42,96 @@ impl Platform {
     }
 }
 
-/// a user role badge, normalized across platforms. twitch sends
+/// what a badge is, normalized across platforms. twitch sends
 /// `"broadcaster/1,moderator/1"`, kick sends `[{name, version}]` — both parse
-/// into this one vocabulary and unknown badges are dropped (nothing renders a
-/// badge we don't recognize).
+/// into this one vocabulary (the extension's BADGE_SHORT set). a badge we
+/// don't know keeps its first letter instead of vanishing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Badge {
+pub enum BadgeKind {
     Broadcaster,
     Moderator,
     Vip,
     Subscriber,
     Founder,
     Staff,
+    GlobalMod,
     Verified,
     Og,
+    Member,
+    Premium,
+    Turbo,
+    Bits,
+    Gifter,
+    Predictions,
+    Hype,
+    Artist,
+    Other(char),
+}
+
+/// a badge plus its version — for a subscriber, the months tier twitch sent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Badge {
+    pub kind: BadgeKind,
+    pub ver: u16,
 }
 
 impl Badge {
-    /// a platform badge name (already lowercased by the caller or matched
-    /// case-insensitively here) → our vocabulary. `partner` is twitch's
-    /// verified checkmark.
-    pub fn from_name(name: &str) -> Option<Badge> {
-        Some(match name.to_ascii_lowercase().as_str() {
-            "broadcaster" => Badge::Broadcaster,
-            "moderator" => Badge::Moderator,
-            "vip" => Badge::Vip,
-            "subscriber" => Badge::Subscriber,
-            "founder" => Badge::Founder,
-            "staff" | "admin" => Badge::Staff,
-            "verified" | "partner" => Badge::Verified,
-            "og" => Badge::Og,
-            _ => return None,
-        })
+    pub fn new(kind: BadgeKind) -> Badge {
+        Badge { kind, ver: 0 }
+    }
+
+    /// a platform badge name (matched case-insensitively) + its version → our
+    /// vocabulary. an unknown name falls back to its first letter; a nameless
+    /// one is dropped.
+    pub fn from_name(name: &str, ver: u16) -> Option<Badge> {
+        use BadgeKind as K;
+        let lower = name.to_ascii_lowercase();
+        let kind = match lower.as_str() {
+            "broadcaster" | "owner" => K::Broadcaster,
+            "moderator" => K::Moderator,
+            "vip" => K::Vip,
+            "subscriber" => K::Subscriber,
+            "founder" => K::Founder,
+            "staff" | "admin" => K::Staff,
+            "global_mod" => K::GlobalMod,
+            "verified" | "partner" => K::Verified,
+            "og" => K::Og,
+            "member" => K::Member,
+            "premium" => K::Premium,
+            "turbo" => K::Turbo,
+            "bits" | "bits-leader" | "anonymous-cheerer" => K::Bits,
+            "sub-gifter" | "sub_gifter" | "sub-gift-leader" => K::Gifter,
+            "predictions" => K::Predictions,
+            "hype-train" => K::Hype,
+            "artist" | "artist-badge" => K::Artist,
+            other => K::Other(other.chars().next().filter(|c| c.is_alphanumeric())?),
+        };
+        Some(Badge { kind, ver })
     }
 
     /// single-cell glyph — badges must never widen a line by more than one
     /// column each.
     pub fn glyph(self) -> char {
-        match self {
-            Badge::Broadcaster => 'B',
-            Badge::Moderator => 'M',
-            Badge::Vip => 'V',
-            Badge::Subscriber => 'S',
-            Badge::Founder => 'F',
-            Badge::Staff => 'A',
-            Badge::Verified => '✓',
-            Badge::Og => 'O',
+        use BadgeKind as K;
+        match self.kind {
+            K::Broadcaster => 'B',
+            K::Moderator => 'M',
+            K::Vip => 'V',
+            K::Subscriber => 'S',
+            K::Founder => 'F',
+            K::Staff => 'A',
+            K::GlobalMod => 'G',
+            K::Verified => '✓',
+            K::Og => 'O',
+            K::Member => 'm',
+            K::Premium => 'P',
+            K::Turbo => 'T',
+            K::Bits => '◆',
+            K::Gifter => '✦',
+            K::Predictions => '%',
+            K::Hype => 'H',
+            K::Artist => 'a',
+            K::Other(c) => c.to_ascii_uppercase(),
         }
     }
 }

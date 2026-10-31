@@ -4,7 +4,7 @@
 //! [H] marker.
 
 use heatsync_core::heat::{Hue, Look, Tier};
-use heatsync_core::{Badge, NoteKind, Platform, Unread};
+use heatsync_core::{Badge, BadgeKind, NoteKind, Platform, Unread};
 use ratatui::style::{Color, Modifier, Style};
 
 /// secondary text.
@@ -97,19 +97,26 @@ pub fn platform(p: Platform) -> Style {
 
 /// role badge: a filled one-cell glyph in the role's color.
 pub fn badge(b: Badge) -> Style {
+    use BadgeKind as K;
     let s = Style::new().add_modifier(Modifier::BOLD);
-    match b {
-        Badge::Broadcaster => s.fg(Color::Black).bg(Color::Red),
-        Badge::Moderator => s.fg(Color::Black).bg(Color::Green),
-        Badge::Vip => s.fg(Color::Black).bg(Color::Magenta),
-        Badge::Subscriber => Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
-        Badge::Founder => s.fg(Color::Black).bg(Color::Yellow),
-        Badge::Staff => s.fg(Color::Black).bg(Color::White),
-        Badge::Verified => s.fg(Color::Black).bg(Color::Cyan),
-        Badge::Og => s
+    match b.kind {
+        K::Broadcaster => s.fg(Color::Black).bg(Color::Red),
+        K::Moderator => s.fg(Color::Black).bg(Color::Green),
+        K::Vip => s.fg(Color::Black).bg(Color::Magenta),
+        K::Subscriber | K::Member => Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        K::Founder => s.fg(Color::Black).bg(Color::Yellow),
+        K::Staff | K::GlobalMod => s.fg(Color::Black).bg(Color::White),
+        K::Verified => s.fg(Color::Black).bg(Color::Cyan),
+        K::Og => s
             .fg(Color::Black)
             .bg(Color::Cyan)
             .add_modifier(Modifier::UNDERLINED),
+        K::Premium | K::Predictions | K::Hype => {
+            Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD)
+        }
+        K::Bits | K::Artist => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        K::Gifter | K::Turbo => Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        K::Other(_) => Style::new().add_modifier(Modifier::BOLD),
     }
 }
 

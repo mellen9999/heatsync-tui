@@ -200,9 +200,9 @@ impl Driver {
                     // sprinkle role badges so the offline feed exercises the
                     // same chrome the live one does.
                     let badges = match self.rng.unit() {
-                        r if r < 0.03 => vec![crate::Badge::Moderator],
-                        r if r < 0.05 => vec![crate::Badge::Vip],
-                        r if r < 0.12 => vec![crate::Badge::Subscriber],
+                        r if r < 0.03 => vec![crate::Badge::new(crate::BadgeKind::Moderator)],
+                        r if r < 0.05 => vec![crate::Badge::new(crate::BadgeKind::Vip)],
+                        r if r < 0.12 => vec![crate::Badge::new(crate::BadgeKind::Subscriber)],
                         _ => Vec::new(),
                     };
                     ch.record(

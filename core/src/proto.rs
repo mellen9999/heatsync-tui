@@ -901,10 +901,10 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
 /// kick and the archive API: `[{ "name": "moderator", "version": "1" }, …]`.
 /// anything else → empty. public because the archive backfill reuses it.
 pub fn badges_from(v: Option<&Value>) -> Vec<Badge> {
-    let mut out = Vec::new();
-    let mut push = |name: &str| {
-        if let Some(b) = Badge::from_name(name) {
-            if !out.contains(&b) {
+    let mut out: Vec<Badge> = Vec::new();
+    let mut push = |name: &str, ver: u16| {
+        if let Some(b) = Badge::from_name(name, ver) {
+            if !out.iter().any(|e| e.kind == b.kind) {
                 out.push(b);
             }
         }
@@ -912,13 +912,19 @@ pub fn badges_from(v: Option<&Value>) -> Vec<Badge> {
     match v {
         Some(Value::String(s)) => {
             for part in s.split(',') {
-                push(part.split('/').next().unwrap_or("").trim());
+                let (name, ver) = part.split_once('/').unwrap_or((part, ""));
+                push(name.trim(), ver.trim().parse().unwrap_or(0));
             }
         }
         Some(Value::Array(arr)) => {
             for b in arr {
                 if let Some(name) = b.get("name").and_then(Value::as_str) {
-                    push(name);
+                    let ver = match b.get("version") {
+                        Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
+                        Some(Value::String(s)) => s.parse().unwrap_or(0),
+                        _ => 0,
+                    };
+                    push(name, ver.min(u16::MAX as u64) as u16);
                 }
             }
         }
@@ -1006,6 +1012,7 @@ pub fn send_youtube(video: &str, text: &str, req: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BadgeKind;
 
     #[test]
     fn parses_twitch_message() {
@@ -1038,7 +1045,15 @@ mod tests {
             "badges":"broadcaster/1,subscriber/12,sub-gifter/5,broadcaster/1"}}"##;
         match parse(raw) {
             Event::Chat(l) => {
-                assert_eq!(l.badges, vec![Badge::Broadcaster, Badge::Subscriber]);
+                assert_eq!(
+                    l.badges.iter().map(|b| b.kind).collect::<Vec<_>>(),
+                    [
+                        BadgeKind::Broadcaster,
+                        BadgeKind::Subscriber,
+                        BadgeKind::Gifter
+                    ]
+                );
+                assert_eq!(l.badges[1].ver, 12);
             }
             _ => panic!("expected chat"),
         }
@@ -1051,7 +1066,10 @@ mod tests {
             "badges":[{"name":"moderator","version":"1"},{"name":"og","version":"1"},
                       {"name":"mystery","version":"1"}]}}"##;
         match parse(raw) {
-            Event::Chat(l) => assert_eq!(l.badges, vec![Badge::Moderator, Badge::Og]),
+            Event::Chat(l) => assert_eq!(
+                l.badges.iter().map(|b| b.kind).collect::<Vec<_>>(),
+                [BadgeKind::Moderator, BadgeKind::Og, BadgeKind::Other('m')]
+            ),
             _ => panic!("expected chat"),
         }
     }
@@ -1101,6 +1119,27 @@ mod tests {
         assert_eq!(parse("not json"), Event::Ignore);
         assert_eq!(parse(r#"{"type":"whatever"}"#), Event::Ignore);
         assert_eq!(parse(r#"{"type":"pong"}"#), Event::Pong);
+    }
+
+    #[test]
+    fn badges_table_keeps_version_and_falls_back_to_first_letter() {
+        let got = badges_from(Some(&json!(
+            "subscriber/12,sub-gifter/5,partner/1,hype-train/1,enchantedbigboi/1,moderator/1,subscriber/6,/1"
+        )));
+        let seen: Vec<(char, u16)> = got.iter().map(|b| (b.glyph(), b.ver)).collect();
+        assert_eq!(
+            seen,
+            [('S', 12), ('✦', 5), ('✓', 1), ('H', 1), ('E', 1), ('M', 1)],
+            "dupe subscriber dropped, nameless dropped"
+        );
+        let kick = badges_from(Some(&json!([
+            {"name":"og","version":"1"},
+            {"name":"sub_gifter","version":3},
+            {"name":"mystery"}
+        ])));
+        let seen: Vec<(char, u16)> = kick.iter().map(|b| (b.glyph(), b.ver)).collect();
+        assert_eq!(seen, [('O', 1), ('✦', 3), ('M', 0)]);
+        assert!(badges_from(Some(&json!(7))).is_empty());
     }
 
     #[test]
