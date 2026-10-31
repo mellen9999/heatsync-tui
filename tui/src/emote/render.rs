@@ -19,7 +19,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -106,6 +106,13 @@ pub struct EmoteStore {
     /// tmux draws sixel itself (raw sixel in, tmux's own grid owns the pixels).
     native: bool,
     outer_ok: Arc<AtomicBool>,
+    /// where this pane's top-left cell sits on the OUTER terminal, packed
+    /// (col << 16 | row); `NO_OFFSET` when unknown or the pane isn't visible.
+    /// kept fresh by the watcher thread, which a resize wakes at once.
+    pane_off: Arc<AtomicU32>,
+    watcher: Option<thread::Thread>,
+    /// the frame size the last blit saw — a change means the offset is stale.
+    last_area: Cell<Rect>,
     /// footprint of a 1:1 emote in cells. the layout reserves this BEFORE an
     /// emote finishes loading, so nothing reflows when the image lands.
     square_w: u16,
@@ -200,12 +207,14 @@ impl EmoteStore {
             thread::spawn(move || loader(p, rx, tx, wrap));
         }
         let outer_ok = Arc::new(AtomicBool::new(true));
+        let pane_off = Arc::new(AtomicU32::new(NO_OFFSET));
+        let mut watcher = None;
         if tmux {
             // the attached-client watcher. asking tmux means fork+exec — done on
             // the render thread that was a guaranteed frame hitch every TTL.
             let flag = Arc::clone(&outer_ok);
-            thread::spawn(move || loop {
-                thread::sleep(Duration::from_secs(2));
+            let off = Arc::clone(&pane_off);
+            let h = thread::spawn(move || loop {
                 // no client attached → keep the last answer (nobody is looking).
                 if let Some(o) = tmux_outer_protocol_now() {
                     let same = o.is_some_and(|(p, n)| {
@@ -213,13 +222,22 @@ impl EmoteStore {
                     });
                     flag.store(same, Ordering::Relaxed);
                 }
+                off.store(
+                    pane_offset().map_or(NO_OFFSET, |(x, y)| u32::from(x) << 16 | u32::from(y)),
+                    Ordering::Relaxed,
+                );
+                thread::park_timeout(Duration::from_secs(2));
             });
+            watcher = Some(h.thread().clone());
         }
         Some(EmoteStore {
             proto,
             tmux,
             native,
             outer_ok,
+            pane_off,
+            watcher,
+            last_area: Cell::new(Rect::default()),
             square_w,
             cache: HashMap::new(),
             jobs: jobs_tx,
@@ -429,7 +447,16 @@ impl EmoteStore {
     /// changed, and only those. `area` is the frame size (a resize repaints
     /// everything, so everything is re-emitted).
     pub fn blit(&self, area: Rect, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        if self.last_area.replace(area) != area {
+            // resized or moved: the offset is stale until the watcher re-asks.
+            self.pane_off.store(NO_OFFSET, Ordering::Relaxed);
+            if let Some(w) = &self.watcher {
+                w.unpark();
+            }
+        }
         let emits = self.blit.borrow_mut().take_emits(area);
+        let off = self.pane_off.load(Ordering::Relaxed);
+        let off = (off != NO_OFFSET).then_some(((off >> 16) as u16, off as u16));
         if emits.is_empty() {
             return Ok(());
         }
@@ -446,18 +473,21 @@ impl EmoteStore {
                 // frame. frames that only replace the previous one in place go
                 // around tmux as passthrough instead: foot paints over the
                 // old pixels, tmux never sees an overlap.
-                let wrapped;
-                let data = if q.in_place && self.tmux && self.native {
-                    wrapped = passthrough_in_place(&s.data);
-                    wrapped.as_str()
+                // passthrough lands at the OUTER cursor, so it carries its own
+                // absolute position; with the pane offset unknown (stale after
+                // a resize, pane hidden) the frame goes native instead.
+                let wrapped = off
+                    .filter(|_| q.in_place && self.tmux && self.native)
+                    .map(|o| passthrough_in_place(&s.data, o, (q.rect.x, q.rect.y)));
+                if let Some(w) = &wrapped {
+                    crossterm::queue!(out, crossterm::style::Print(w))?;
                 } else {
-                    s.data.as_str()
-                };
-                crossterm::queue!(
-                    out,
-                    crossterm::cursor::MoveTo(q.rect.x, q.rect.y),
-                    crossterm::style::Print(data)
-                )?;
+                    crossterm::queue!(
+                        out,
+                        crossterm::cursor::MoveTo(q.rect.x, q.rect.y),
+                        crossterm::style::Print(&s.data)
+                    )?;
+                }
             }
         }
         out.flush()
@@ -605,12 +635,51 @@ fn fix_tmux_passthrough(proto: &mut Protocol) {
     );
 }
 
+/// packed pane offset meaning "unknown".
+const NO_OFFSET: u32 = u32::MAX;
+
+/// tmux format: visible flag, pane left/top, and rows a top status line takes.
+const PANE_FMT: &str = "#{&&:#{window_active},#{pane_active}} #{pane_left} #{pane_top} \
+#{?#{==:#{status-position},top},#{?#{==:#{status},off},0,#{?#{==:#{status},on},1,#{status}}},0}";
+
+/// where this pane's top-left cell is on the outer terminal, None when the pane
+/// isn't the visible one (tmux with `allow-passthrough on` drops hidden panes'
+/// passthrough, `all` forwards it — to the wrong place).
+fn pane_offset() -> Option<(u16, u16)> {
+    let pane = std::env::var("TMUX_PANE").ok()?;
+    let out = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "-t", &pane, PANE_FMT])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_pane_offset(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_pane_offset(s: &str) -> Option<(u16, u16)> {
+    let mut f = s.split_whitespace();
+    let visible = f.next()? == "1";
+    let left: u16 = f.next()?.parse().ok()?;
+    let top: u16 = f.next()?.parse().ok()?;
+    let status: u16 = f.next()?.parse().ok()?;
+    visible.then_some((left, top + status))
+}
+
 /// a native-mode sixel (erase block + plain sixel) as tmux passthrough: the
 /// erase is dropped (the cells are already blank, the opaque frame covers the
-/// old one) and every ESC doubled so tmux forwards the sixel intact.
-fn passthrough_in_place(native: &str) -> String {
+/// old one). tmux forwards the payload to the outer terminal at the OUTER
+/// cursor, so it saves that cursor, jumps to the absolute cell (pane offset +
+/// rect, 1-based), paints, and restores — all inside the passthrough. every ESC
+/// is doubled so tmux forwards the sixel intact.
+fn passthrough_in_place(native: &str, off: (u16, u16), at: (u16, u16)) -> String {
     let sixel = native.find("\x1bP").map_or(native, |i| &native[i..]);
-    format!("\x1bPtmux;{}\x1b\\", sixel.replace('\x1b', "\x1b\x1b"))
+    let payload = format!(
+        "\x1b7\x1b[{};{}H{sixel}\x1b8",
+        off.1 + at.1 + 1,
+        off.0 + at.0 + 1
+    );
+    format!("\x1bPtmux;{}\x1b\\", payload.replace('\x1b', "\x1b\x1b"))
 }
 
 /// blank a `w`x`h` cell block at the cursor and leave the cursor exactly where
@@ -1070,10 +1139,21 @@ fn build(picker: &Picker, key: &str, flatten: bool, wrap: SixelWrap) -> Option<B
 #[cfg(test)]
 mod tests {
     #[test]
-    fn in_place_frame_is_doubled_passthrough_without_the_erase() {
+    fn in_place_frame_is_absolute_doubled_passthrough_without_the_erase() {
         let native = format!("{}\x1bPq#0;2;0;0;0~\x1b\\", super::erase_block(2, 2));
-        let got = super::passthrough_in_place(&native);
-        assert_eq!(got, "\x1bPtmux;\x1b\x1bPq#0;2;0;0;0~\x1b\x1b\\\x1b\\");
+        // pane at outer col 29, row 1 (top status); emote at pane cell (3, 4)
+        let got = super::passthrough_in_place(&native, (29, 1), (3, 4));
+        assert_eq!(
+            got,
+            "\x1bPtmux;\x1b\x1b7\x1b\x1b[6;33H\x1b\x1bPq#0;2;0;0;0~\x1b\x1b\\\x1b\x1b8\x1b\\"
+        );
+    }
+
+    #[test]
+    fn pane_offset_needs_a_visible_pane() {
+        assert_eq!(super::parse_pane_offset("1 29 0 1\n"), Some((29, 1)));
+        assert_eq!(super::parse_pane_offset("0 29 0 1"), None);
+        assert_eq!(super::parse_pane_offset("garbage"), None);
     }
 
     use super::*;
