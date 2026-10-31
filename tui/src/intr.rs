@@ -15,6 +15,7 @@ const SEEN: u8 = 3;
 static STATE: AtomicU8 = AtomicU8::new(PLAIN);
 
 /// what to say when ctrl-c lands (None = nothing).
+#[cfg(any(unix, test))]
 fn message(state: u8) -> Option<&'static [u8]> {
     match state {
         LOGIN => Some(b"\nlogin cancelled\n"),
