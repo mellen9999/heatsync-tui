@@ -147,6 +147,15 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             app.manage_cursor = app.focus;
             Flow::Continue
         }
+        KeyCode::Char('t') => {
+            app.stamps = !app.stamps;
+            app.status = Some(format!(
+                "timestamps {}",
+                if app.stamps { "on" } else { "off" }
+            ));
+            save_state(app);
+            Flow::Continue
+        }
         KeyCode::Char('T') => {
             app.tab_pos = app.tab_pos.next();
             save_state(app);
@@ -538,6 +547,7 @@ fn send_focused(app: &mut App) -> Flow {
                 gone: None,
                 reply_to: None,
                 note: None,
+                extra: Default::default(),
                 heat: 0.0,
                 uid: None,
             },

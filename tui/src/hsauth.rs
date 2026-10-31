@@ -596,6 +596,17 @@ pub fn needs_rotation(expires_at: &str, now: i64) -> bool {
 
 // ---- startup --------------------------------------------------------------
 
+/// the platform logins in a `/api/cli/me` answer (twitch, kick) — what chat
+/// calls me, for mention + reply-to-me pings.
+pub fn my_names(me: &Value) -> Vec<String> {
+    ["twitch", "kick"]
+        .iter()
+        .filter_map(|p| me.get(p)?.get("login")?.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// the signed-in client for the TUI, if a login exists. renews the token when it
 /// is close to expiring; if the server says it's dead, tells the user once.
 pub fn load_client() -> Option<Client> {
@@ -871,6 +882,16 @@ mod tests {
                 json!({"platform":"twitch","channel":"chan","action":"delete_message","message_id":"abc-id"})
             )
         );
+    }
+
+    #[test]
+    fn my_names_reads_twitch_and_kick_logins() {
+        let me =
+            json!({"twitch":{"linked":true,"login":"mel"},"kick":{"linked":false,"login":null}});
+        assert_eq!(my_names(&me), ["mel"]);
+        let both = json!({"twitch":{"login":"mel"},"kick":{"login":"mel_k"}});
+        assert_eq!(my_names(&both), ["mel", "mel_k"]);
+        assert!(my_names(&json!({})).is_empty());
     }
 
     #[test]

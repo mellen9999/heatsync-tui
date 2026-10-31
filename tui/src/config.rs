@@ -52,6 +52,8 @@ impl TabPos {
 
 pub struct Config {
     pub tab_pos: TabPos,
+    /// dim `HH:MM` before each chat line (`timestamps=on`).
+    pub timestamps: bool,
     /// open tabs, in order — restored on next launch (unless CLI args
     /// override). each tab is one or more `+`-merged (platform, channel) subs.
     pub channels: Vec<Vec<(Platform, String)>>,
@@ -165,6 +167,7 @@ pub fn load_auth() -> Auth {
 pub fn load() -> Config {
     let mut cfg = Config {
         tab_pos: TabPos::Top,
+        timestamps: false,
         channels: Vec::new(),
     };
     if let Some(p) = path() {
@@ -177,6 +180,7 @@ pub fn load() -> Config {
                                 cfg.tab_pos = tp;
                             }
                         }
+                        "timestamps" => cfg.timestamps = matches!(v.trim(), "on" | "true" | "1"),
                         "channels" => cfg.channels = parse_channels(v),
                         _ => {}
                     }
@@ -194,6 +198,9 @@ pub fn save(cfg: &Config) {
             let _ = fs::create_dir_all(dir);
         }
         let mut out = format!("tab_pos={}\n", cfg.tab_pos.as_str());
+        if cfg.timestamps {
+            out.push_str("timestamps=on\n");
+        }
         if !cfg.channels.is_empty() {
             let joined = cfg
                 .channels

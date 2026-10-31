@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 
-use crate::{sanitize, Badge, Note, NoteKind, Platform};
+use crate::{sanitize, Badge, Extra, Note, NoteKind, Platform, Tint};
 
 /// a normalized chat line, ready for a channel buffer.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +22,7 @@ pub struct ChatLine {
     pub note: Option<Note>,
     /// sender id in paint space (see `Message::uid`).
     pub uid: Option<String>,
+    pub extra: Extra,
     /// raw stream lifecycle facts behind a go-live / offline / game-switch
     /// note — what `streamev` pairs and dedupes on.
     pub stream: Option<StreamEv>,
@@ -239,15 +240,6 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
             kind: NoteKind::Redeem,
             what: "redeemed".into(),
         })
-    } else if m
-        .get("isHighlighted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        Some(Note {
-            kind: NoteKind::Redeem,
-            what: "highlighted".into(),
-        })
     } else {
         None
     };
@@ -265,6 +257,7 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
             .map(sanitize::clean)
             .filter(|s| !s.is_empty()),
         note,
+        extra: extra_of(m),
         stream: None,
         content,
         uid: uid_of(m, platform),
@@ -312,6 +305,21 @@ fn uid_of(m: &Value, platform: Platform) -> Option<String> {
         Platform::Twitch => paint_id("", &id),
         Platform::Kick => paint_id("kick_", &id),
         Platform::Youtube => None,
+    }
+}
+
+/// reply snippet + action / first / highlight flags off a message object.
+fn extra_of(m: &Value) -> Extra {
+    let flag = |k: &str| m.get(k).and_then(Value::as_bool).unwrap_or(false);
+    Extra {
+        reply_text: m
+            .get("replyTo")
+            .map(|r| field(r, "content"))
+            .unwrap_or_default(),
+        action: flag("isAction"),
+        first: flag("isFirstMsg"),
+        highlight: flag("isHighlighted"),
+        ts: 0,
     }
 }
 
@@ -376,6 +384,7 @@ fn note_line(
         badges: Vec::new(),
         reply_to: None,
         note: Some(Note { kind, what }),
+        extra: Extra::default(),
         stream: None,
         content,
         uid: None,
@@ -395,7 +404,12 @@ fn usernotice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
         | "standardpayforward"
         | "communitypayforward" => NoteKind::Gift,
         "raid" | "unraid" => NoteKind::Raid,
-        _ => NoteKind::Notice, // announcement, viewermilestone, future subtypes
+        "announcement" => NoteKind::Announce(Tint::from_name(&field(m, "announceColor"))),
+        "watchstreak" => NoteKind::Streak,
+        "viewermilestone" => NoteKind::Milestone,
+        "charitydonation" | "charity_donation" => NoteKind::Charity,
+        "ritual" | "new_chatter" => NoteKind::Ritual,
+        _ => NoteKind::Notice, // future subtypes
     };
     let mut user = {
         let d = field(m, "displayName");
@@ -887,6 +901,7 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
         badges: Vec::new(),
         reply_to: None,
         note,
+        extra: Extra::default(),
         stream: None,
         content,
         uid: m
@@ -1031,6 +1046,7 @@ mod tests {
                 badges: vec![],
                 reply_to: None,
                 note: None,
+                extra: Default::default(),
                 stream: None,
                 content: "hello GAMBA".into(),
                 uid: None,
@@ -1236,6 +1252,63 @@ mod tests {
     }
 
     #[test]
+    fn usernotice_kinds_and_announcement_tints() {
+        use crate::Tint;
+        for (sub, color, want) in [
+            ("announcement", "PURPLE", NoteKind::Announce(Tint::Magenta)),
+            ("announcement", "ORANGE", NoteKind::Announce(Tint::Yellow)),
+            ("announcement", "BLUE", NoteKind::Announce(Tint::Blue)),
+            ("announcement", "GREEN", NoteKind::Announce(Tint::Green)),
+            ("announcement", "PRIMARY", NoteKind::Announce(Tint::Plain)),
+            ("announcement", "", NoteKind::Announce(Tint::Plain)),
+            ("watchstreak", "", NoteKind::Streak),
+            ("viewermilestone", "", NoteKind::Milestone),
+            ("charitydonation", "", NoteKind::Charity),
+            ("ritual", "", NoteKind::Ritual),
+            ("new_chatter", "", NoteKind::Ritual),
+            ("somethingnew", "", NoteKind::Notice),
+        ] {
+            let raw = format!(
+                r#"{{"type":"irc:message","channel":"c","message":{{"type":"usernotice",
+                "subType":"{sub}","announceColor":"{color}","username":"u","displayName":"U",
+                "systemMessage":"U did a thing"}}}}"#
+            );
+            match parse(&raw) {
+                Event::Chat(l) => assert_eq!(l.note.unwrap().kind, want, "{sub} {color}"),
+                e => panic!("{sub}: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn reply_action_first_and_highlight_ride_along() {
+        let raw = r#"{"type":"irc:message","channel":"c","message":{
+            "username":"u","displayName":"U","content":"yeah","isAction":true,
+            "isFirstMsg":true,"isHighlighted":true,
+            "replyTo":{"username":"Tar","content":"is it \u001b[31mreal","messageId":"m1"}}}"#;
+        match parse(raw) {
+            Event::Chat(l) => {
+                assert_eq!(l.reply_to.as_deref(), Some("Tar"));
+                assert_eq!(l.extra.reply_text, "is it [31mreal");
+                assert!(l.extra.action && l.extra.first && l.extra.highlight);
+                assert!(l.note.is_none(), "highlight is a style, not a note");
+            }
+            e => panic!("{e:?}"),
+        }
+        // kick shape: replyTo without content still yields the user.
+        let kick = r#"{"type":"kick-chat-message","data":{"channel":"c","username":"u",
+            "content":"hi","replyTo":{"messageId":"m","username":"bob","content":"orig"}}}"#;
+        match parse(kick) {
+            Event::Chat(l) => {
+                assert_eq!(l.reply_to.as_deref(), Some("bob"));
+                assert_eq!(l.extra.reply_text, "orig");
+                assert!(!l.extra.action);
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
     fn usernotice_announcement_keeps_author_and_text() {
         let raw = r##"{"type":"irc:message","channel":"c","message":{
             "type":"usernotice","subType":"announcement","username":"modguy",
@@ -1244,7 +1317,7 @@ mod tests {
             Event::Chat(l) => {
                 assert_eq!(l.user, "ModGuy");
                 let n = l.note.expect("note");
-                assert_eq!(n.kind, NoteKind::Notice);
+                assert_eq!(n.kind, NoteKind::Announce(crate::Tint::Plain));
                 assert_eq!(n.what, "announced");
                 assert_eq!(l.content, "drops are live");
             }

@@ -2,11 +2,11 @@ use crate::app::{App, Feed};
 use crate::emote::fb::FbEmotes;
 use crate::emote::render::EmoteStore;
 use crate::http;
-use crate::layout::{each_stack, mentions};
+use crate::layout::{each_stack, mentions_any, replies_to_me};
 use crate::net::ChatEvent;
 use heatsync_core::emote::EmoteSet;
 use heatsync_core::proto::ChatLine;
-use heatsync_core::{Message, Platform};
+use heatsync_core::{Extra, Message, Platform};
 use std::sync::mpsc::Sender;
 
 /// fetch a channel's emote set on a detached thread and hand it back over `tx`.
@@ -191,9 +191,8 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
         request_stacks(store, fb, &emotes[i], &l.content);
     }
     let pinged = l.note.is_none()
-        && me
-            .as_deref()
-            .is_some_and(|me| !l.user.eq_ignore_ascii_case(me) && mentions(&l.content, me));
+        && !me.iter().any(|n| l.user.eq_ignore_ascii_case(n))
+        && (mentions_any(&l.content, me) || replies_to_me(l.reply_to.as_deref(), me));
     let evented = l.stream.is_some();
     channels[i].record(
         Message {
@@ -206,6 +205,10 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
             gone: None,
             reply_to: l.reply_to,
             note: l.note,
+            extra: Extra {
+                ts: crate::clock::now_secs(),
+                ..l.extra
+            },
             heat: 0.0,
             uid: l.uid,
         },
@@ -336,6 +339,7 @@ pub(crate) fn drain_twitch(app: &mut App) {
                         kind: heatsync_core::NoteKind::Notice,
                         what: n.text.clone(),
                     }),
+                    extra: Default::default(),
                     heat: 0.0,
                     uid: None,
                 });
@@ -349,6 +353,13 @@ pub(crate) fn drain_twitch(app: &mut App) {
 /// a confirmation or a refusal stays in scrollback) and the status line.
 /// a clean send has no words: nothing to say.
 pub(crate) fn drain_hs(app: &mut App) {
+    while let Ok(names) = app.names_rx.try_recv() {
+        for n in names {
+            if !app.me.iter().any(|m| m.eq_ignore_ascii_case(&n)) {
+                app.me.push(n);
+            }
+        }
+    }
     while let Ok(n) = app.hs_notes.try_recv() {
         if n.logged_out {
             app.hs = None; // the session file is already gone; stop using the dead login
@@ -374,6 +385,7 @@ pub(crate) fn drain_hs(app: &mut App) {
                     kind: heatsync_core::NoteKind::Notice,
                     what: n.text.clone(),
                 }),
+                extra: Default::default(),
                 heat: 0.0,
                 uid: None,
             });

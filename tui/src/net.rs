@@ -62,6 +62,9 @@ pub fn spawn(subs: Vec<Sub>, token: Option<String>) -> (Receiver<ChatEvent>, Tx)
 }
 
 /// what the feed reports upward — chat plus connection state for the status bar.
+// a line dwarfs the other variants, but they're short-lived and boxing every
+// line buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum ChatEvent {
     Line(proto::ChatLine),
     /// a mod removed lines (the mod-log note, if any, arrives as a Line).

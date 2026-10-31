@@ -1,6 +1,6 @@
 use crate::emote::fb::FbEmotes;
 use crate::emote::render::{EmoteStore, EMOTE_H};
-use crate::paints::Look;
+use crate::paints::UserLook;
 use crate::palette;
 use heatsync_core::emote::{segments, EmoteSet, Segment};
 use heatsync_core::paint::Paint;
@@ -107,6 +107,29 @@ pub(crate) fn mentions(text: &str, me: &str) -> bool {
             .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')
             .eq_ignore_ascii_case(me)
     })
+}
+
+/// does `text` address any of my names (twitch + kick logins).
+pub(crate) fn mentions_any(text: &str, me: &[String]) -> bool {
+    me.iter().any(|n| mentions(text, n))
+}
+
+/// is `reply_to` (the display name a line answers) one of my names?
+pub(crate) fn replies_to_me(reply_to: Option<&str>, me: &[String]) -> bool {
+    reply_to.is_some_and(|r| me.iter().any(|n| n.eq_ignore_ascii_case(r)))
+}
+
+/// how a message is laid out beyond its own fields.
+#[derive(Default)]
+pub(crate) struct Look<'a> {
+    /// my names — a line that mentions or answers one gets the ping bar.
+    pub(crate) me: &'a [String],
+    /// merged tab: a bar in the platform's hue marks each line's origin.
+    pub(crate) tag_platform: bool,
+    /// dim `HH:MM` before each line.
+    pub(crate) stamps: bool,
+    /// the sender's heatsync name paint / picked color, once resolved.
+    pub(crate) user: Option<&'a UserLook>,
 }
 
 /// one-cell role badge: black glyph on the role's color. same black-on-color
@@ -306,7 +329,11 @@ impl Rows {
 pub(crate) fn layout_text(b: &mut Rows, text: &str, set: &EmoteSet, mode: EmoteMode) {
     // message text is plain white — heat lives in the bar and tab numbers,
     // never in the reading surface.
-    let text_hue = palette::TEXT;
+    layout_text_in(b, text, set, mode, palette::TEXT);
+}
+
+/// `layout_text` in a given style (`/me` and highlighted lines).
+fn layout_text_in(b: &mut Rows, text: &str, set: &EmoteSet, mode: EmoteMode, text_hue: Style) {
     for seg in segments(text, set) {
         if b.full {
             break;
@@ -359,29 +386,37 @@ pub(crate) fn layout_message(
     set: &EmoteSet,
     mode: EmoteMode,
     maxw: u16,
-    me: Option<&str>,
-    tag_platform: bool,
-    look: Option<&Look>,
+    look: &Look,
 ) -> Vec<RowPlan> {
     // the chat color wins; a heatsync-picked one fills in for a user with none.
     let user_color = m
         .color
         .as_deref()
-        .or(look.and_then(|l| l.color.as_deref()))
+        .or(look.user.and_then(|l| l.color.as_deref()))
         .and_then(parse_hex)
         .unwrap_or(Color::White);
-    let paint = look.and_then(|l| l.paint.as_ref());
+    let paint = look.user.and_then(|l| l.paint.as_ref());
     let mut b = Rows::new(maxw);
+    // dim `HH:MM` first when timestamps are on.
+    let mut hang = 0;
+    if look.stamps && m.extra.ts > 0 {
+        let (h, mi) = crate::clock::hhmm(m.extra.ts);
+        b.prefix(Span::styled(format!("{h:02}:{mi:02} "), palette::STAMP), 6);
+        hang = 6;
+    }
     // merged tab: a `[T]`/`[K]`/`[Y]` tag in the platform's hue marks each
     // line's origin; wrapped rows hang under the text after it.
-    if tag_platform {
+    if look.tag_platform {
         let tag = match m.platform {
             Platform::Twitch => "[T] ",
             Platform::Kick => "[K] ",
             Platform::Youtube => "[Y] ",
         };
         b.prefix(Span::styled(tag, palette::platform(m.platform)), 4);
-        b.indent = 4.min(b.maxw - 1);
+        hang += 4;
+    }
+    if hang > 0 {
+        b.indent = hang.min(b.maxw - 1);
     }
     // an event line: glyph + actor + headline in the event's hue, then any
     // attached chat text (resub message, kicks message) laid out like chat.
@@ -410,14 +445,8 @@ pub(crate) fn layout_message(
         b.prefix(Span::raw(" "), 1);
     }
     name(&mut b, &m.user, user_color, paint);
-    // reply thread marker: who this message answers, dim, before the content.
-    if let Some(r) = &m.reply_to {
-        let tag = format!(" ↳{r}");
-        let tw = UnicodeWidthStr::width(tag.as_str()) as u16;
-        b.prefix(Span::styled(tag, palette::DIM), tw);
-    }
     // a line that pings you swaps its ": " for a blue bar — semantic, not decor.
-    let pinged = me.is_some_and(|me| mentions(&m.text, me));
+    let pinged = mentions_any(&m.text, look.me) || replies_to_me(m.reply_to.as_deref(), look.me);
     b.prefix(
         if pinged {
             Span::styled("▌ ", palette::PING)
@@ -426,8 +455,21 @@ pub(crate) fn layout_message(
         },
         2,
     );
-    layout_text(&mut b, &m.text, set, mode);
-    match &m.gone {
+    // /me: the user's color, italic. a highlighted line is reverse-video.
+    let mut hue = palette::TEXT;
+    if m.extra.action {
+        hue = Style::default()
+            .fg(user_color)
+            .add_modifier(Modifier::ITALIC);
+    }
+    if m.extra.highlight {
+        hue = hue.add_modifier(Modifier::REVERSED);
+    }
+    layout_text_in(&mut b, &m.text, set, mode, hue);
+    if m.extra.first {
+        b.word("◇ first message", palette::DIM_TAG);
+    }
+    let mut rows = match &m.gone {
         Some(g) => {
             b.word(&format!("[{g}]"), palette::GONE_TAG);
             let mut rows = b.finish();
@@ -435,7 +477,24 @@ pub(crate) fn layout_message(
             rows
         }
         None => b.finish(),
+    };
+    // a reply shows what it answers on a dim row above, cut to the pane.
+    if let Some(r) = &m.reply_to {
+        let ctx = if m.extra.reply_text.is_empty() {
+            format!("↪@{r}")
+        } else {
+            format!("↪@{r}: {}", m.extra.reply_text)
+        };
+        rows.insert(
+            0,
+            RowPlan {
+                line: Line::from(Span::styled(fit(ctx, maxw), palette::DIM_TAG)),
+                places: Vec::new(),
+                h: 1,
+            },
+        );
     }
+    rows
 }
 
 /// a removed line: gray + crossed out, everything but its own `[tag]`.
@@ -565,6 +624,7 @@ mod wrap_tests {
             gone: None,
             reply_to: None,
             note: None,
+            extra: Default::default(),
             heat: 0.0,
             uid: None,
         }
@@ -587,7 +647,7 @@ mod wrap_tests {
         let set = EmoteSet::new();
         let mut m = msg("buy followers");
         m.gone = Some("timed out 10m".into());
-        let rows = layout_message(&m, &set, EmoteMode::Text, 80, None, false, None);
+        let rows = layout_message(&m, &set, EmoteMode::Text, 80, &Look::default());
         let spans: Vec<&Span> = rows.iter().flat_map(|r| r.line.spans.iter()).collect();
         let tag = spans.last().unwrap();
         assert_eq!(tag.content.trim(), "[timed out 10m]");
@@ -597,8 +657,89 @@ mod wrap_tests {
             assert_eq!(sp.style, palette::GONE, "{:?}", sp.content);
         }
         // an untouched line keeps its colors
-        let ok = layout_message(&msg("hi"), &set, EmoteMode::Text, 80, None, false, None);
+        let ok = layout_message(&msg("hi"), &set, EmoteMode::Text, 80, &Look::default());
         assert!(ok[0].line.spans.iter().all(|s| s.style != palette::GONE));
+    }
+
+    #[test]
+    fn a_reply_gets_a_dim_context_row_cut_to_the_pane() {
+        let set = EmoteSet::default();
+        let mut m = msg("yes");
+        m.reply_to = Some("tar".into());
+        m.extra.reply_text = "a very long original message that cannot fit".into();
+        let rows = layout_message(&m, &set, EmoteMode::Text, 20, &Look::default());
+        let t = flat(&rows);
+        assert_eq!(t.len(), 2);
+        assert!(t[0].starts_with("↪@tar: a very"));
+        assert!(UnicodeWidthStr::width(t[0].as_str()) <= 20);
+        assert_eq!(t[1], "u: yes");
+        m.extra.reply_text.clear();
+        assert_eq!(
+            flat(&layout_message(
+                &m,
+                &set,
+                EmoteMode::Text,
+                20,
+                &Look::default()
+            ))[0],
+            "↪@tar"
+        );
+    }
+
+    #[test]
+    fn first_message_tag_action_italic_highlight_reverse_and_ping_on_reply() {
+        let set = EmoteSet::default();
+        let mut m = msg("hello");
+        m.extra.first = true;
+        m.extra.action = true;
+        m.extra.highlight = true;
+        let rows = layout_message(&m, &set, EmoteMode::Text, 60, &Look::default());
+        assert_eq!(flat(&rows), ["u: hello ◇ first message"]);
+        let body = &rows[0].line.spans[2];
+        assert!(body.style.add_modifier.contains(Modifier::ITALIC));
+        assert!(body.style.add_modifier.contains(Modifier::REVERSED));
+        // a reply to one of my names pings even without an @.
+        let me = vec!["Tar".to_string()];
+        let mut r = msg("no");
+        r.reply_to = Some("tar".into());
+        let look = Look {
+            me: &me,
+            ..Look::default()
+        };
+        let rows = layout_message(&r, &set, EmoteMode::Text, 60, &look);
+        assert!(flat(&rows)[1].starts_with("u▌ "));
+    }
+
+    #[test]
+    fn stamps_prefix_only_when_on_and_known() {
+        let set = EmoteSet::default();
+        let mut m = msg("hi");
+        m.extra.ts = 1_700_000_000;
+        let on = Look {
+            stamps: true,
+            ..Look::default()
+        };
+        let t = flat(&layout_message(&m, &set, EmoteMode::Text, 40, &on));
+        assert!(
+            t[0].len() > "u: hi".len() && t[0].ends_with(" u: hi"),
+            "{t:?}"
+        );
+        m.extra.ts = 0;
+        assert_eq!(
+            flat(&layout_message(&m, &set, EmoteMode::Text, 40, &on)),
+            ["u: hi"]
+        );
+        m.extra.ts = 5;
+        assert_eq!(
+            flat(&layout_message(
+                &m,
+                &set,
+                EmoteMode::Text,
+                40,
+                &Look::default()
+            )),
+            ["u: hi"]
+        );
     }
 
     #[test]
@@ -609,9 +750,7 @@ mod wrap_tests {
             &set,
             EmoteMode::Text,
             12,
-            None,
-            false,
-            None,
+            &Look::default(),
         );
         let got = flat(&rows);
         assert!(got.len() > 1, "wrapped: {got:?}");
@@ -634,9 +773,7 @@ mod wrap_tests {
             &set,
             EmoteMode::Text,
             14,
-            None,
-            false,
-            None,
+            &Look::default(),
         );
         let got = flat(&rows);
         assert!(got.len() >= 3, "{got:?}");
@@ -653,7 +790,7 @@ mod wrap_tests {
     fn a_wall_is_capped_with_an_ellipsis() {
         let set = EmoteSet::new();
         let text = "word ".repeat(200);
-        let rows = layout_message(&msg(&text), &set, EmoteMode::Text, 20, None, false, None);
+        let rows = layout_message(&msg(&text), &set, EmoteMode::Text, 20, &Look::default());
         assert_eq!(rows.len(), MAX_MSG_ROWS);
         assert!(flat(&rows).last().unwrap().ends_with('…'));
     }
@@ -663,23 +800,36 @@ mod wrap_tests {
         let set = EmoteSet::new();
         let mut m = msg(&"word ".repeat(30));
         m.platform = Platform::Kick;
-        let rows = layout_message(&m, &set, EmoteMode::Text, 20, None, true, None);
+        let rows = layout_message(
+            &m,
+            &set,
+            EmoteMode::Text,
+            20,
+            &Look {
+                tag_platform: true,
+                ..Look::default()
+            },
+        );
         let f = flat(&rows);
         assert!(f[0].starts_with("[K] u"));
         assert!(f[1].starts_with("    ") && !f[1].starts_with("     "));
-        let one = layout_message(&m, &set, EmoteMode::Text, 20, None, false, None);
+        let one = layout_message(&m, &set, EmoteMode::Text, 20, &Look::default());
         assert!(flat(&one)[0].starts_with("u"));
     }
 
-    fn first_span(m: &Message, look: Option<&Look>) -> Vec<Span<'static>> {
+    fn first_span(m: &Message, user: Option<&UserLook>) -> Vec<Span<'static>> {
         let set = EmoteSet::new();
-        let rows = layout_message(m, &set, EmoteMode::Text, 80, None, false, look);
+        let look = Look {
+            user,
+            ..Look::default()
+        };
+        let rows = layout_message(m, &set, EmoteMode::Text, 80, &look);
         rows[0].line.spans.clone()
     }
 
     #[test]
     fn a_profile_color_fills_in_only_when_chat_sent_none() {
-        let look = Look {
+        let look = UserLook {
             paint: None,
             color: Some("#ff0000".into()),
         };
@@ -696,7 +846,7 @@ mod wrap_tests {
     fn a_paint_colors_the_name_per_character_on_truecolor_only() {
         let paint = Paint::from_heatsync(&serde_json::json!({"base": {"type": "linear",
             "angle": 90, "stops": [{"color": "#000000", "pos": 0}, {"color": "#ffffff", "pos": 100}]}}));
-        let look = Look { paint, color: None };
+        let look = UserLook { paint, color: None };
         let mut m = msg("hi");
         m.user = "abcdef".into();
         let spans = first_span(&m, Some(&look));
@@ -712,7 +862,7 @@ mod wrap_tests {
     #[test]
     fn short_messages_stay_on_one_row() {
         let set = EmoteSet::new();
-        let rows = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, None, false, None);
+        let rows = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, &Look::default());
         assert_eq!(flat(&rows), vec!["u: hi"]);
         assert_eq!(rows[0].h, 1);
     }

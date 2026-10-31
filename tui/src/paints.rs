@@ -25,16 +25,16 @@ const SPACING: Duration = Duration::from_millis(500);
 
 /// what we know about one chatter. `None`/`None` is a cached "nothing set".
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Look {
+pub(crate) struct UserLook {
     pub(crate) paint: Option<Paint>,
     /// the heatsync-picked `#rrggbb` name color.
     pub(crate) color: Option<String>,
 }
 
-type Batch = (Vec<String>, Option<HashMap<String, Look>>);
+type Batch = (Vec<String>, Option<HashMap<String, UserLook>>);
 
 pub(crate) struct Paints {
-    known: HashMap<String, Look>,
+    known: HashMap<String, UserLook>,
     /// insertion order of `known`, for eviction.
     order: VecDeque<String>,
     pending: Vec<String>,
@@ -60,7 +60,7 @@ impl Paints {
         }
     }
 
-    pub(crate) fn get(&self, id: &str) -> Option<&Look> {
+    pub(crate) fn get(&self, id: &str) -> Option<&UserLook> {
         self.known.get(id)
     }
 
@@ -83,7 +83,7 @@ impl Paints {
         } else {
             self.store(
                 id.to_string(),
-                Look {
+                UserLook {
                     paint: None,
                     color: Some(color.to_string()),
                 },
@@ -139,7 +139,7 @@ impl Paints {
         });
     }
 
-    fn store(&mut self, id: String, look: Look) {
+    fn store(&mut self, id: String, look: UserLook) {
         if self.known.insert(id.clone(), look).is_none() {
             self.order.push_back(id);
         }
@@ -155,7 +155,7 @@ impl Paints {
 }
 
 /// both lookups for one batch; either failing fails the batch (it retries).
-fn fetch(ids: &[String]) -> Option<HashMap<String, Look>> {
+fn fetch(ids: &[String]) -> Option<HashMap<String, UserLook>> {
     let hs = http::paints(ids)?;
     // 7tv only knows twitch ids and `kick_<id>`
     let stv_ids: Vec<String> = ids.iter().filter(|i| stv_known(i)).cloned().collect();
@@ -174,7 +174,7 @@ fn stv_known(id: &str) -> bool {
 
 /// `/api/paints` + `/api/cosmetics/batch` bodies → one look per id. a
 /// heatsync paint beats a 7tv one.
-fn resolve(ids: &[String], hs: &Value, stv: &Value) -> HashMap<String, Look> {
+fn resolve(ids: &[String], hs: &Value, stv: &Value) -> HashMap<String, UserLook> {
     ids.iter()
         .map(|id| {
             let paint = hs
@@ -197,7 +197,7 @@ fn resolve(ids: &[String], hs: &Value, stv: &Value) -> HashMap<String, Look> {
                         && c[1..].bytes().all(|b| b.is_ascii_hexdigit())
                 })
                 .map(str::to_string);
-            (id.clone(), Look { paint, color })
+            (id.clone(), UserLook { paint, color })
         })
         .collect()
 }
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(got["1"].color.as_deref(), Some("#aabbcc"));
         assert_eq!(got["2"].paint.as_ref().unwrap().sample(0.0), [0, 255, 0]);
         assert_eq!(got["2"].color, None, "malformed color dropped");
-        assert_eq!(got["3"], Look::default());
+        assert_eq!(got["3"], UserLook::default());
     }
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
         p.want("1");
         p.want("1");
         assert_eq!(p.pending.len(), 1);
-        p.store("2".into(), Look::default());
+        p.store("2".into(), UserLook::default());
         p.want("2");
         assert_eq!(p.pending.len(), 1);
     }
@@ -241,7 +241,7 @@ mod tests {
     fn cache_is_capped_oldest_first() {
         let mut p = Paints::new();
         for i in 0..CACHE_CAP + 10 {
-            p.store(i.to_string(), Look::default());
+            p.store(i.to_string(), UserLook::default());
         }
         assert_eq!(p.known.len(), CACHE_CAP);
         assert!(p.get("0").is_none() && p.get(&(CACHE_CAP + 9).to_string()).is_some());
@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn invalidate_requeues_only_resolved_ids() {
         let mut p = Paints::new();
-        p.store("1".into(), Look::default());
+        p.store("1".into(), UserLook::default());
         p.invalidate(&ids(&["1", "9"]));
         assert_eq!(p.pending, ids(&["1"]));
         assert!(p.get("1").is_none());
@@ -262,7 +262,7 @@ mod tests {
         let paint = Paint::from_7tv(&json!({"function": "SOLID", "color": 0xff0000ffu32 as i32}));
         p.store(
             "1".into(),
-            Look {
+            UserLook {
                 paint: paint.clone(),
                 color: None,
             },

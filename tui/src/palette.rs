@@ -4,7 +4,7 @@
 //! [H] marker.
 
 use heatsync_core::heat::{Hue, Look, Tier};
-use heatsync_core::{Badge, BadgeKind, NoteKind, Platform, Unread};
+use heatsync_core::{Badge, BadgeKind, NoteKind, Platform, Tint, Unread};
 use ratatui::style::{Color, Modifier, Style};
 
 /// secondary text.
@@ -27,6 +27,11 @@ pub const LIVE: Style = Style::new().fg(Color::Green);
 
 /// a tab with nothing unread: the extension's #808080 — the third allowed rgb.
 pub const READ: Color = Color::Rgb(128, 128, 128);
+
+/// reply context + `◇ first message`: the #808080 dim the thread line uses.
+pub const DIM_TAG: Style = Style::new().fg(READ);
+/// the `HH:MM` line prefix.
+pub const STAMP: Style = Style::new().fg(READ);
 
 /// a line a mod removed: gray, struck through; its `[deleted]` tag is gray only.
 pub const GONE: Style = Style::new().fg(READ).add_modifier(Modifier::CROSSED_OUT);
@@ -137,6 +142,21 @@ pub fn note(k: NoteKind) -> (&'static str, Style) {
         K::Notice => ("»", s.fg(Color::Cyan)),
         K::Spike => ("▲", s.fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         K::Mod => ("×", s.fg(Color::Red)),
+        K::Announce(t) => (
+            "!",
+            match t {
+                Tint::Plain => s.add_modifier(Modifier::BOLD),
+                Tint::Blue => s.fg(Color::Blue),
+                Tint::Green => s.fg(Color::Green),
+                Tint::Yellow => s.fg(Color::Yellow),
+                Tint::Magenta => s.fg(Color::Magenta),
+            },
+        ),
+        K::Streak => ("≈", s.fg(Color::Yellow)),
+        K::Milestone => ("♦", s.fg(Color::Magenta)),
+        K::Charity => ("♥", s.fg(Color::Magenta)),
+        K::Ritual => ("✧", s.fg(Color::Green)),
+        K::Mode => ("◈", s.fg(Color::Cyan)),
     }
 }
 

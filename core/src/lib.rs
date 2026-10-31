@@ -162,6 +162,58 @@ pub enum NoteKind {
     Spike,
     /// moderation: ban / timeout / chat clear.
     Mod,
+    /// a streamer announcement, tinted by the color they picked.
+    Announce(Tint),
+    /// watch streak shared in chat.
+    Streak,
+    /// viewer milestone.
+    Milestone,
+    /// charity donation.
+    Charity,
+    /// a first-time chatter's welcome (ritual / new_chatter).
+    Ritual,
+    /// room mode change: slow, emote-only, followers-only, sub-only.
+    Mode,
+}
+
+/// an announcement's color, mapped onto the ansi palette: twitch's PRIMARY is
+/// the plain one, ORANGE reads as yellow, PURPLE as magenta.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tint {
+    Plain,
+    Blue,
+    Green,
+    Yellow,
+    Magenta,
+}
+
+impl Tint {
+    /// twitch's `msg-param-color` → tint; anything unknown stays plain.
+    pub fn from_name(s: &str) -> Tint {
+        match s.to_ascii_uppercase().as_str() {
+            "BLUE" => Tint::Blue,
+            "GREEN" => Tint::Green,
+            "ORANGE" => Tint::Yellow,
+            "PURPLE" => Tint::Magenta,
+            _ => Tint::Plain,
+        }
+    }
+}
+
+/// per-line extras that change how a chat line looks, grouped so a new face
+/// only has to carry one field.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Extra {
+    /// the text of the message being replied to (sanitized, may be empty).
+    pub reply_text: String,
+    /// `/me` — rendered in the user's color, italic.
+    pub action: bool,
+    /// the user's first message in this channel.
+    pub first: bool,
+    /// redeemed "highlight my message" — rendered reverse-video.
+    pub highlight: bool,
+    /// wall-clock seconds when the line landed (0 = unknown) — for `HH:MM`.
+    pub ts: u64,
 }
 
 /// a non-chat event shown inline in the chat flow. `what` is the human
@@ -199,6 +251,7 @@ pub struct Message {
     /// the sender's heatsync paint-space id (twitch user id, `kick_<id>`,
     /// `yt_<UC id>`), when the relay sent one — keys name paints and colors.
     pub uid: Option<String>,
+    pub extra: Extra,
     pub heat: f64,
 }
 
@@ -507,6 +560,7 @@ mod channel_tests {
             gone: None,
             reply_to: None,
             note: None,
+            extra: Default::default(),
             heat: 0.0,
             uid: None,
         }

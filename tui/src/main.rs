@@ -8,6 +8,7 @@
 mod app;
 #[allow(dead_code)]
 mod cli;
+mod clock;
 mod config;
 mod draw;
 mod drawlog;
@@ -164,7 +165,9 @@ fn chat(args: &[String]) -> io::Result<()> {
             tab_pos: cfg.tab_pos,
             manage_cursor: 0,
             completion: None,
-            me: None,
+            me: Vec::new(),
+            names_rx: std::sync::mpsc::channel().1,
+            stamps: cfg.timestamps,
             emote_tx,
             emote_rx,
             hist_tx,
@@ -178,7 +181,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             paints: paints::Paints::new(),
         }
     } else {
-        build_live(&chan_args, cfg.tab_pos, cfg.channels)
+        build_live(&chan_args, cfg.tab_pos, cfg.timestamps, cfg.channels)
     };
 
     // must probe the terminal for graphics BEFORE raw mode / alt screen.
@@ -202,7 +205,7 @@ fn chat(args: &[String]) -> io::Result<()> {
 /// parse channel args (`name`, `twitch:name`, `kick:name`, `yt:id`, and
 /// `a+kick:a+yt:x` merged tabs), fetch emote sets, and start the live feed.
 /// prints a one-line loading note before raw mode.
-fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> App {
+fn build_live(chan_args: &[&String], tab_pos: TabPos, stamps: bool, saved: Vec<Vec<Sub>>) -> App {
     // precedence: explicit CLI args → persisted tabs → empty (a clean "press o to
     // join" state; no hardcoded demo channels). first run starts blank; whatever
     // you open persists, so the next launch restores it.
@@ -269,7 +272,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
     let (rx, out) = net::spawn(subs, token);
     // direct-to-platform sending if the user supplied their own platform tokens.
     let auth = config::load_auth();
-    let me = auth.twitch_user.clone();
+    let me: Vec<String> = auth.twitch_user.iter().cloned().collect();
     let kick_tx = auth.kick_token.clone().map(kick::spawn);
     let (twitch_tx, twitch_notes) = match (auth.twitch_user, auth.twitch_oauth) {
         (Some(u), Some(o)) => {
@@ -281,6 +284,16 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
     spawn_global_emotes(&emote_tx);
     let (hs_tx, hs_rx) = std::sync::mpsc::channel::<hsauth::Note>();
     let (pick_tx, pick_rx) = std::sync::mpsc::channel();
+    // my kick login isn't in the local auth — ask the heatsync login once, off-thread.
+    let hs = hsauth::load_client();
+    let (names_tx, names_rx) = std::sync::mpsc::channel();
+    if let Some(c) = hs.clone() {
+        std::thread::spawn(move || {
+            if let Ok(v) = c.me() {
+                let _ = names_tx.send(hsauth::my_names(&v));
+            }
+        });
+    }
     App {
         channels,
         emotes,
@@ -302,13 +315,15 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, saved: Vec<Vec<Sub>>) -> A
         twitch_tx,
         twitch_notes,
         kick_tx,
-        hs: hsauth::load_client(),
+        hs,
         hs_tx,
         hs_notes: hs_rx,
         tab_pos,
         manage_cursor: 0,
         completion: None,
         me,
+        names_rx,
+        stamps,
         emote_tx,
         emote_rx,
         hist_tx,
@@ -335,6 +350,7 @@ pub(crate) fn save_state(app: &App) {
         .collect();
     config::save(&config::Config {
         tab_pos: app.tab_pos,
+        timestamps: app.stamps,
         channels,
     });
 }

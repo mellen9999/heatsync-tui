@@ -2,7 +2,7 @@ use crate::app::{App, Feed, InputMode};
 use crate::config::TabPos;
 use crate::emote::render::EMOTE_H;
 use crate::input::slot_of;
-use crate::layout::{fit, layout_message, layout_text, EmoteMode, Place, RowPlan, Rows};
+use crate::layout::{fit, layout_message, layout_text, EmoteMode, Look, Place, RowPlan, Rows};
 use crate::palette;
 use heatsync_core::edit;
 use heatsync_core::emote::{segments, Segment};
@@ -216,15 +216,18 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
     let mut plan: Vec<Vec<RowPlan>> = Vec::new();
     let mut used = 0usize;
     for m in ch.messages.iter().rev() {
-        let look = m.uid.as_deref().and_then(|u| app.paints.get(u));
+        let user = m.uid.as_deref().and_then(|u| app.paints.get(u));
         let mut rows = layout_message(
             m,
             set,
             mode,
             body.width,
-            app.me.as_deref(),
-            ch.merged(),
-            look,
+            &Look {
+                me: &app.me,
+                tag_platform: ch.merged(),
+                stamps: app.stamps,
+                user,
+            },
         );
         let h: usize = rows.iter().map(|r| r.h as usize).sum();
         if used + h > cap {

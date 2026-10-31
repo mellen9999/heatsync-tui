@@ -68,8 +68,12 @@ pub(crate) struct App {
     pub(crate) manage_cursor: usize, // cursor in the Manage view
     /// a tab-completion walk in progress; any non-tab key ends it.
     pub(crate) completion: Option<Completion>,
-    /// own username (twitch login), for mention highlighting.
-    pub(crate) me: Option<String>,
+    /// my names (twitch login, kick login) for mention + reply-to-me pings.
+    pub(crate) me: Vec<String>,
+    /// the heatsync login's names arrive here once, from a startup thread.
+    pub(crate) names_rx: Receiver<Vec<String>>,
+    /// dim `HH:MM` before each line (`t`, persisted).
+    pub(crate) stamps: bool,
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the
     // UI); results arrive here keyed by (platform, name) and merge in.
     pub(crate) emote_tx: Sender<(Platform, String, EmoteSet)>,

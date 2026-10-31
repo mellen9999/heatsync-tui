@@ -181,6 +181,7 @@ impl Driver {
                             kind,
                             what: what.to_string(),
                         }),
+                        extra: Default::default(),
                         heat: 0.0,
                         uid: None,
                     },
@@ -205,6 +206,19 @@ impl Driver {
                         r if r < 0.12 => vec![crate::Badge::new(crate::BadgeKind::Subscriber)],
                         _ => Vec::new(),
                     };
+                    // a few replies, /me lines and first messages so the demo
+                    // shows the richer chrome too.
+                    let roll = self.rng.unit();
+                    let reply_to = (roll < 0.04).then(|| self.rng.pick(USERS).to_string());
+                    let extra = crate::Extra {
+                        reply_text: reply_to
+                            .as_ref()
+                            .map(|_| "wait is that actually true".to_string())
+                            .unwrap_or_default(),
+                        action: (0.04..0.06).contains(&roll),
+                        first: (0.06..0.07).contains(&roll),
+                        ..Default::default()
+                    };
                     ch.record(
                         Message {
                             platform: ch.platform,
@@ -214,8 +228,9 @@ impl Driver {
                             badges,
                             id: None,
                             gone: None,
-                            reply_to: None,
+                            reply_to,
                             note: None,
+                            extra,
                             heat: 0.0,
                             uid: None,
                         },
