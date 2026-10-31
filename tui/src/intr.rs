@@ -72,6 +72,7 @@ mod tests {
         assert!(message(PLAIN).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn tui_sigint_sets_flag_not_exit() {
         tui_phase();
