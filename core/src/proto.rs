@@ -5,6 +5,7 @@
 
 use serde_json::{json, Value};
 
+use crate::emote::{self, Emote};
 use crate::{sanitize, Badge, Extra, Note, NoteKind, Pin, Platform, Tint};
 
 /// a normalized chat line, ready for a channel buffer.
@@ -27,6 +28,10 @@ pub struct ChatLine {
     /// note — what `streamev` pairs and dedupes on.
     pub stream: Option<StreamEv>,
     pub content: String,
+    /// this message's own emote refs (relay `hsEmotes`, twitch `emotes` tag,
+    /// kick `[emote:id:name]` tokens) — highest priority when parsing, see
+    /// [`emote::segments_with`].
+    pub emotes: Vec<Emote>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,8 +239,11 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
         .or_else(|| m.get("username").and_then(Value::as_str))
         .unwrap_or("");
     let content_raw = m.get("content").and_then(Value::as_str).unwrap_or("");
+    // native emote positions / tokens read the RAW text (positions are in the
+    // sender's code points), before sanitizing shifts anything.
+    let (content_raw, emotes) = msg_emotes(m, platform, content_raw);
     let user = sanitize::clean(user_raw);
-    let content = sanitize::clean(content_raw);
+    let content = sanitize::clean(&content_raw);
     if user.is_empty() && content.is_empty() {
         return None;
     }
@@ -278,7 +286,71 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
         stream: None,
         content,
         uid: uid_of(m, platform),
+        emotes,
     })
+}
+
+/// most refs one message may carry — a hostile relay can't make us hold more.
+const MAX_REFS: usize = 64;
+
+/// a message's emote refs, plus its text (kick tokens are rewritten to names).
+/// order is priority: the relay's `hsEmotes` (the sender's inventory emotes,
+/// resolved server-side) first, then the platform's native ids.
+fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emote>) {
+    let mut refs: Vec<Emote> = Vec::new();
+    let mut add = |e: Emote| {
+        if refs.len() < MAX_REFS && !refs.iter().any(|r| r.name == e.name) {
+            refs.push(e);
+        }
+    };
+    if let Some(map) = m.get("hsEmotes").and_then(Value::as_object) {
+        for (name, r) in map.iter().take(MAX_REFS) {
+            // cw stubs ({name, cw}, no url) carry nothing to draw — the word
+            // stays text rather than leak the hidden image.
+            let Some(url) = r.get("url").and_then(Value::as_str) else {
+                continue;
+            };
+            let provider = r
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .unwrap_or("heatsync");
+            let zw = r.get("zeroWidth").and_then(Value::as_bool).unwrap_or(false);
+            if let Some(e) = emote::msg_ref(name, url, provider, zw) {
+                add(e);
+            }
+        }
+    }
+    let mut text = content.to_string();
+    match platform {
+        Platform::Twitch => {
+            if let Some(tag) = m.get("emotes").and_then(Value::as_str) {
+                for e in emote::twitch_native(tag, content) {
+                    add(e);
+                }
+            }
+            // relays that pre-resolve the tag send name → url instead
+            if let Some(map) = m.get("twitchEmotes").and_then(Value::as_object) {
+                for (name, url) in map.iter().take(MAX_REFS) {
+                    if let Some(e) = url
+                        .as_str()
+                        .and_then(|u| emote::msg_ref(name, u, "twitch", false))
+                    {
+                        add(e);
+                    }
+                }
+            }
+        }
+        Platform::Kick => {
+            let (rewritten, native) = emote::kick_native(content);
+            text = rewritten;
+            for e in native {
+                add(e);
+            }
+        }
+        _ => {}
+    }
+    (text, refs)
 }
 
 /// a `#rrggbb`/`#rgb` user color, if the object carries a valid one.
@@ -405,6 +477,7 @@ pub(crate) fn note_line(
         stream: None,
         content,
         uid: None,
+        emotes: Vec::new(),
     })
 }
 
@@ -985,6 +1058,7 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
             .get("authorChannelId")
             .and_then(Value::as_str)
             .and_then(|c| paint_id("yt_", c)),
+        emotes: Vec::new(),
     })
 }
 
@@ -1127,8 +1201,153 @@ mod tests {
                 stream: None,
                 content: "hello GAMBA".into(),
                 uid: None,
+                emotes: vec![],
             })
         );
+    }
+
+    fn chat(raw: &str) -> ChatLine {
+        match parse(raw) {
+            Event::Chat(l) => l,
+            e => panic!("expected chat, got {e:?}"),
+        }
+    }
+
+    fn pairs(l: &ChatLine) -> Vec<(&str, &str, &str, bool)> {
+        l.emotes
+            .iter()
+            .map(|e| {
+                (
+                    e.name.as_str(),
+                    e.url.as_str(),
+                    e.provider.as_str(),
+                    e.zero_width,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn twitch_emotes_tag_becomes_refs() {
+        let l = chat(
+            r##"{"type":"irc:message","channel":"c","message":{
+            "username":"u","content":"Kappa hi LUL","emotes":"25:0-4/425618:9-11"}}"##,
+        );
+        assert_eq!(l.content, "Kappa hi LUL");
+        assert_eq!(
+            pairs(&l),
+            vec![
+                (
+                    "Kappa",
+                    "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0",
+                    "twitch",
+                    false
+                ),
+                (
+                    "LUL",
+                    "https://static-cdn.jtvnw.net/emoticons/v2/425618/default/dark/2.0",
+                    "twitch",
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn twitch_emote_positions_are_code_points() {
+        // two astral emoji precede the emote: utf-16 / byte offsets would miss it
+        let l = chat(
+            "{\"type\":\"irc:message\",\"channel\":\"c\",\"message\":{\"username\":\"u\",\
+             \"content\":\"\u{1f600}\u{1f600} Kappa\",\"emotes\":\"25:3-7\"}}",
+        );
+        assert_eq!(l.emotes.len(), 1);
+        assert_eq!(l.emotes[0].name, "Kappa");
+    }
+
+    #[test]
+    fn twitch_pre_resolved_map_is_accepted() {
+        let l = chat(
+            r##"{"type":"irc:message","channel":"c","message":{"username":"u","content":"hi Sub",
+            "twitchEmotes":{"Sub":"https://static-cdn.jtvnw.net/emoticons/v2/9/default/dark/2.0","Bad":"http://x/y"}}}"##,
+        );
+        assert_eq!(l.emotes.len(), 1);
+        assert_eq!(l.emotes[0].name, "Sub");
+    }
+
+    #[test]
+    fn hs_emotes_map_becomes_refs_and_outranks_native() {
+        let l = chat(
+            r##"{"type":"irc:message","channel":"c","message":{
+            "username":"u","content":"Kappa nope",
+            "emotes":"25:0-4",
+            "hsEmotes":{
+              "Kappa":{"url":"https://cdn.hs/k.webp","provider":"heatsync"},
+              "notL":{"url":"https://cdn.7tv.app/n.webp","provider":"7tv","zeroWidth":true},
+              "Hidden":{"cw":"sexual"},
+              "Evil":{"url":"javascript:alert(1)"},
+              "two words":{"url":"https://cdn.hs/x.webp"}}}}"##,
+        );
+        // inventory Kappa first (native Kappa dedupes behind it); stubs/bad dropped
+        assert_eq!(
+            pairs(&l),
+            vec![
+                ("Kappa", "https://cdn.hs/k.webp", "heatsync", false),
+                ("notL", "https://cdn.7tv.app/n.webp", "7tv", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn kick_emote_tokens_are_rewritten_and_ref_d() {
+        let l = chat(
+            r##"{"type":"kick-chat-message","data":{"channel":"c","username":"u",
+            "content":"hi [emote:37226:KEKW][emote:1:Clap] go"}}"##,
+        );
+        assert_eq!(l.content, "hi KEKW Clap go");
+        assert_eq!(
+            pairs(&l),
+            vec![
+                (
+                    "KEKW",
+                    "https://files.kick.com/emotes/37226/fullsize",
+                    "kick",
+                    false
+                ),
+                (
+                    "Clap",
+                    "https://files.kick.com/emotes/1/fullsize",
+                    "kick",
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn kick_tokens_are_kick_only_and_hs_emotes_work_there_too() {
+        // a twitch user typing the token stays literal
+        let l = chat(
+            r##"{"type":"irc:message","channel":"c","message":{"username":"u","content":"[emote:1:X]"}}"##,
+        );
+        assert_eq!(l.content, "[emote:1:X]");
+        assert!(l.emotes.is_empty());
+        let l = chat(
+            r##"{"type":"kick-chat-message","data":{"channel":"c","username":"u","content":"hi Pog",
+            "hsEmotes":{"Pog":{"url":"https://cdn.hs/p.webp","provider":"7tv"}}}}"##,
+        );
+        assert_eq!(l.emotes.len(), 1);
+    }
+
+    #[test]
+    fn ref_count_is_capped() {
+        let map: Vec<String> = (0..200)
+            .map(|i| format!(r#""E{i}":{{"url":"https://cdn.hs/{i}.webp"}}"#))
+            .collect();
+        let raw = format!(
+            r#"{{"type":"irc:message","channel":"c","message":{{"username":"u","content":"x","hsEmotes":{{{}}}}}}}"#,
+            map.join(",")
+        );
+        assert_eq!(chat(&raw).emotes.len(), MAX_REFS);
     }
 
     #[test]

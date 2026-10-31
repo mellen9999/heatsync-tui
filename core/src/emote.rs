@@ -519,6 +519,116 @@ pub fn split_key(key: &str) -> Vec<Layer> {
     layers
 }
 
+/// the emote refs one message carries: its own name → url bindings, built from
+/// the relay's `hsEmotes`, twitch's `emotes` tag and kick's `[emote:id:name]`
+/// tokens. outrank the channel set when parsed (see [`segments_with`]).
+pub fn ref_set(refs: &[Emote]) -> EmoteSet {
+    EmoteSet::from_list(refs.iter().cloned())
+}
+
+/// one per-message ref, or None when the name can't be a chat word or the url
+/// isn't a plain https link — this is the trust boundary for relay-supplied
+/// emotes (a url ends up fetched by the renderer).
+pub fn msg_ref(name: &str, url: &str, provider: &str, zero_width: bool) -> Option<Emote> {
+    let name = crate::sanitize::clean(name);
+    let ok_url = url.len() <= 512
+        && url.starts_with("https://")
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control());
+    if name.is_empty() || name.chars().any(char::is_whitespace) || !ok_url {
+        return None;
+    }
+    Some(Emote {
+        name,
+        url: url.to_string(),
+        provider: crate::sanitize::clean(provider),
+        id: String::new(),
+        animated: false,
+        zero_width,
+        global: false,
+    })
+}
+
+fn push_ref(out: &mut Vec<Emote>, e: Option<Emote>) {
+    if let Some(e) = e {
+        if !out.iter().any(|o| o.name == e.name) {
+            out.push(e);
+        }
+    }
+}
+
+/// twitch's IRC `emotes` tag (`id:start-end,start-end/id2:…`) → refs, naming
+/// each emote by the text it covers. positions count unicode code points, not
+/// bytes or utf-16 units. a span that is out of range or crosses a space (the
+/// relay altered the text under the positions) is skipped, never guessed.
+pub fn twitch_native(tag: &str, text: &str) -> Vec<Emote> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    for part in tag.split('/') {
+        let Some((id, pos)) = part.split_once(':') else {
+            continue;
+        };
+        // ids are alnum / `_` (v2 ids like `emotesv2_abc`) — anything else
+        // would smuggle path or query bits into the cdn url.
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let Some((s, e)) = pos
+            .split(',')
+            .next()
+            .and_then(|p| p.split_once('-'))
+            .and_then(|(s, e)| Some((s.parse::<usize>().ok()?, e.parse::<usize>().ok()?)))
+        else {
+            continue;
+        };
+        if s > e || e >= chars.len() {
+            continue;
+        }
+        let name: String = chars[s..=e].iter().collect();
+        let url = format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0");
+        push_ref(&mut out, msg_ref(&name, &url, "twitch", false));
+    }
+    out
+}
+
+/// kick's inline `[emote:ID:name]` tokens → the text with each token replaced
+/// by its name (spaced off from neighbors so they read as words) + refs to
+/// kick's cdn. a malformed token is left as typed.
+pub fn kick_native(text: &str) -> (String, Vec<Emote>) {
+    const OPEN: &str = "[emote:";
+    let mut out = String::with_capacity(text.len());
+    let mut refs = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(OPEN) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + OPEN.len()..];
+        let token = after.split_once(']').and_then(|(body, tail)| {
+            let (id, name) = body.split_once(':')?;
+            let url = format!("https://files.kick.com/emotes/{id}/fullsize");
+            let ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
+            ok.then(|| msg_ref(name, &url, "kick", false).map(|e| (e, tail)))?
+        });
+        match token {
+            Some((e, tail)) => {
+                if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                    out.push(' ');
+                }
+                out.push_str(&e.name);
+                if tail.chars().next().is_some_and(|c| !c.is_whitespace()) {
+                    out.push(' ');
+                }
+                push_ref(&mut refs, Some(e));
+                rest = tail;
+            }
+            None => {
+                out.push_str(OPEN);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    (out, refs)
+}
+
 /// a laid-out chunk of a message: literal text, or an emote stack.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Segment {
@@ -1145,6 +1255,128 @@ mod tests {
         assert_eq!(split_key("https://x/a\n#xw@7")[0].hue, Some(7));
         // a stray effect line with no layer is ignored, not a panic
         assert!(split_key("#xw").is_empty());
+    }
+
+    #[test]
+    fn twitch_native_positions_name_the_covered_text() {
+        let u =
+            |id: &str| format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0");
+        for (tag, text, want) in [
+            ("25:0-4", "Kappa hi", vec![("Kappa", "25")]),
+            ("25:0-4,12-16", "Kappa hi Kappa", vec![("Kappa", "25")]),
+            (
+                "25:0-4/1902:6-10",
+                "Kappa Keepo",
+                vec![("Kappa", "25"), ("Keepo", "1902")],
+            ),
+            (
+                "emotesv2_ab12:3-5",
+                "hi LUL",
+                vec![("LUL", "emotesv2_ab12")],
+            ),
+            // positions count code points: each emoji is ONE position
+            ("25:3-7", "\u{1f600}\u{1f600} Kappa", vec![("Kappa", "25")]),
+            ("25:0-4/", "Kappa hi", vec![("Kappa", "25")]),
+            ("", "Kappa", vec![]),
+        ] {
+            let got: Vec<(String, String)> = twitch_native(tag, text)
+                .into_iter()
+                .map(|e| (e.name, e.url))
+                .collect();
+            let want: Vec<(String, String)> =
+                want.into_iter().map(|(n, i)| (n.into(), u(i))).collect();
+            assert_eq!(got, want, "{tag} / {text}");
+        }
+    }
+
+    #[test]
+    fn twitch_native_rejects_bad_input() {
+        for (tag, text) in [
+            ("25:0-9", "Kappa"),     // past the end
+            ("25:4-0", "Kappa"),     // reversed
+            ("25:a-b", "Kappa"),     // not numbers
+            ("25", "Kappa"),         // no positions
+            ("25?x=1:0-4", "Kappa"), // query-ish id
+            ("25:0-6", "Kappa hi"),  // crosses a space
+        ] {
+            let got = twitch_native(tag, text);
+            assert!(got.is_empty(), "{tag}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn kick_native_tokens_become_names_and_refs() {
+        let (text, refs) = kick_native("hi [emote:37226:KEKW] there");
+        assert_eq!(text, "hi KEKW there");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "KEKW");
+        assert_eq!(refs[0].url, "https://files.kick.com/emotes/37226/fullsize");
+        assert_eq!(refs[0].provider, "kick");
+        // glued neighbors get spaced so each is its own word
+        assert_eq!(kick_native("a[emote:1:X]b").0, "a X b");
+        assert_eq!(kick_native("[emote:1:X][emote:2:Y]").0, "X Y");
+        assert_eq!(kick_native("[emote:1:X][emote:2:Y]").1.len(), 2);
+        // repeats dedupe to one ref
+        assert_eq!(kick_native("[emote:1:X] [emote:1:X]").1.len(), 1);
+        // malformed tokens stay as typed
+        for bad in [
+            "[emote:abc:X]",
+            "[emote::X]",
+            "[emote:1:]",
+            "[emote:1:X Y]",
+            "[emote:1:X",
+            "[emote:../x:X]",
+            "[emote:12]",
+        ] {
+            let (t, r) = kick_native(bad);
+            assert_eq!(t, bad, "{bad}");
+            assert!(r.is_empty(), "{bad}");
+        }
+        assert_eq!(kick_native("plain").0, "plain");
+    }
+
+    #[test]
+    fn msg_ref_guards_the_trust_boundary() {
+        assert!(msg_ref("KEKW", "https://cdn/k.webp", "7tv", false).is_some());
+        for (n, u) in [
+            ("", "https://cdn/k"),
+            ("a b", "https://cdn/k"),
+            ("KEKW", "http://cdn/k"),
+            ("KEKW", "javascript:x"),
+            ("KEKW", "https://cdn/k k"),
+            ("KEKW", "https://cdn/k\u{1b}[2J"),
+        ] {
+            assert!(msg_ref(n, u, "x", false).is_none(), "{n} {u}");
+        }
+        // control chars stripped from the name
+        assert_eq!(
+            msg_ref("KE\u{1b}KW", "https://cdn/k", "x", false)
+                .unwrap()
+                .name,
+            "KEKW"
+        );
+    }
+
+    #[test]
+    fn native_refs_drive_a_full_parse() {
+        let set = cast();
+        let (text, refs) = kick_native("[emote:9:SubOnly] w! KEKW");
+        let r = ref_set(&refs);
+        let segs = segments_with(&text, &set, &r);
+        let bases: Vec<&str> = segs
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Stack(st) => Some(st.base.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bases, vec!["SubOnly", "KEKW"]);
+        match &segs[0] {
+            Segment::Stack(st) => {
+                assert_eq!(st.layers[0].url, "https://files.kick.com/emotes/9/fullsize")
+            }
+            _ => panic!(),
+        }
     }
 
     #[test]
