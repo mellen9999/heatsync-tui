@@ -28,7 +28,9 @@ mod paints;
 mod palette;
 mod picker;
 mod sched;
+mod social;
 mod special;
+mod talk;
 mod twitch;
 
 use std::io::{self, IsTerminal};

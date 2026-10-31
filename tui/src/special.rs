@@ -16,6 +16,9 @@ use crate::app::{App, Feed};
 use crate::mentions::{self, Mention};
 use crate::net::{ChatEvent, Outbound};
 use crate::save_state;
+use crate::social::Msg;
+use crate::talk;
+use heatsync_core::social::{Contact, Row};
 
 /// rows a virtual tab keeps (the ring cap, like a channel's).
 const CAP: usize = 500;
@@ -33,6 +36,13 @@ pub(crate) struct State {
     pub(crate) ws_cli: bool,
     /// the "log in again" hint has been shown — it speaks once per run.
     pub(crate) hinted: bool,
+    /// finished account calls (see `talk`) come back here.
+    pub(crate) social_tx: Sender<Msg>,
+    pub(crate) social_rx: Receiver<Msg>,
+    /// people `/w` and `/dm` can address: your threads, follows, live senders.
+    pub(crate) contacts: Vec<Contact>,
+    /// the conversation list has loaded at least once.
+    pub(crate) loaded: bool,
 }
 
 impl State {
@@ -45,6 +55,7 @@ impl State {
 
     fn with_log(log: mentions::Log) -> State {
         let (feed_tx, feed_rx) = channel();
+        let (social_tx, social_rx) = channel();
         State {
             log,
             recent: Vec::new(),
@@ -52,6 +63,10 @@ impl State {
             feed_rx,
             ws_cli: false,
             hinted: false,
+            social_tx,
+            social_rx,
+            contacts: Vec::new(),
+            loaded: false,
         }
     }
 }
@@ -135,8 +150,11 @@ pub(crate) fn add(app: &mut App, kind: TabKind) -> usize {
     if app.manage_cursor >= at {
         app.manage_cursor += 1;
     }
-    if kind == TabKind::Feed {
-        start_feed(app);
+    match kind {
+        TabKind::Feed => start_feed(app),
+        TabKind::Whispers => talk::load_history(app),
+        TabKind::Mentions => talk::load_hits(app),
+        TabKind::Channel => {}
     }
     at
 }
@@ -280,6 +298,9 @@ pub(crate) fn event(app: &mut App, ev: ChatEvent) {
                 {
                     return; // already in the backlog
                 }
+                if let Some(p) = s.peer.clone() {
+                    talk::learn(app, p);
+                }
                 let msg = special_msg(s);
                 let ch = &mut app.channels[i];
                 ch.deliver(msg);
@@ -347,17 +368,72 @@ pub(crate) fn enter(app: &mut App) {
     }
 }
 
-/// text composed on a virtual tab. only whispers can take one, and sending
-/// waits on the server's /api/cli routes — this is the single place it lands.
-pub(crate) fn send(app: &mut App, kind: TabKind, _text: &str) {
-    app.status = Some(match kind {
-        TabKind::Whispers => "whispers are read-only here for now".into(),
-        _ => format!("{} is read-only — open a channel to chat", kind.name()),
-    });
+/// text composed on a virtual tab. the feed takes posts (a reply when `r`
+/// picked a row); whispers want `/w` or `/dm` (they need a name); mentions
+/// are read-only. true = the line went and the composer clears.
+pub(crate) fn send(app: &mut App, kind: TabKind, text: &str, reply: Option<String>) -> bool {
+    match kind {
+        TabKind::Feed => return talk::post(app, text, reply),
+        TabKind::Whispers => {
+            app.status =
+                Some("say who to: /w <user> <msg> or /dm <user> <msg> — or r on a row".into())
+        }
+        _ => {
+            app.status = Some(format!(
+                "{} is read-only — open a channel to chat",
+                kind.name()
+            ))
+        }
+    }
+    false
+}
+
+/// the whispers / dms history landed: oldest first, in front of whatever live
+/// rows already arrived, skipping any the live feed already showed.
+pub(crate) fn backfill_whispers(app: &mut App, rows: Vec<Row>) {
+    let Some(i) = find(app, TabKind::Whispers) else {
+        return;
+    };
+    let ch = &mut app.channels[i];
+    let same = |a: &Message, b: &Message| {
+        a.user == b.user && a.text == b.text && a.tags.first() == b.tags.first()
+    };
+    let fresh: Vec<Message> = rows
+        .into_iter()
+        .map(|r| special_msg(r.line))
+        .filter(|m| !ch.messages.iter().any(|e| same(e, m)))
+        .collect();
+    let live: Vec<Message> = ch.messages.drain(..).collect();
+    for m in fresh.into_iter().chain(live) {
+        ch.system(m);
+    }
+}
+
+/// the server's rule hits landed: any the local log doesn't already hold join
+/// it (and the tab) as history — not news, so nothing flashes.
+pub(crate) fn backfill_mentions(app: &mut App, hits: Vec<Mention>) {
+    // the server lists newest first; the tab reads oldest first.
+    for m in hits.into_iter().rev() {
+        if app.special.log.rows().any(|r| same_mention(r, &m)) {
+            continue;
+        }
+        if let Some(i) = find(app, TabKind::Mentions) {
+            app.channels[i].deliver(mention_msg(&m));
+            if app.focus == i {
+                app.channels[i].mark_seen();
+            }
+        }
+        app.special.log.push(m);
+    }
+    if let Some(i) = find(app, TabKind::Mentions) {
+        if app.focus != i {
+            app.channels[i].mark_seen(); // history isn't news
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::app::InputMode;
     use crate::{hsauth, picker};
@@ -368,7 +444,7 @@ mod tests {
 
     /// an app with two real tabs, a mock feed and an in-memory mention log —
     /// nothing touches the network or ~/.config.
-    fn app() -> App {
+    pub(crate) fn app() -> App {
         let (hs_tx, hs_notes) = channel::<hsauth::Note>();
         let (emote_tx, emote_rx) = channel();
         let (hist_tx, hist_rx) = channel();
@@ -664,18 +740,19 @@ mod tests {
     }
 
     #[test]
-    fn virtual_tabs_are_read_only() {
+    fn virtual_tabs_say_what_they_take() {
         let mut a = app();
-        send(&mut a, TabKind::Mentions, "hi");
+        assert!(!send(&mut a, TabKind::Mentions, "hi", None));
         assert_eq!(
             a.status.as_deref(),
             Some("mentions is read-only — open a channel to chat")
         );
-        send(&mut a, TabKind::Whispers, "hi");
-        assert_eq!(
-            a.status.as_deref(),
-            Some("whispers are read-only here for now")
-        );
+        // whispers need a name: the hint says how
+        assert!(!send(&mut a, TabKind::Whispers, "hi", None));
+        assert!(a.status.as_deref().unwrap().contains("/w <user>"));
+        // the feed takes posts — without a login it says how to get one
+        assert!(!send(&mut a, TabKind::Feed, "hi", None));
+        assert!(a.status.as_deref().unwrap().contains("heatsync-tui login"));
     }
 
     #[test]

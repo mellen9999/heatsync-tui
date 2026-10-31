@@ -1,7 +1,7 @@
 use crate::app::{App, Feed, InputMode};
 use crate::feed::{spawn_emote_fetch, spawn_history, spawn_pin};
 use crate::net::Sub;
-use crate::{hsauth, key, modcmd, net, picker, special};
+use crate::{hsauth, key, modcmd, net, picker, special, talk};
 use crate::{parse_sub, parse_tab, save_state, yt_video_id};
 use crossterm::event::{KeyCode, KeyModifiers};
 use heatsync_core::complete::Completion;
@@ -570,6 +570,30 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
             special::open(app, kind);
             return Flow::Continue;
         }
+        slash::Cmd::Whisper(to, t) => {
+            if talk::direct(app, false, &to, &t) {
+                app.line.accept();
+            }
+            return Flow::Continue;
+        }
+        slash::Cmd::Dm(to, t) => {
+            if talk::direct(app, true, &to, &t) {
+                app.line.accept();
+            }
+            return Flow::Continue;
+        }
+        slash::Cmd::Op(t) => {
+            if talk::post(app, &t, None) {
+                app.line.accept();
+            }
+            return Flow::Continue;
+        }
+        slash::Cmd::Re(t) => {
+            if talk::re(app, &t) {
+                app.line.accept();
+            }
+            return Flow::Continue;
+        }
         slash::Cmd::Quit => return Flow::Quit,
         slash::Cmd::Usage(u) => {
             // keep the draft so the channel can just be appended
@@ -584,7 +608,9 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
     // a virtual tab has no channel to send to.
     let kind = app.channels[app.focus].kind;
     if kind.is_special() {
-        special::send(app, kind, &text);
+        if special::send(app, kind, &text, reply) {
+            app.line.accept();
+        }
         return Flow::Continue;
     }
     // /ban /unban /timeout /delete: twitch no longer runs these as chat text,
@@ -842,6 +868,16 @@ fn cursor_reply(app: &mut App) {
     let target = cursor_line(app)
         .filter(|m| m.note.is_none() && !m.user.is_empty())
         .and_then(|m| Some((m.id.clone()?, m.user.clone())));
+    // a whispers / dm row has no message id: `r` fills in `/w <them> ` instead.
+    if let Some(cmd) = cursor_line(app).and_then(talk::reply_prefill) {
+        app.reply = None;
+        app.mode = InputMode::Insert;
+        app.line.reset();
+        app.line.replace_range(0, 0, &cmd);
+        app.line.focus();
+        app.status = None;
+        return;
+    }
     match target {
         Some(t) => {
             app.reply = Some(t);

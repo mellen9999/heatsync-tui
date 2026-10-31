@@ -58,8 +58,13 @@ pub fn whisper_body(to_user_id: &str, message: &str) -> Value {
 
 pub(crate) fn contact(name: String, login: &str, id: String, dm: bool) -> Option<Contact> {
     let login = crate::sanitize::clean(login).to_lowercase();
-    // a twitch whisper id is digits; refuse anything else before it reaches a URL
-    let id_ok = !id.is_empty() && id.len() <= 50 && (dm || id.bytes().all(|b| b.is_ascii_digit()));
+    // ids go into a URL path: a twitch id is digits, a heatsync id letters,
+    // digits, `_` and `-` — refuse anything else before it gets there
+    let id_ok = !id.is_empty()
+        && id.len() <= 50
+        && id.bytes().all(|b| {
+            b.is_ascii_digit() || (dm && (b.is_ascii_alphabetic() || b == b'_' || b == b'-'))
+        });
     (id_ok && !login.is_empty()).then_some(Contact {
         name: if name.is_empty() { login.clone() } else { name },
         login,
@@ -105,6 +110,22 @@ pub fn dm_contacts(v: &Value) -> Vec<Contact> {
             let login = field(c, "username");
             let name = field(c, "display_name");
             contact(name, &login, str_or_num(c, &["other_user_id"])?, true)
+        })
+        .collect()
+}
+
+/// `GET /api/cli/following`: the people you follow on heatsync — the only
+/// directory a terminal login can read, so it is how `/dm <user>` finds an id
+/// for someone you have not messaged yet.
+pub fn following_contacts(v: &Value) -> Vec<Contact> {
+    v.get("following")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let login = field(c, "username");
+            let name = field(c, "display_name");
+            contact(name, &login, str_or_num(c, &["id"])?, true)
         })
         .collect()
 }
@@ -306,6 +327,17 @@ mod tests {
             (c[0].id.as_str(), c[0].name.as_str(), c[0].dm),
             ("12", "Cat", true)
         );
+    }
+
+    #[test]
+    fn following_makes_dm_contacts_and_skips_kick_style_ids_it_cannot_route() {
+        let v = json!({"following": [
+            {"id": "u1", "username": "streamer", "display_name": "Streamer"},
+            {"id": "bad/id", "username": "x"}
+        ]});
+        let c = following_contacts(&v);
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].id.as_str(), c[0].dm), ("u1", true));
     }
 
     #[test]

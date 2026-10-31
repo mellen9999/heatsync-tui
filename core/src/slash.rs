@@ -1,7 +1,8 @@
 //! slash commands typed in the composer, the way every chat client does it.
 //!
 //! the rule that matters: we only claim commands a CLIENT owns — joining,
-//! parting, quitting. everything else is the platform's (`/ban`, `/timeout`,
+//! parting, quitting, and the heatsync-only /w /dm /op /re (twitch dropped
+//! chat-line whispers, so `/w` has nothing else to mean). everything else is the platform's (`/ban`, `/timeout`,
 //! `/me`, `/vip`, `/raid` …) and goes out verbatim, so moderating from here
 //! behaves exactly like typing into twitch or kick directly. claiming a name
 //! the platform also uses would silently break a mod action, which is why the
@@ -16,6 +17,14 @@ pub enum Cmd {
     Quit,
     /// open (or focus) a virtual tab: `/mentions`, `/feed`, `/whispers`.
     Tab(crate::TabKind),
+    /// `/w <user> <text>` — a twitch whisper through heatsync.
+    Whisper(String, String),
+    /// `/dm <user> <text>` — a heatsync direct message.
+    Dm(String, String),
+    /// `/op <text>` — post to the heatsync feed.
+    Op(String),
+    /// `/re <text>` — reply to the last OP you posted.
+    Re(String),
     /// send these bytes to the platform as an ordinary message.
     Send(String),
     /// a client command we recognise but that was typed without its argument.
@@ -47,6 +56,25 @@ pub fn parse(input: &str) -> Cmd {
         "mentions" | "feed" | "whispers" => match crate::TabKind::parse(&verb) {
             Some(k) => Cmd::Tab(k),
             None => Cmd::Send(line.to_string()),
+        },
+        "w" | "whisper" | "dm" => {
+            let mut p = arg.unwrap_or_default().splitn(2, char::is_whitespace);
+            let to = p.next().unwrap_or_default();
+            let text = p.next().map(str::trim).unwrap_or_default();
+            match (verb == "dm", to.is_empty() || text.is_empty()) {
+                (_, true) if verb == "dm" => Cmd::Usage("usage: /dm <user> <message>"),
+                (_, true) => Cmd::Usage("usage: /w <user> <message>"),
+                (true, _) => Cmd::Dm(to.into(), text.into()),
+                _ => Cmd::Whisper(to.into(), text.into()),
+            }
+        }
+        "op" => match arg {
+            Some(a) => Cmd::Op(a.to_string()),
+            None => Cmd::Usage("usage: /op <text>  (posts to the heatsync feed)"),
+        },
+        "re" => match arg {
+            Some(a) => Cmd::Re(a.to_string()),
+            None => Cmd::Usage("usage: /re <text>  (replies to your last OP)"),
         },
         // not ours — the platform's problem, and it must arrive untouched.
         _ => Cmd::Send(line.to_string()),
@@ -89,8 +117,26 @@ mod tests {
         assert_eq!(parse("/mentions"), Cmd::Tab(TabKind::Mentions));
         assert_eq!(parse("/feed"), Cmd::Tab(TabKind::Feed));
         assert_eq!(parse("/Whispers"), Cmd::Tab(TabKind::Whispers));
-        // twitch's own /w stays the platform's
-        assert_eq!(parse("/w bob hi"), Cmd::Send("/w bob hi".into()));
+    }
+
+    #[test]
+    fn whispers_dms_and_feed_posts_are_ours() {
+        assert_eq!(
+            parse("/w bob hi there"),
+            Cmd::Whisper("bob".into(), "hi there".into())
+        );
+        assert_eq!(
+            parse("/whisper bob  hi"),
+            Cmd::Whisper("bob".into(), "hi".into())
+        );
+        assert_eq!(parse("/dm cat yo"), Cmd::Dm("cat".into(), "yo".into()));
+        assert_eq!(parse("/op gm all"), Cmd::Op("gm all".into()));
+        assert_eq!(parse("/re agreed"), Cmd::Re("agreed".into()));
+        for bare in ["/w", "/w bob", "/dm", "/dm cat", "/op", "/re"] {
+            assert!(matches!(parse(bare), Cmd::Usage(_)), "{bare}");
+        }
+        // `//w` still sends a literal /w
+        assert_eq!(parse("//w bob hi"), Cmd::Send("/w bob hi".into()));
     }
 
     #[test]
@@ -115,7 +161,6 @@ mod tests {
             "/slow 30",
             "/emoteonly",
             "/followers 10m",
-            "/w someguy hello",
             "/announce hello chat",
         ] {
             assert_eq!(

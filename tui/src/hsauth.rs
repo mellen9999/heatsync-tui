@@ -356,6 +356,10 @@ impl Client {
         (self.base == DEFAULT_BASE).then(|| self.token.clone())
     }
 
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     pub(crate) fn call(
         &self,
         method: &str,
@@ -563,6 +567,7 @@ pub fn explain(status: u16, v: &Value, base: &str) -> String {
         let what = match pack {
             Some("mod") => "allow mod tools",
             Some("chatsend") => "allow chat from the terminal",
+            Some("whispers") => "allow whispers",
             _ => "link your account",
         };
         return format!("{what} on {platform} first — open {url}");
@@ -658,18 +663,18 @@ where
 // ---- tests ----------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testkit {
     use super::*;
     use std::sync::Mutex;
 
     /// canned answers, and a record of every request (to prove what was sent).
-    type Seen = (String, String, Option<String>, Option<Value>);
-    struct Fake {
-        replies: Mutex<Vec<Result<(u16, Value), String>>>,
-        seen: Mutex<Vec<Seen>>,
+    pub(crate) type Seen = (String, String, Option<String>, Option<Value>);
+    pub(crate) struct Fake {
+        pub(crate) replies: Mutex<Vec<Result<(u16, Value), String>>>,
+        pub(crate) seen: Mutex<Vec<Seen>>,
     }
     impl Fake {
-        fn new(r: Vec<Result<(u16, Value), String>>) -> Arc<Fake> {
+        pub(crate) fn new(r: Vec<Result<(u16, Value), String>>) -> Arc<Fake> {
             Arc::new(Fake {
                 replies: Mutex::new(r),
                 seen: Mutex::new(vec![]),
@@ -694,7 +699,7 @@ mod tests {
         }
     }
 
-    fn client(f: &Arc<Fake>) -> Client {
+    pub(crate) fn client(f: &Arc<Fake>) -> Client {
         Client::new(
             &Session::new(
                 "hscli_SECRET".into(),
@@ -704,6 +709,12 @@ mod tests {
             f.clone(),
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testkit::{client, Fake};
+    use super::*;
 
     #[test]
     fn following_reads_streams_and_goes_quiet_on_anything_else() {
