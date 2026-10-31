@@ -199,6 +199,13 @@ fn session(
         return SessionEnd::ReceiverGone;
     }
 
+    let mut frame_log = std::env::var_os("HS_DEBUG_FRAMES").and_then(|p| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
+    });
     let mut last_hb = Instant::now();
     loop {
         // wake at the queue's cadence while frames wait, idle cadence otherwise.
@@ -210,7 +217,11 @@ fn session(
         }
         match ws.read() {
             Ok(WsMsg::Text(t)) => {
-                if !forward(proto::parse(t.as_str()), tx) {
+                let ev = proto::parse(t.as_str());
+                if let Some(f) = frame_log.as_mut() {
+                    log_frame(f, t.as_str(), &ev);
+                }
+                if !forward(ev, tx) {
                     return SessionEnd::ReceiverGone;
                 }
             }
@@ -300,6 +311,31 @@ fn session(
             last_hb = Instant::now();
         }
     }
+}
+
+/// HS_DEBUG_FRAMES=<path>: one line per inbound frame — its type, whether we
+/// understood it, and the server's words for an error frame.
+fn log_frame(f: &mut std::fs::File, raw: &str, ev: &Event) {
+    use std::io::Write;
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+    let sub = v
+        .get("message")
+        .and_then(|m| m.get("type"))
+        .and_then(|t| t.as_str())
+        .map(|t| format!("/{t}"))
+        .unwrap_or_default();
+    let words = if ty == "error" {
+        v.get("message").and_then(|m| m.as_str()).unwrap_or("")
+    } else {
+        ""
+    };
+    let seen = if matches!(ev, Event::Ignore) {
+        "ignored"
+    } else {
+        "ok"
+    };
+    let _ = writeln!(f, "{ty}{sub}\t{seen}\t{words}");
 }
 
 /// borrow the underlying TcpStream to set a read timeout, through TLS or plain.
