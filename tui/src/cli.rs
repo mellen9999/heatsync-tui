@@ -287,6 +287,9 @@ fn print_me(me: &serde_json::Value, base: &str, want_kick: bool, link_hints: boo
     if !scopes.iter().any(|x| x == "mod") {
         println!("            no mod tools — run `heatsync-tui login` again and tick mod");
     }
+    if !scopes.iter().any(|x| x == "account") {
+        println!("            no whispers, dms or mention hits — run `heatsync-tui login` again and tick account");
+    }
     if let Some(e) = s(&me["expires_at"]) {
         println!("  renews itself; valid until {e}");
     }

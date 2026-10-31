@@ -21,9 +21,9 @@ open channels + tab-bar position persist in `~/.config/heatsync/config`.
 `heatsync-tui login` pairs this terminal with your heatsync account: it shows a
 code, you approve it on heatsync.org, and a revocable token lands in
 `~/.config/heatsync` (mode 0600). on the approve page you tick what the
-terminal may do:
+terminal may do. chat (send chat, feed posts, dms, whispers) is always on; two
+boxes are optional:
 
-- **chat** — send chat, feed posts, dms and whispers
 - **mod** — ban / timeout / delete from the tui
 - **account** — read your dms, whispers and mention hits (also signs the live socket in)
 
