@@ -106,13 +106,15 @@ pub enum Event {
     Ignore,
 }
 
-/// a channel's chat modes. `followers` is minutes (-1 = off, 0 = any follower).
+/// a channel's chat modes as one ROOMSTATE carried them: `None` = the tag was
+/// absent, i.e. unchanged (twitch's later ROOMSTATEs list only what changed).
+/// `followers` is minutes (-1 = off, 0 = any follower).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RoomState {
-    pub slow: u32,
-    pub followers: i32,
-    pub emote_only: bool,
-    pub subs_only: bool,
+    pub slow: Option<u32>,
+    pub followers: Option<i32>,
+    pub emote_only: Option<bool>,
+    pub subs_only: Option<bool>,
 }
 
 /// parse one inbound text frame. unknown / malformed frames become `Ignore`
@@ -492,13 +494,13 @@ fn roomstate_event(v: &Value) -> Event {
     let (Some(m), Some(ch)) = (v.get("message"), v.get("channel").and_then(Value::as_str)) else {
         return Event::Ignore;
     };
-    let flag = |k: &str| m.get(k).and_then(Value::as_bool).unwrap_or(false);
-    let n = |k: &str, d: i64| m.get(k).and_then(Value::as_i64).unwrap_or(d);
+    let flag = |k: &str| m.get(k).and_then(Value::as_bool);
+    let n = |k: &str| m.get(k).and_then(Value::as_i64);
     Event::Room(
         ch.to_string(),
         RoomState {
-            slow: n("slow", 0).clamp(0, u32::MAX as i64) as u32,
-            followers: n("followersOnly", -1).clamp(-1, i32::MAX as i64) as i32,
+            slow: n("slow").map(|x| x.clamp(0, u32::MAX as i64) as u32),
+            followers: n("followersOnly").map(|x| x.clamp(-1, i32::MAX as i64) as i32),
             emote_only: flag("emoteOnly"),
             subs_only: flag("subsOnly"),
         },
