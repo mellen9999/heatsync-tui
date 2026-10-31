@@ -58,6 +58,8 @@ pub struct SpecialLine {
     pub line: ChatLine,
     pub tags: Vec<Tag>,
     pub heat: f64,
+    /// who a whisper / dm came from, with the id a reply needs.
+    pub peer: Option<crate::social::Contact>,
 }
 
 /// whose lines a moderation event removes.
@@ -476,7 +478,7 @@ fn extra_of(m: &Value) -> Extra {
 }
 
 /// sanitized string field, empty when absent.
-fn field(v: &Value, k: &str) -> String {
+pub(crate) fn field(v: &Value, k: &str) -> String {
     sanitize::clean(v.get(k).and_then(Value::as_str).unwrap_or(""))
 }
 
@@ -644,7 +646,7 @@ fn roomstate_event(v: &Value) -> Event {
 }
 
 /// first present key as a string (numbers allowed — ids arrive either way).
-fn str_or_num(v: &Value, keys: &[&str]) -> Option<String> {
+pub(crate) fn str_or_num(v: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| match v.get(*k)? {
         Value::String(s) if !s.is_empty() => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
@@ -652,7 +654,7 @@ fn str_or_num(v: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
-fn platform_or_twitch(s: &str) -> Platform {
+pub(crate) fn platform_or_twitch(s: &str) -> Platform {
     match s {
         "kick" => Platform::Kick,
         "youtube" | "yt" => Platform::Youtube,
@@ -661,7 +663,7 @@ fn platform_or_twitch(s: &str) -> Platform {
 }
 
 /// a bare chat line for a virtual tab.
-fn special_chat(
+pub(crate) fn special_chat(
     platform: Platform,
     channel: String,
     id: Option<String>,
@@ -707,6 +709,7 @@ fn mention_event(v: &Value) -> Event {
         line: special_chat(platform, channel, None, user, None, snippet, Vec::new()),
         tags,
         heat: 0.0,
+        peer: None,
     })
 }
 
@@ -733,6 +736,18 @@ fn whisper_event(v: &Value, tab: TabKind) -> Event {
         .and_then(Value::as_str)
         .filter(|s| s.starts_with('#') && (s.len() == 7 || s.len() == 4))
         .map(str::to_string);
+    let peer = if is_dm {
+        str_or_num(v, &["from_user_id"])
+    } else {
+        str_or_num(v, &["from_twitch_id"])
+    }
+    .and_then(|id| {
+        let login = match field(v, "from_twitch_login") {
+            l if l.is_empty() => name.clone(),
+            l => l,
+        };
+        crate::social::contact(name.clone(), &login, id, is_dm)
+    });
     let tag = if is_dm {
         Tag::new("[DM]", TagKind::Dm)
     } else {
@@ -751,6 +766,7 @@ fn whisper_event(v: &Value, tab: TabKind) -> Event {
         ),
         tags: vec![tag],
         heat: 0.0,
+        peer,
     })
 }
 
@@ -793,6 +809,7 @@ pub fn feed_row(v: &Value) -> Option<SpecialLine> {
         ),
         tags: vec![role, Tag::new("", TagKind::Heat)],
         heat: v.get("heat").and_then(Value::as_f64).unwrap_or(0.0),
+        peer: None,
     })
 }
 
@@ -2402,5 +2419,25 @@ mod tests {
             parse(ch),
             Event::Cosmetic(vec!["7".into(), "kick_9".into()])
         );
+    }
+
+    #[test]
+    fn live_whispers_and_dms_remember_who_to_answer() {
+        let w = special(
+            r#"{"type":"whisper:new","from_twitch_id":"42","from_twitch_login":"Bob","from_display_name":"Bob","content":"hi"}"#,
+        );
+        let p = w.peer.unwrap();
+        assert_eq!(
+            (p.id.as_str(), p.login.as_str(), p.dm),
+            ("42", "bob", false)
+        );
+        let d = special(
+            r#"{"type":"dm:new","from_user_id":12,"from_display_name":"Cat","content":"yo"}"#,
+        );
+        let p = d.peer.unwrap();
+        assert_eq!((p.id.as_str(), p.name.as_str(), p.dm), ("12", "Cat", true));
+        // no id in the frame: still shown, just not answerable by name
+        let n = special(r#"{"type":"whisper:new","from_display_name":"Bob","content":"hi"}"#);
+        assert!(n.peer.is_none());
     }
 }

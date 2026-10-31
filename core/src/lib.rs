@@ -12,6 +12,7 @@ pub mod complete;
 pub mod edit;
 pub mod emote;
 pub mod heat;
+pub mod iso;
 pub mod key;
 pub mod mock;
 pub mod paint;
@@ -20,6 +21,7 @@ pub mod room;
 pub mod sanitize;
 pub mod scroll;
 pub mod slash;
+pub mod social;
 pub mod streamev;
 pub mod vi;
 
