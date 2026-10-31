@@ -2,7 +2,7 @@ use crate::emote::fb::FbEmotes;
 use crate::emote::render::{EmoteStore, EMOTE_H};
 use crate::palette;
 use heatsync_core::emote::{segments, EmoteSet, Segment};
-use heatsync_core::{Badge, Message};
+use heatsync_core::{Badge, Message, Platform};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -133,6 +133,7 @@ pub(crate) struct RowPlan {
 /// preview.
 pub(crate) struct Rows {
     pub(crate) maxw: u16,
+    indent: u16, // hanging indent of continuation rows
     pub(crate) rows: Vec<RowPlan>,
     pub(crate) spans: Vec<Span<'static>>,
     pub(crate) places: Vec<Place>,
@@ -146,6 +147,7 @@ impl Rows {
     pub(crate) fn new(maxw: u16) -> Rows {
         Rows {
             maxw: maxw.max(WRAP_INDENT + 1),
+            indent: WRAP_INDENT,
             rows: Vec::new(),
             spans: Vec::new(),
             places: Vec::new(),
@@ -176,9 +178,9 @@ impl Rows {
             h,
         });
         self.has_stack = false;
-        self.col = WRAP_INDENT;
-        self.row_start = WRAP_INDENT;
-        self.spans.push(Span::raw(" ".repeat(WRAP_INDENT as usize)));
+        self.col = self.indent;
+        self.row_start = self.indent;
+        self.spans.push(Span::raw(" ".repeat(self.indent as usize)));
         if self.rows.len() >= MAX_MSG_ROWS {
             self.full = true;
         }
@@ -335,9 +337,16 @@ pub(crate) fn layout_message(
         .and_then(parse_hex)
         .unwrap_or(Color::White);
     let mut b = Rows::new(maxw);
-    // merged tab: a one-cell bar in the platform's hue marks each line's origin.
+    // merged tab: a `[T]`/`[K]`/`[Y]` tag in the platform's hue marks each
+    // line's origin; wrapped rows hang under the text after it.
     if tag_platform {
-        b.prefix(Span::styled("▎", palette::platform(m.platform)), 1);
+        let tag = match m.platform {
+            Platform::Twitch => "[T] ",
+            Platform::Kick => "[K] ",
+            Platform::Youtube => "[Y] ",
+        };
+        b.prefix(Span::styled(tag, palette::platform(m.platform)), 4);
+        b.indent = 4.min(b.maxw - 1);
     }
     // an event line: glyph + actor + headline in the event's hue, then any
     // attached chat text (resub message, kicks message) laid out like chat.
@@ -519,7 +528,6 @@ mod placeholder_tests {
 #[cfg(test)]
 mod wrap_tests {
     use super::*;
-    use heatsync_core::Platform;
 
     fn msg(text: &str) -> Message {
         Message {
@@ -620,6 +628,19 @@ mod wrap_tests {
         let rows = layout_message(&msg(&text), &set, EmoteMode::Text, 20, None, false);
         assert_eq!(rows.len(), MAX_MSG_ROWS);
         assert!(flat(&rows).last().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn merged_tabs_tag_the_platform_and_hang_under_it() {
+        let set = EmoteSet::new();
+        let mut m = msg(&"word ".repeat(30));
+        m.platform = Platform::Kick;
+        let rows = layout_message(&m, &set, EmoteMode::Text, 20, None, true);
+        let f = flat(&rows);
+        assert!(f[0].starts_with("[K] u"));
+        assert!(f[1].starts_with("    ") && !f[1].starts_with("     "));
+        let one = layout_message(&m, &set, EmoteMode::Text, 20, None, false);
+        assert!(flat(&one)[0].starts_with("u"));
     }
 
     #[test]
