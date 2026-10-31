@@ -356,13 +356,7 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                     *connected = matches!(ev, ChatEvent::Connected);
                 }
             }
-            ChatEvent::Auth(ok) => {
-                app.status = Some(if ok {
-                    "authenticated".into()
-                } else {
-                    "auth failed — check HEATSYNC_TOKEN".into()
-                });
-            }
+            ChatEvent::Auth(ok) => special::auth(app, ok),
             ChatEvent::SendResult { ok, error } => {
                 if !ok {
                     app.status = Some(format!("send failed: {}", error.unwrap_or_default()));

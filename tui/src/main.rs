@@ -189,7 +189,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             cursor: 0,
             reply: None,
             view_h: std::cell::Cell::new(0),
-            special: special::State::new(),
+            special: special::State::new(false),
         }
     } else {
         let feed_open = cfg.special.contains(&TabKind::Feed);
@@ -293,9 +293,14 @@ fn build_live(
         }
     }
 
-    let token = std::env::var("HEATSYNC_TOKEN")
+    // the heatsync login signs the socket in (whispers, dms, mention hits ride
+    // it); HEATSYNC_TOKEN, when set, wins.
+    let hs = hsauth::load_client();
+    let env_token = std::env::var("HEATSYNC_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
+    let ws_cli = env_token.is_none() && hs.as_ref().and_then(|c| c.socket_token()).is_some();
+    let token = env_token.or_else(|| hs.as_ref().and_then(|c| c.socket_token()));
     let subs: Vec<Sub> = tabs.into_iter().flatten().collect();
     let (rx, out) = net::spawn(subs, token, feed_open);
     // direct-to-platform sending if the user supplied their own platform tokens.
@@ -313,7 +318,6 @@ fn build_live(
     let (hs_tx, hs_rx) = std::sync::mpsc::channel::<hsauth::Note>();
     let (pick_tx, pick_rx) = std::sync::mpsc::channel();
     // my kick login isn't in the local auth — ask the heatsync login once, off-thread.
-    let hs = hsauth::load_client();
     let (names_tx, names_rx) = std::sync::mpsc::channel();
     if let Some(c) = hs.clone() {
         std::thread::spawn(move || {
@@ -369,7 +373,7 @@ fn build_live(
         cursor: 0,
         reply: None,
         view_h: std::cell::Cell::new(0),
-        special: special::State::new(),
+        special: special::State::new(ws_cli),
     }
 }
 

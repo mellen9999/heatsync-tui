@@ -669,6 +669,9 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
             }
         }
         // youtube sends only via the authenticated relay (extension path).
+        Platform::Youtube if app.special.ws_cli => {
+            app.status = Some("youtube sends need the extension".into())
+        }
         Platform::Youtube => match &app.out {
             Some(out) => {
                 let _ = out.send(net::Outbound::Chat {

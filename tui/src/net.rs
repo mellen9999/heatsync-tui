@@ -181,6 +181,7 @@ fn session(
     if let Ok(sock) = tcp_of(&mut ws) {
         let _ = sock.set_read_timeout(Some(READ_TIMEOUT));
     }
+    let cli = token.as_deref().is_some_and(|t| t.starts_with("hscli_"));
     // authenticate first (required before any send is accepted).
     if let Some(t) = token {
         if ws.send(WsMsg::Text(proto::authenticate(t))).is_err() {
@@ -239,6 +240,11 @@ fn session(
 
         // drain queued outbound requests.
         while let Ok(o) = out.try_recv() {
+            // a terminal login's socket may only join, leave and heartbeat —
+            // the server refuses chat frames on it, so they never go out.
+            if cli && matches!(o, Outbound::Chat { .. }) {
+                continue;
+            }
             // chat goes out at once; only join/part frames wait their turn.
             let frames = match o {
                 Outbound::Chat {

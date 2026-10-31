@@ -29,11 +29,18 @@ pub(crate) struct State {
     recent: Vec<(Instant, Mention)>,
     feed_tx: Sender<Vec<SpecialLine>>,
     feed_rx: Receiver<Vec<SpecialLine>>,
+    /// the relay socket is signed in with the heatsync login (not HEATSYNC_TOKEN).
+    pub(crate) ws_cli: bool,
+    /// the "log in again" hint has been shown — it speaks once per run.
+    pub(crate) hinted: bool,
 }
 
 impl State {
-    pub(crate) fn new() -> State {
-        State::with_log(mentions::Log::load())
+    pub(crate) fn new(ws_cli: bool) -> State {
+        State {
+            ws_cli,
+            ..State::with_log(mentions::Log::load())
+        }
     }
 
     fn with_log(log: mentions::Log) -> State {
@@ -43,6 +50,8 @@ impl State {
             recent: Vec::new(),
             feed_tx,
             feed_rx,
+            ws_cli: false,
+            hinted: false,
         }
     }
 }
@@ -231,6 +240,20 @@ pub(crate) fn mention(app: &mut App, m: Mention) {
         }
     }
     app.special.log.push(m);
+}
+
+/// the socket's answer to `authenticate`. a login without the `account`
+/// permission is refused and stays anonymous: say so once, in plain words.
+pub(crate) fn auth(app: &mut App, ok: bool) {
+    if ok {
+        app.status = Some("authenticated".into());
+    } else if !app.special.ws_cli {
+        app.status = Some("auth failed — check HEATSYNC_TOKEN".into());
+    } else if !app.special.hinted {
+        app.special.hinted = true;
+        app.status =
+            Some("run `heatsync-tui login` again to get whispers, dms and mentions".into());
+    }
 }
 
 /// route the events virtual tabs care about.
@@ -653,5 +676,19 @@ mod tests {
             a.status.as_deref(),
             Some("whispers are read-only here for now")
         );
+    }
+
+    #[test]
+    fn a_refused_login_hints_once_and_a_bad_env_token_keeps_its_old_words() {
+        let mut a = app();
+        a.special.ws_cli = true;
+        auth(&mut a, false);
+        assert!(a.status.as_deref().unwrap().contains("heatsync-tui login"));
+        a.status = None;
+        auth(&mut a, false); // every reconnect fails again: stay quiet
+        assert_eq!(a.status, None);
+        a.special.ws_cli = false;
+        auth(&mut a, false);
+        assert!(a.status.as_deref().unwrap().contains("HEATSYNC_TOKEN"));
     }
 }

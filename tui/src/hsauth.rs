@@ -350,7 +350,18 @@ impl Client {
         }
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value), String> {
+    /// the token for the relay socket, which only ever talks to heatsync.org —
+    /// a login made against another server (HEATSYNC_URL) must not be sent there.
+    pub fn socket_token(&self) -> Option<String> {
+        (self.base == DEFAULT_BASE).then(|| self.token.clone())
+    }
+
+    pub(crate) fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(u16, Value), String> {
         self.t.call(
             method,
             &format!("{}{path}", self.base),
@@ -1039,5 +1050,17 @@ mod tests {
         assert_eq!(human_secs(90), "90s");
         assert_eq!(human_secs(7200), "2h");
         assert_eq!(human_secs(86400), "1d");
+    }
+
+    #[test]
+    fn the_socket_only_gets_a_login_made_against_heatsync_org() {
+        let f = Fake::new(vec![]);
+        let home = Session::new("hscli_SECRET".into(), DEFAULT_BASE.into(), "x".into());
+        assert_eq!(
+            Client::new(&home, f.clone()).socket_token().as_deref(),
+            Some("hscli_SECRET")
+        );
+        let other = Session::new("hscli_X".into(), "http://localhost:3000".into(), "x".into());
+        assert_eq!(Client::new(&other, f).socket_token(), None);
     }
 }
