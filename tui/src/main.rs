@@ -21,12 +21,14 @@ mod intr;
 mod key;
 mod kick;
 mod layout;
+mod mentions;
 mod modcmd;
 mod net;
 mod paints;
 mod palette;
 mod picker;
 mod sched;
+mod special;
 mod twitch;
 
 use std::io::{self, IsTerminal};
@@ -46,6 +48,7 @@ use heatsync_core::edit;
 use heatsync_core::emote::EmoteSet;
 use heatsync_core::room::RoomModes;
 use heatsync_core::streamev::StreamEvents;
+use heatsync_core::TabKind;
 use heatsync_core::{mock, Channel, Platform};
 use input::{drain_picker, handle_key, Flow};
 use net::Sub;
@@ -136,7 +139,7 @@ fn chat(args: &[String]) -> io::Result<()> {
     let mock_mode = args.iter().any(|a| a == "--mock");
     let chan_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     let cfg = config::load();
-    let app = if mock_mode {
+    let mut app = if mock_mode {
         let (hs_tx, hs_rx) = std::sync::mpsc::channel::<hsauth::Note>();
         let (emote_tx, emote_rx) = std::sync::mpsc::channel();
         let (hist_tx, hist_rx) = std::sync::mpsc::channel();
@@ -186,10 +189,20 @@ fn chat(args: &[String]) -> io::Result<()> {
             cursor: 0,
             reply: None,
             view_h: std::cell::Cell::new(0),
+            special: special::State::new(),
         }
     } else {
-        build_live(&chan_args, cfg.tab_pos, cfg.timestamps, cfg.channels)
+        let feed_open = cfg.special.contains(&TabKind::Feed);
+        build_live(
+            &chan_args,
+            cfg.tab_pos,
+            cfg.timestamps,
+            cfg.channels,
+            feed_open,
+        )
     };
+    // virtual tabs pin left of whatever the channel args / config opened.
+    special::restore(&mut app, &cfg.special);
 
     // must probe the terminal for graphics BEFORE raw mode / alt screen.
     let had_fb = app.fb.is_some();
@@ -212,7 +225,13 @@ fn chat(args: &[String]) -> io::Result<()> {
 /// parse channel args (`name`, `twitch:name`, `kick:name`, `yt:id`, and
 /// `a+kick:a+yt:x` merged tabs), fetch emote sets, and start the live feed.
 /// prints a one-line loading note before raw mode.
-fn build_live(chan_args: &[&String], tab_pos: TabPos, stamps: bool, saved: Vec<Vec<Sub>>) -> App {
+fn build_live(
+    chan_args: &[&String],
+    tab_pos: TabPos,
+    stamps: bool,
+    saved: Vec<Vec<Sub>>,
+    feed_open: bool,
+) -> App {
     // precedence: explicit CLI args → persisted tabs → empty (a clean "press o to
     // join" state; no hardcoded demo channels). first run starts blank; whatever
     // you open persists, so the next launch restores it.
@@ -278,7 +297,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, stamps: bool, saved: Vec<V
         .ok()
         .filter(|t| !t.is_empty());
     let subs: Vec<Sub> = tabs.into_iter().flatten().collect();
-    let (rx, out) = net::spawn(subs, token);
+    let (rx, out) = net::spawn(subs, token, feed_open);
     // direct-to-platform sending if the user supplied their own platform tokens.
     let auth = config::load_auth();
     let me: Vec<String> = auth.twitch_user.iter().cloned().collect();
@@ -350,6 +369,7 @@ fn build_live(chan_args: &[&String], tab_pos: TabPos, stamps: bool, saved: Vec<V
         cursor: 0,
         reply: None,
         view_h: std::cell::Cell::new(0),
+        special: special::State::new(),
     }
 }
 
@@ -361,12 +381,20 @@ pub(crate) fn save_state(app: &App) {
     let channels = app
         .channels
         .iter()
+        .filter(|c| !c.kind.is_special())
         .map(|c| c.subs().map(|(p, n)| (p, n.to_string())).collect())
+        .collect();
+    let special = app
+        .channels
+        .iter()
+        .map(|c| c.kind)
+        .filter(|k| k.is_special())
         .collect();
     config::save(&config::Config {
         tab_pos: app.tab_pos,
         timestamps: app.stamps,
         channels,
+        special,
     });
 }
 

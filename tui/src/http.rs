@@ -148,6 +148,33 @@ pub fn search(q: &str, channel: Option<&str>, limit: u32) -> Option<ArchivePage>
     agent().get(&url).call().ok()?.into_json().ok()
 }
 
+/// the site feed's latest `want` rows, oldest first — the feed tab's backlog.
+/// anonymous works; rows pass through the same parser the live socket uses, so
+/// they are sanitized at the same trust boundary.
+pub fn feed_recent(want: usize) -> Vec<heatsync_core::proto::SpecialLine> {
+    let url = format!("{BASE}/api/messages?sort=time&limit={want}");
+    let Some(v) = agent()
+        .get(&url)
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<serde_json::Value>().ok())
+    else {
+        return Vec::new();
+    };
+    let mut rows: Vec<_> = v
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(heatsync_core::proto::feed_row)
+                .collect()
+        })
+        .unwrap_or_default();
+    // the api answers newest first; the tab reads oldest first.
+    rows.reverse();
+    rows
+}
+
 /// a channel's log for a UTC date (YYYY-MM-DD).
 pub fn channel_log(channel: &str, from: &str, to: &str, limit: u32) -> Option<ArchivePage> {
     let url =
@@ -201,6 +228,7 @@ pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_co
                 note: None,
                 extra: Default::default(),
                 emotes: None,
+                tags: Vec::new(),
                 heat: 0.0,
                 uid: None,
             }

@@ -6,7 +6,7 @@
 use serde_json::{json, Value};
 
 use crate::emote::{self, Emote};
-use crate::{sanitize, Badge, Extra, Note, NoteKind, Pin, Platform, Tint};
+use crate::{sanitize, Badge, Extra, Note, NoteKind, Pin, Platform, TabKind, Tag, TagKind, Tint};
 
 /// a normalized chat line, ready for a channel buffer.
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +50,16 @@ pub struct StreamEv {
     pub follow: bool,
 }
 
+/// a line bound for a virtual tab: the row itself plus its labels. `heat` is
+/// the server's number (feed rows only).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpecialLine {
+    pub tab: TabKind,
+    pub line: ChatLine,
+    pub tags: Vec<Tag>,
+    pub heat: f64,
+}
+
 /// whose lines a moderation event removes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -83,6 +93,17 @@ pub enum Event {
     Delete {
         line: Option<ChatLine>,
         del: Delete,
+    },
+    /// a mention-rule hit, whisper, DM or feed row for a virtual tab.
+    Special(SpecialLine),
+    /// a feed row's heat moved (`heat:updated`).
+    FeedHeat {
+        id: String,
+        heat: f64,
+    },
+    /// a feed row was hidden by moderation (`message:hidden`).
+    FeedHidden {
+        id: String,
     },
     /// several events from one frame, in order.
     Batch(Vec<Event>),
@@ -193,6 +214,21 @@ pub fn parse(raw: &str) -> Event {
             Event::Backfill(lines)
         }
         "youtube:delete" => youtube_delete_event(&v),
+        "mention:rule-match" => mention_event(&v),
+        "whisper:new" => whisper_event(&v, TabKind::Whispers),
+        "dm:new" => whisper_event(&v, TabKind::Whispers),
+        "new-message" => feed_row(&v).map(Event::Special).unwrap_or(Event::Ignore),
+        "heat:updated" => match (
+            str_or_num(&v, &["messageId", "message_id", "id"]),
+            v.get("newHeat").and_then(Value::as_f64),
+        ) {
+            (Some(id), Some(heat)) => Event::FeedHeat { id, heat },
+            _ => Event::Ignore,
+        },
+        "message:hidden" => match str_or_num(&v, &["id", "messageId"]) {
+            Some(id) => Event::FeedHidden { id },
+            None => Event::Ignore,
+        },
         "authenticated" => Event::Auth(true),
         "authentication_failed" => Event::Auth(false),
         "chat:send_kick_result" | "chat:send_youtube_result" => Event::SendResult {
@@ -290,6 +326,28 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
     })
 }
 
+/// a `{name: {url, provider, zeroWidth}}` ref map → refs (relay `hsEmotes`,
+/// feed `emote_refs`). cw stubs ({name, cw}, no url) carry nothing to draw —
+/// the word stays text rather than leak the hidden image.
+fn refs_from(v: Option<&Value>) -> Vec<Emote> {
+    let Some(map) = v.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    map.iter()
+        .take(MAX_REFS)
+        .filter_map(|(name, r)| {
+            let url = r.get("url").and_then(Value::as_str)?;
+            let provider = r
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .unwrap_or("heatsync");
+            let zw = r.get("zeroWidth").and_then(Value::as_bool).unwrap_or(false);
+            emote::msg_ref(name, url, provider, zw)
+        })
+        .collect()
+}
+
 /// most refs one message may carry — a hostile relay can't make us hold more.
 const MAX_REFS: usize = 64;
 
@@ -303,23 +361,8 @@ fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emot
             refs.push(e);
         }
     };
-    if let Some(map) = m.get("hsEmotes").and_then(Value::as_object) {
-        for (name, r) in map.iter().take(MAX_REFS) {
-            // cw stubs ({name, cw}, no url) carry nothing to draw — the word
-            // stays text rather than leak the hidden image.
-            let Some(url) = r.get("url").and_then(Value::as_str) else {
-                continue;
-            };
-            let provider = r
-                .get("provider")
-                .and_then(Value::as_str)
-                .filter(|p| !p.is_empty())
-                .unwrap_or("heatsync");
-            let zw = r.get("zeroWidth").and_then(Value::as_bool).unwrap_or(false);
-            if let Some(e) = emote::msg_ref(name, url, provider, zw) {
-                add(e);
-            }
-        }
+    for e in refs_from(m.get("hsEmotes")) {
+        add(e);
     }
     let mut text = content.to_string();
     match platform {
@@ -578,6 +621,159 @@ fn roomstate_event(v: &Value) -> Event {
             subs_only: flag("subsOnly"),
         },
     )
+}
+
+/// first present key as a string (numbers allowed — ids arrive either way).
+fn str_or_num(v: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| match v.get(*k)? {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
+fn platform_or_twitch(s: &str) -> Platform {
+    match s {
+        "kick" => Platform::Kick,
+        "youtube" | "yt" => Platform::Youtube,
+        _ => Platform::Twitch,
+    }
+}
+
+/// a bare chat line for a virtual tab.
+fn special_chat(
+    platform: Platform,
+    channel: String,
+    id: Option<String>,
+    user: String,
+    color: Option<String>,
+    content: String,
+    emotes: Vec<Emote>,
+) -> ChatLine {
+    ChatLine {
+        platform,
+        channel,
+        id,
+        user,
+        color,
+        badges: Vec::new(),
+        reply_to: None,
+        note: None,
+        content,
+        emotes,
+        stream: None,
+        extra: Extra::default(),
+        uid: None,
+    }
+}
+
+/// `mention:rule-match` {ruleId, pattern, channel, platform, username, snippet,
+/// url} → a mentions-tab line. the url is the server's deep link; we have no
+/// use for it in a terminal.
+fn mention_event(v: &Value) -> Event {
+    let platform = platform_or_twitch(v.get("platform").and_then(Value::as_str).unwrap_or(""));
+    let channel = field(v, "channel");
+    let user = field(v, "username");
+    let snippet = field(v, "snippet");
+    if user.is_empty() && snippet.is_empty() {
+        return Event::Ignore;
+    }
+    let tags = vec![
+        Tag::platform(),
+        Tag::new(&format!("[{channel}]"), TagKind::Origin),
+    ];
+    Event::Special(SpecialLine {
+        tab: TabKind::Mentions,
+        line: special_chat(platform, channel, None, user, None, snippet, Vec::new()),
+        tags,
+        heat: 0.0,
+    })
+}
+
+/// `whisper:new` {from_twitch_login, from_display_name, from_color,
+/// to_twitch_login, content, created_at} and `dm:new` {from_display_name,
+/// from_color, content, created_at, from_user_id}. the frame type picks the
+/// label; both land in the whispers tab.
+fn whisper_event(v: &Value, tab: TabKind) -> Event {
+    let is_dm = v.get("type").and_then(Value::as_str) == Some("dm:new");
+    let name = {
+        let d = field(v, "from_display_name");
+        if d.is_empty() {
+            field(v, "from_twitch_login")
+        } else {
+            d
+        }
+    };
+    let content = field(v, "content");
+    if name.is_empty() && content.is_empty() {
+        return Event::Ignore;
+    }
+    let color = v
+        .get("from_color")
+        .and_then(Value::as_str)
+        .filter(|s| s.starts_with('#') && (s.len() == 7 || s.len() == 4))
+        .map(str::to_string);
+    let tag = if is_dm {
+        Tag::new("[DM]", TagKind::Dm)
+    } else {
+        Tag::new("[whisper]", TagKind::Whisper)
+    };
+    Event::Special(SpecialLine {
+        tab,
+        line: special_chat(
+            Platform::Twitch,
+            String::new(),
+            None,
+            name,
+            color,
+            content,
+            Vec::new(),
+        ),
+        tags: vec![tag],
+        heat: 0.0,
+    })
+}
+
+/// the heatsync feed's `new-message` row (flat payload; `GET /api/messages`
+/// rows share the shape): base36_id, content, username / display_name,
+/// user_color, platform, heat, is_op, is_thread_op, emote_refs.
+pub fn feed_row(v: &Value) -> Option<SpecialLine> {
+    let id = str_or_num(v, &["base36_id", "id"])?;
+    let user = {
+        let d = field(v, "display_name");
+        if d.is_empty() {
+            field(v, "username")
+        } else {
+            d
+        }
+    };
+    let content = field(v, "content");
+    if user.is_empty() && content.is_empty() {
+        return None;
+    }
+    let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let role = if flag("is_thread_op") {
+        Tag::new("[OP]", TagKind::ThreadOp)
+    } else if flag("is_op") {
+        Tag::new("[OP]", TagKind::Op)
+    } else {
+        Tag::new("[RE]", TagKind::Reply)
+    };
+    let emotes = refs_from(v.get("emote_refs").or_else(|| v.get("emoteRefs")));
+    Some(SpecialLine {
+        tab: TabKind::Feed,
+        line: special_chat(
+            platform_or_twitch(v.get("platform").and_then(Value::as_str).unwrap_or("")),
+            String::new(),
+            Some(id),
+            user,
+            color_of(&json!({"color": v.get("user_color").cloned().unwrap_or(Value::Null)})),
+            content,
+            emotes,
+        ),
+        tags: vec![role, Tag::new("", TagKind::Heat)],
+        heat: v.get("heat").and_then(Value::as_f64).unwrap_or(0.0),
+    })
 }
 
 fn is_irc(v: &Value, kind: &str) -> bool {
@@ -1139,6 +1335,16 @@ pub fn part(platform: Platform, channel: &str) -> Vec<String> {
     .collect()
 }
 
+/// outbound: subscribe to the heatsync site feed ("new") — its `new-message`,
+/// `heat:updated` and `message:hidden` frames only reach joined sockets.
+pub fn feed_join() -> String {
+    json!({ "type": "feed:join", "feed": "new" }).to_string()
+}
+
+pub fn feed_leave() -> String {
+    json!({ "type": "feed:leave", "feed": "new" }).to_string()
+}
+
 /// outbound: keepalive, send every ~10s (server replies `pong`).
 pub fn heartbeat() -> String {
     json!({ "type": "presence:heartbeat" }).to_string()
@@ -1350,6 +1556,119 @@ mod tests {
         assert_eq!(chat(&raw).emotes.len(), MAX_REFS);
     }
 
+    fn special(raw: &str) -> SpecialLine {
+        match parse(raw) {
+            Event::Special(s) => s,
+            e => panic!("expected special, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn mention_rule_match_becomes_a_mentions_line() {
+        let s = special(
+            r##"{"type":"mention:rule-match","ruleId":7,"pattern":"mellen","channel":"xqc",
+            "platform":"kick","username":"bob","snippet":"hey mellen look","url":"https://heatsync.org/x"}"##,
+        );
+        assert_eq!(s.tab, TabKind::Mentions);
+        assert_eq!(s.line.platform, Platform::Kick);
+        assert_eq!(s.line.user, "bob");
+        assert_eq!(s.line.content, "hey mellen look");
+        assert_eq!(
+            s.tags,
+            vec![Tag::platform(), Tag::new("[xqc]", TagKind::Origin)]
+        );
+        assert!(matches!(
+            parse(r#"{"type":"mention:rule-match"}"#),
+            Event::Ignore
+        ));
+    }
+
+    #[test]
+    fn whisper_and_dm_land_in_the_whispers_tab_with_their_labels() {
+        let w = special(
+            r##"{"type":"whisper:new","from_twitch_login":"bob","from_display_name":"Bob",
+            "from_color":"#ff0000","to_twitch_login":"me","content":"psst","created_at":"x"}"##,
+        );
+        assert_eq!((w.tab, w.line.user.as_str()), (TabKind::Whispers, "Bob"));
+        assert_eq!(w.line.color.as_deref(), Some("#ff0000"));
+        assert_eq!(w.tags, vec![Tag::new("[whisper]", TagKind::Whisper)]);
+        let d = special(
+            r##"{"type":"dm:new","from_display_name":"Al","from_color":"nope","content":"yo","from_user_id":3}"##,
+        );
+        assert_eq!(d.tags, vec![Tag::new("[DM]", TagKind::Dm)]);
+        assert_eq!(d.line.color, None); // malformed color dropped
+                                        // login stands in when there's no display name
+        let l = special(r#"{"type":"whisper:new","from_twitch_login":"bob","content":"x"}"#);
+        assert_eq!(l.line.user, "bob");
+    }
+
+    #[test]
+    fn feed_row_parses_roles_heat_and_refs() {
+        let s = special(
+            r##"{"type":"new-message","base36_id":"00004a","content":"hi Pog","username":"u",
+            "display_name":"U","user_color":"#FF4500","platform":"twitch","heat":42.5,
+            "is_op":true,"is_thread_op":true,"reply_to":null,
+            "emote_refs":{"Pog":{"url":"https://cdn.hs/p.webp","provider":"7tv"}}}"##,
+        );
+        assert_eq!(s.tab, TabKind::Feed);
+        assert_eq!(s.line.id.as_deref(), Some("00004a"));
+        assert_eq!(s.line.user, "U");
+        assert_eq!(s.line.color.as_deref(), Some("#FF4500"));
+        assert_eq!(s.heat, 42.5);
+        assert_eq!(s.tags[0], Tag::new("[OP]", TagKind::ThreadOp));
+        assert_eq!(s.tags[1].kind, TagKind::Heat);
+        assert_eq!(s.line.emotes.len(), 1);
+        for (flags, want) in [
+            (r#""is_op":true"#, TagKind::Op),
+            (r#""is_op":false"#, TagKind::Reply),
+            (r#""x":1"#, TagKind::Reply),
+        ] {
+            let raw = format!(
+                r#"{{"type":"new-message","base36_id":"1","content":"c","username":"u",{flags}}}"#
+            );
+            assert_eq!(special(&raw).tags[0].kind, want, "{flags}");
+        }
+        // no id → nothing to update later → dropped
+        assert!(matches!(
+            parse(r#"{"type":"new-message","content":"c","username":"u"}"#),
+            Event::Ignore
+        ));
+    }
+
+    #[test]
+    fn feed_heat_and_hidden_name_the_row() {
+        assert_eq!(
+            parse(r#"{"type":"heat:updated","messageId":"00004a","newHeat":9.5}"#),
+            Event::FeedHeat {
+                id: "00004a".into(),
+                heat: 9.5
+            }
+        );
+        assert_eq!(
+            parse(r#"{"type":"heat:updated","messageId":77,"newHeat":1}"#),
+            Event::FeedHeat {
+                id: "77".into(),
+                heat: 1.0
+            }
+        );
+        assert_eq!(
+            parse(r#"{"type":"message:hidden","id":"00004a"}"#),
+            Event::FeedHidden {
+                id: "00004a".into()
+            }
+        );
+        assert!(matches!(parse(r#"{"type":"heat:updated"}"#), Event::Ignore));
+    }
+
+    #[test]
+    fn special_text_is_sanitized() {
+        let s = special(
+            "{\"type\":\"mention:rule-match\",\"channel\":\"c\",\"username\":\"u\",\
+             \"snippet\":\"hi\\u001b]0;x\\u0007\"}",
+        );
+        assert_eq!(s.line.content, "hi]0;x");
+    }
+
     #[test]
     fn twitch_badge_string_parses_and_dedupes() {
         let raw = r##"{"type":"irc:message","channel":"c","message":{
@@ -1481,6 +1800,12 @@ mod tests {
         let seen: Vec<(char, u16)> = kick.iter().map(|b| (b.glyph(), b.ver)).collect();
         assert_eq!(seen, [('O', 1), ('✦', 3), ('M', 0)]);
         assert!(badges_from(Some(&json!(7))).is_empty());
+    }
+
+    #[test]
+    fn feed_frames_are_correct() {
+        assert_eq!(feed_join(), r#"{"feed":"new","type":"feed:join"}"#);
+        assert_eq!(feed_leave(), r#"{"feed":"new","type":"feed:leave"}"#);
     }
 
     #[test]

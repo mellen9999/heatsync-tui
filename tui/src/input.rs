@@ -1,7 +1,7 @@
 use crate::app::{App, Feed, InputMode};
 use crate::feed::{spawn_emote_fetch, spawn_history, spawn_pin};
 use crate::net::Sub;
-use crate::{hsauth, key, modcmd, net, picker};
+use crate::{hsauth, key, modcmd, net, picker, special};
 use crate::{parse_sub, parse_tab, save_state, yt_video_id};
 use crossterm::event::{KeyCode, KeyModifiers};
 use heatsync_core::complete::Completion;
@@ -82,7 +82,12 @@ pub(crate) fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                 KeyCode::Char('a') | KeyCode::Char('o') => open_picker(app),
                 KeyCode::Char('x') => manage_delete(app),
                 KeyCode::Char('e') => {
-                    if !app.channels.is_empty() {
+                    // a virtual tab has no sources to retype.
+                    let real = app
+                        .channels
+                        .get(app.manage_cursor)
+                        .is_some_and(|c| !c.kind.is_special());
+                    if real {
                         app.mode = InputMode::SlotPick;
                         app.status = None;
                     }
@@ -140,6 +145,11 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         }
         KeyCode::Char('o') => {
             open_picker(app);
+            Flow::Continue
+        }
+        // on the mentions tab: jump to where the newest mention came from.
+        KeyCode::Enter => {
+            special::enter(app);
             Flow::Continue
         }
         KeyCode::Char('x') => {
@@ -448,6 +458,7 @@ fn manage_delete(app: &mut App) {
     }
     let i = app.manage_cursor.min(app.channels.len() - 1);
     part_subs(&app.out, &app.channels[i]);
+    special::on_close(app, i);
     app.channels.remove(i);
     app.emotes.remove(i);
     let last = app.channels.len().saturating_sub(1);
@@ -469,6 +480,10 @@ fn manage_move(app: &mut App, delta: isize) {
         return;
     }
     let j = j as usize;
+    // virtual tabs stay pinned left, in order — nothing crosses or moves them.
+    if app.channels[i].kind.is_special() || app.channels[j].kind.is_special() {
+        return;
+    }
     app.channels.swap(i, j);
     app.emotes.swap(i, j);
     if app.focus == i {
@@ -517,6 +532,7 @@ fn close_channel(app: &mut App) {
         return;
     }
     part_subs(&app.out, &app.channels[app.focus]);
+    special::on_close(app, app.focus);
     app.channels.remove(app.focus);
     app.emotes.remove(app.focus);
     app.focus = app.focus.min(app.channels.len().saturating_sub(1));
@@ -549,6 +565,11 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
             part_channel(app, which.as_deref());
             return Flow::Continue;
         }
+        slash::Cmd::Tab(kind) => {
+            app.line.accept();
+            special::open(app, kind);
+            return Flow::Continue;
+        }
         slash::Cmd::Quit => return Flow::Quit,
         slash::Cmd::Usage(u) => {
             // keep the draft so the channel can just be appended
@@ -558,6 +579,12 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
         slash::Cmd::Send(t) => t,
     };
     if text.is_empty() || app.channels.is_empty() {
+        return Flow::Continue;
+    }
+    // a virtual tab has no channel to send to.
+    let kind = app.channels[app.focus].kind;
+    if kind.is_special() {
+        special::send(app, kind, &text);
         return Flow::Continue;
     }
     // /ban /unban /timeout /delete: twitch no longer runs these as chat text,
@@ -584,6 +611,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                 note: None,
                 extra: Default::default(),
                 emotes: None,
+                tags: Vec::new(),
                 heat: 0.0,
                 uid: None,
             },

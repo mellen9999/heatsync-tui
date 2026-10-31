@@ -110,4 +110,6 @@ pub(crate) struct App {
     pub(crate) streams: StreamEvents,
     /// last-seen room modes per channel, for `slow mode 30s`-style notes.
     pub(crate) rooms: RoomModes,
+    /// mention log + feed backlog channel for the virtual tabs.
+    pub(crate) special: crate::special::State,
 }

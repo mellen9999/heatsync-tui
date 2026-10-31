@@ -162,7 +162,11 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
                 break;
             }
             let label = fit(
-                format!(" {}{} {:.0} ", ch.name, plus(ch), ch.heat),
+                if ch.kind.is_special() {
+                    format!(" {} ", ch.name)
+                } else {
+                    format!(" {}{} {:.0} ", ch.name, plus(ch), ch.heat)
+                },
                 area.width,
             );
             let row = Rect {
@@ -179,16 +183,18 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
     } else {
         let mut spans = Vec::new();
         for (i, ch) in app.channels.iter().enumerate() {
-            spans.push(Span::styled(
+            let label = if ch.kind.is_special() {
+                format!(" {} ", ch.name)
+            } else {
                 format!(
                     " {}·{}{} {:.0} ",
                     ch.name,
                     ch.platform.tag(),
                     plus(ch),
                     ch.heat
-                ),
-                tab_style(i, ch),
-            ));
+                )
+            };
+            spans.push(Span::styled(label, tab_style(i, ch)));
             spans.push(Span::raw(" "));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);

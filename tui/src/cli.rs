@@ -445,7 +445,7 @@ pub fn probe(args: &[String]) -> std::io::Result<()> {
             .collect()
     };
     eprintln!("probing {} channel(s) for 8s…", subs.len());
-    let (rx, _out) = net::spawn(subs, None);
+    let (rx, _out) = net::spawn(subs, None, false);
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut n = 0u32;
     while let Some(rem) = deadline.checked_duration_since(Instant::now()) {

@@ -4,7 +4,7 @@ use crate::paints::UserLook;
 use crate::palette;
 use heatsync_core::emote::{segments_with, EmoteSet, Segment};
 use heatsync_core::paint::Paint;
-use heatsync_core::{Badge, Message, Platform};
+use heatsync_core::{Badge, Message, Platform, Tag, TagKind};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -391,6 +391,33 @@ fn name(b: &mut Rows, user: &str, color: Color, paint: Option<&Paint>) {
     }
 }
 
+/// a line's leading label → its text and look. the ladder / hues are the
+/// ANSI-0-7 palette: heat numbers wear their tier, `[OP]` of a thread is
+/// magenta, whispers magenta, DMs cyan, mention origins dim.
+fn tag_look(t: &Tag, m: &Message) -> (String, Style) {
+    match t.kind {
+        TagKind::Origin => (t.text.clone(), palette::DIM),
+        TagKind::Platform => (
+            format!("[{}]", m.platform.letter()),
+            palette::platform(m.platform),
+        ),
+        TagKind::Op => (t.text.clone(), palette::TEXT),
+        TagKind::ThreadOp => (
+            t.text.clone(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        TagKind::Reply => (t.text.clone(), palette::DIM),
+        TagKind::Heat => (
+            format!("{:.0}", m.heat),
+            palette::heat(heatsync_core::heat::Tier::of(m.heat)),
+        ),
+        TagKind::Whisper => (t.text.clone(), Style::default().fg(Color::Magenta)),
+        TagKind::Dm => (t.text.clone(), Style::default().fg(Color::Cyan)),
+    }
+}
+
 /// lay a message out as wrapped visual rows: badges + user prefix on the
 /// first, indented continuations after, emote cells reserved wherever their
 /// stack lands.
@@ -410,6 +437,12 @@ pub(crate) fn layout_message(
         .unwrap_or(Color::White);
     let paint = look.user.and_then(|l| l.paint.as_ref());
     let mut b = Rows::new(maxw);
+    for t in &m.tags {
+        let (text, style) = tag_look(t, m);
+        let w = UnicodeWidthStr::width(text.as_str()) as u16;
+        b.prefix(Span::styled(text, style), w);
+        b.prefix(Span::raw(" "), 1);
+    }
     // dim `HH:MM` first when timestamps are on.
     let mut hang = 0;
     if look.stamps && m.extra.ts > 0 {
@@ -639,9 +672,32 @@ mod wrap_tests {
             note: None,
             extra: Default::default(),
             emotes: None,
+            tags: Vec::new(),
             heat: 0.0,
             uid: None,
         }
+    }
+
+    #[test]
+    fn tags_lead_the_row_in_order() {
+        use heatsync_core::{Tag, TagKind};
+        let set = EmoteSet::new();
+        let mut m = msg("hello");
+        m.heat = 120.0;
+        m.tags = vec![
+            Tag::platform(),
+            Tag::new("[xqc]", TagKind::Origin),
+            Tag::new("[OP]", TagKind::ThreadOp),
+            Tag::new("", TagKind::Heat),
+        ];
+        let rows = layout_message(&m, &set, EmoteMode::Text, 60, &Look::default());
+        assert_eq!(flat(&rows)[0], "[T] [xqc] [OP] 120 u: hello");
+        // the thread [OP] is magenta, the heat number wears its tier
+        let sp = &rows[0].line.spans;
+        let of = |t: &str| sp.iter().find(|s| s.content == t).unwrap().style;
+        assert_eq!(of("[OP]").fg, Some(Color::Magenta));
+        assert_eq!(of("120").fg, Some(Color::Yellow));
+        assert_eq!(of("[xqc]"), palette::DIM);
     }
 
     fn flat(rows: &[RowPlan]) -> Vec<String> {

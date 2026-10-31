@@ -57,6 +57,8 @@ pub struct Config {
     /// open tabs, in order — restored on next launch (unless CLI args
     /// override). each tab is one or more `+`-merged (platform, channel) subs.
     pub channels: Vec<Vec<(Platform, String)>>,
+    /// open virtual tabs (mentions / feed / whispers), in pin order.
+    pub special: Vec<heatsync_core::TabKind>,
 }
 
 /// serialize a channel as `twitch:name` / `kick:name` / `yt:videoid`.
@@ -80,6 +82,18 @@ fn parse_channels(v: &str) -> Vec<Vec<(Platform, String)>> {
         })
         .filter(|t: &Vec<_>| !t.is_empty())
         .collect()
+}
+
+/// comma-separated virtual tab names, pin order, no repeats; unknown names drop.
+fn parse_special(v: &str) -> Vec<heatsync_core::TabKind> {
+    let mut out: Vec<heatsync_core::TabKind> = Vec::new();
+    for k in v.split(',').filter_map(heatsync_core::TabKind::parse) {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out.sort();
+    out
 }
 
 /// parse one `twitch:name` / `kick:name` / `yt:id` / `name` token (bare = twitch).
@@ -169,6 +183,7 @@ pub fn load() -> Config {
         tab_pos: TabPos::Top,
         timestamps: false,
         channels: Vec::new(),
+        special: Vec::new(),
     };
     if let Some(p) = path() {
         if let Ok(text) = fs::read_to_string(&p) {
@@ -182,6 +197,7 @@ pub fn load() -> Config {
                         }
                         "timestamps" => cfg.timestamps = matches!(v.trim(), "on" | "true" | "1"),
                         "channels" => cfg.channels = parse_channels(v),
+                        "special" => cfg.special = parse_special(v),
                         _ => {}
                     }
                 }
@@ -215,6 +231,10 @@ pub fn save(cfg: &Config) {
                 .join(",");
             out.push_str(&format!("channels={joined}\n"));
         }
+        if !cfg.special.is_empty() {
+            let names: Vec<&str> = cfg.special.iter().map(|k| k.name()).collect();
+            out.push_str(&format!("special={}\n", names.join(",")));
+        }
         let _ = fs::write(&p, out);
     }
 }
@@ -222,6 +242,18 @@ pub fn save(cfg: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn special_tabs_parse_sorted_deduped_and_drop_unknowns() {
+        use heatsync_core::TabKind::*;
+        assert_eq!(
+            parse_special("feed, mentions,feed,bogus,"),
+            vec![Mentions, Feed]
+        );
+        assert_eq!(parse_special("whispers,mentions"), vec![Mentions, Whispers]);
+        assert!(parse_special("").is_empty());
+        assert!(parse_special("channel").is_empty());
+    }
 
     #[test]
     fn space_typed_spec_heals_into_merge() {

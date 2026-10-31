@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use heatsync_core::proto::{self, Event};
+use heatsync_core::proto::{self, Event, SpecialLine};
 use heatsync_core::streamev::StreamEvents;
 use heatsync_core::Platform;
 use tungstenite::stream::MaybeTlsStream;
@@ -46,6 +46,9 @@ pub enum Outbound {
         platform: Platform,
         channel: String,
     },
+    /// the feed tab opened (true) or closed (false) — joins / leaves the site
+    /// feed, and is re-joined on every reconnect while on.
+    Feed(bool),
 }
 
 /// the app's handle for sending outbound frames.
@@ -54,10 +57,10 @@ pub type Tx = mpsc::Sender<Outbound>;
 /// spawn the live feed. returns the inbound chat receiver and an outbound sender.
 /// the thread runs until the inbound receiver is dropped (app exit). if `token`
 /// is set, the thread authenticates on every (re)connect so sends are allowed.
-pub fn spawn(subs: Vec<Sub>, token: Option<String>) -> (Receiver<ChatEvent>, Tx) {
+pub fn spawn(subs: Vec<Sub>, token: Option<String>, feed: bool) -> (Receiver<ChatEvent>, Tx) {
     let (tx, rx) = mpsc::channel();
     let (out_tx, out_rx) = mpsc::channel();
-    thread::spawn(move || run(subs, token, tx, out_rx));
+    thread::spawn(move || run(subs, token, feed, tx, out_rx));
     (rx, out_tx)
 }
 
@@ -75,6 +78,15 @@ pub enum ChatEvent {
     Pin(Platform, String, Option<heatsync_core::Pin>),
     /// a twitch channel's chat modes (roomstate).
     Room(String, proto::RoomState),
+    /// a mention hit, whisper, DM or feed row for a virtual tab.
+    Special(SpecialLine),
+    FeedHeat {
+        id: String,
+        heat: f64,
+    },
+    FeedHidden {
+        id: String,
+    },
     Connected,
     Disconnected,
     Auth(bool),
@@ -104,6 +116,9 @@ fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
             line.is_none_or(|l| tx.send(ChatEvent::Line(l)).is_ok())
                 && tx.send(ChatEvent::Delete(del)).is_ok()
         }
+        Event::Special(s) => tx.send(ChatEvent::Special(s)).is_ok(),
+        Event::FeedHeat { id, heat } => tx.send(ChatEvent::FeedHeat { id, heat }).is_ok(),
+        Event::FeedHidden { id } => tx.send(ChatEvent::FeedHidden { id }).is_ok(),
         Event::Batch(es) => es.into_iter().all(|e| forward(e, tx)),
         Event::Auth(ok) => {
             let _ = tx.send(ChatEvent::Auth(ok));
@@ -122,11 +137,17 @@ fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
     }
 }
 
-fn run(mut subs: Vec<Sub>, token: Option<String>, tx: Sender<ChatEvent>, out: Receiver<Outbound>) {
+fn run(
+    mut subs: Vec<Sub>,
+    token: Option<String>,
+    mut feed: bool,
+    tx: Sender<ChatEvent>,
+    out: Receiver<Outbound>,
+) {
     let mut backoff = Duration::from_secs(1);
     let mut req = 0u64;
     loop {
-        match session(&mut subs, &token, &tx, &out, &mut req) {
+        match session(&mut subs, &token, &mut feed, &tx, &out, &mut req) {
             // receiver gone → app closed, stop the thread.
             SessionEnd::ReceiverGone => return,
             SessionEnd::Dropped => {
@@ -146,6 +167,7 @@ enum SessionEnd {
 fn session(
     subs: &mut Vec<Sub>,
     token: &Option<String>,
+    feed: &mut bool,
     tx: &Sender<ChatEvent>,
     out: &Receiver<Outbound>,
     req: &mut u64,
@@ -169,6 +191,10 @@ fn session(
     let mut queue: VecDeque<String> = subs.iter().flat_map(|(p, c)| proto::join(*p, c)).collect();
     let mut fast = false;
     let mut last_frame = Instant::now();
+    // the server forgets feed joins when the socket drops — re-join.
+    if *feed {
+        queue.push_back(proto::feed_join());
+    }
     if tx.send(ChatEvent::Connected).is_err() {
         return SessionEnd::ReceiverGone;
     }
@@ -245,6 +271,14 @@ fn session(
                 Outbound::Part { platform, channel } => {
                     subs.retain(|(p, c)| !(*p == platform && c == &channel));
                     proto::part(platform, &channel)
+                }
+                Outbound::Feed(on) => {
+                    *feed = on;
+                    vec![if on {
+                        proto::feed_join()
+                    } else {
+                        proto::feed_leave()
+                    }]
                 }
             };
             queue.extend(frames);

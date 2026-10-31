@@ -14,6 +14,8 @@ pub enum Cmd {
     /// leave a named channel, or the focused one when `None`.
     Part(Option<String>),
     Quit,
+    /// open (or focus) a virtual tab: `/mentions`, `/feed`, `/whispers`.
+    Tab(crate::TabKind),
     /// send these bytes to the platform as an ordinary message.
     Send(String),
     /// a client command we recognise but that was typed without its argument.
@@ -42,6 +44,10 @@ pub fn parse(input: &str) -> Cmd {
         },
         "part" | "leave" | "close" => Cmd::Part(arg.map(str::to_string)),
         "quit" | "q" | "exit" => Cmd::Quit,
+        "mentions" | "feed" | "whispers" => match crate::TabKind::parse(&verb) {
+            Some(k) => Cmd::Tab(k),
+            None => Cmd::Send(line.to_string()),
+        },
         // not ours — the platform's problem, and it must arrive untouched.
         _ => Cmd::Send(line.to_string()),
     }
@@ -75,6 +81,16 @@ mod tests {
         assert_eq!(parse("/part xqc"), Cmd::Part(Some("xqc".into())));
         assert_eq!(parse("/quit"), Cmd::Quit);
         assert_eq!(parse("/q"), Cmd::Quit);
+    }
+
+    #[test]
+    fn virtual_tabs_open_by_name() {
+        use crate::TabKind;
+        assert_eq!(parse("/mentions"), Cmd::Tab(TabKind::Mentions));
+        assert_eq!(parse("/feed"), Cmd::Tab(TabKind::Feed));
+        assert_eq!(parse("/Whispers"), Cmd::Tab(TabKind::Whispers));
+        // twitch's own /w stays the platform's
+        assert_eq!(parse("/w bob hi"), Cmd::Send("/w bob hi".into()));
     }
 
     #[test]

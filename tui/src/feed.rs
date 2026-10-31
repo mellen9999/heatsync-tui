@@ -3,7 +3,9 @@ use crate::emote::fb::FbEmotes;
 use crate::emote::render::EmoteStore;
 use crate::http;
 use crate::layout::{each_stack, mentions_any, replies_to_me};
+use crate::mentions::Mention;
 use crate::net::ChatEvent;
+use crate::special;
 use heatsync_core::emote::EmoteSet;
 use heatsync_core::proto::ChatLine;
 use heatsync_core::{Extra, Message, Platform};
@@ -226,6 +228,7 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
         && !me.iter().any(|n| l.user.eq_ignore_ascii_case(n))
         && (mentions_any(&l.content, me) || replies_to_me(l.reply_to.as_deref(), me));
     let evented = l.stream.is_some();
+    let chan = l.channel.clone();
     channels[i].record(
         Message {
             platform: l.platform,
@@ -242,16 +245,30 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
                 ..l.extra
             },
             emotes: refs,
+            tags: Vec::new(),
             heat: 0.0,
             uid: l.uid,
         },
         now,
     );
+    let mention = pinged
+        .then(|| channels[i].messages.back())
+        .flatten()
+        .map(|m| Mention {
+            platform: m.platform,
+            channel: chan,
+            user: m.user.clone(),
+            color: m.color.clone(),
+            text: m.text.clone(),
+        });
     if pinged {
         channels[i].ping();
     }
     if evented {
         channels[i].flag_event();
+    }
+    if let Some(m) = mention {
+        special::mention(app, m);
     }
 }
 
@@ -292,6 +309,8 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
     let now = start.elapsed().as_millis() as u64;
     let mut got = false;
     let mut evs = Vec::new();
+    // virtual-tab events are queued and run once the channel borrows are done.
+    let mut specials: Vec<ChatEvent> = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         evs.push(ev);
     }
@@ -324,6 +343,9 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                     }
                 }
             }
+            ev @ (ChatEvent::Special(_)
+            | ChatEvent::FeedHeat { .. }
+            | ChatEvent::FeedHidden { .. }) => specials.push(ev),
             ChatEvent::Color { id, color } => app.paints.set_color(&id, &color),
             ChatEvent::Cosmetic(ids) => app.paints.invalidate(&ids),
             ChatEvent::Connected | ChatEvent::Disconnected => {
@@ -350,6 +372,10 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
         got = true;
         deliver(app, l, now);
     }
+    for ev in specials {
+        special::event(app, ev);
+    }
+    special::drain_backlog(app);
     got
 }
 
@@ -380,6 +406,7 @@ pub(crate) fn drain_twitch(app: &mut App) {
                     }),
                     extra: Default::default(),
                     emotes: None,
+                    tags: Vec::new(),
                     heat: 0.0,
                     uid: None,
                 });
@@ -427,6 +454,7 @@ pub(crate) fn drain_hs(app: &mut App) {
                 }),
                 extra: Default::default(),
                 emotes: None,
+                tags: Vec::new(),
                 heat: 0.0,
                 uid: None,
             });

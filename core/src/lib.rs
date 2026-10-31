@@ -44,6 +44,91 @@ impl Platform {
     }
 }
 
+/// what a tab shows. special tabs are virtual — fed by the app, not by joining
+/// a channel — and pin left of the channel tabs in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TabKind {
+    Channel,
+    Mentions,
+    Feed,
+    Whispers,
+}
+
+impl TabKind {
+    /// every virtual tab, in pin order.
+    pub const SPECIAL: [TabKind; 3] = [TabKind::Mentions, TabKind::Feed, TabKind::Whispers];
+
+    /// the tab's label and its config / slash-command name.
+    pub fn name(self) -> &'static str {
+        match self {
+            TabKind::Channel => "channel",
+            TabKind::Mentions => "mentions",
+            TabKind::Feed => "feed",
+            TabKind::Whispers => "whispers",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<TabKind> {
+        TabKind::SPECIAL
+            .into_iter()
+            .find(|k| k.name().eq_ignore_ascii_case(s.trim()))
+    }
+
+    pub fn is_special(self) -> bool {
+        self != TabKind::Channel
+    }
+}
+
+/// a leading label on a line: where it came from, or what kind of row it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tag {
+    pub text: String,
+    pub kind: TagKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TagKind {
+    /// the source channel of a mention — dim.
+    Origin,
+    /// the line's platform, as `[T]` / `[K]` / `[Y]`, in the platform's hue.
+    Platform,
+    /// feed: a top-level post / the thread starter (magenta) / a reply.
+    Op,
+    ThreadOp,
+    Reply,
+    /// feed: the row's heat number, in its heat tier's look (text unused —
+    /// the number is read off `Message::heat` so updates land in place).
+    Heat,
+    Whisper,
+    Dm,
+}
+
+impl Tag {
+    pub fn new(text: &str, kind: TagKind) -> Tag {
+        Tag {
+            text: text.to_string(),
+            kind,
+        }
+    }
+
+    /// `[T]` / `[K]` / `[Y]`.
+    pub fn platform() -> Tag {
+        Tag::new("", TagKind::Platform)
+    }
+}
+
+impl Platform {
+    /// one-letter label for line prefixes.
+    pub fn letter(self) -> char {
+        match self {
+            Platform::Twitch => 'T',
+            Platform::Kick => 'K',
+            Platform::Youtube => 'Y',
+        }
+    }
+}
+
+/// a user role badge, normalized across platforms. twitch sends
 /// what a badge is, normalized across platforms. twitch sends
 /// `"broadcaster/1,moderator/1"`, kick sends `[{name, version}]` — both parse
 /// into this one vocabulary (the extension's BADGE_SHORT set). a badge we
@@ -257,6 +342,9 @@ pub struct Message {
     /// this line's own emote refs (see [`emote::segments_with`]), built once
     /// when the line lands; None for lines that carry none (history, system).
     pub emotes: Option<std::sync::Arc<emote::EmoteSet>>,
+    /// leading labels (mention origin, feed `[OP]`, `[whisper]`…); empty on
+    /// ordinary chat.
+    pub tags: Vec<Tag>,
     pub heat: f64,
 }
 
@@ -280,6 +368,8 @@ impl Message {
 /// heat is a decaying counter driven by message arrivals.
 #[derive(Clone, Debug)]
 pub struct Channel {
+    /// a real channel, or one of the virtual tabs (see [`TabKind`]).
+    pub kind: TabKind,
     pub name: String,
     /// primary source — sends target it, and it leads the tab label.
     pub platform: Platform,
@@ -319,6 +409,7 @@ pub enum Unread {
 impl Channel {
     pub fn new(name: &str, platform: Platform, cap: usize) -> Channel {
         Channel {
+            kind: TabKind::Channel,
             name: name.to_string(),
             platform,
             extra: Vec::new(),
@@ -333,6 +424,26 @@ impl Channel {
             seq: 0,
             cap,
         }
+    }
+
+    /// a virtual tab. it joins nothing: `subs()` is empty, so no line ever
+    /// matches it and no part / emote / history call is made for it.
+    pub fn special(kind: TabKind, cap: usize) -> Channel {
+        Channel {
+            kind,
+            ..Channel::new(kind.name(), Platform::Twitch, cap)
+        }
+    }
+
+    /// append a line to a virtual tab: counts as unread, but keeps the row's
+    /// own heat (a feed row's heat is the server's, not ours).
+    pub fn deliver(&mut self, msg: Message) {
+        if self.messages.len() == self.cap {
+            self.messages.pop_front();
+        }
+        self.messages.push_back(msg);
+        self.seq += 1;
+        self.unread = self.unread.saturating_add(1);
     }
 
     /// the tab's unread state.
@@ -421,7 +532,9 @@ impl Channel {
 
     /// every source feeding this tab, primary first.
     pub fn subs(&self) -> impl Iterator<Item = (Platform, &str)> {
-        std::iter::once((self.platform, self.name.as_str()))
+        // a virtual tab has no sources — it must never match a line or be parted.
+        let own = (self.kind == TabKind::Channel).then_some((self.platform, self.name.as_str()));
+        own.into_iter()
             .chain(self.extra.iter().map(|(p, n)| (*p, n.as_str())))
     }
 
@@ -631,6 +744,7 @@ mod channel_tests {
             note: None,
             extra: Default::default(),
             emotes: None,
+            tags: Vec::new(),
             heat: 0.0,
             uid: None,
         }
@@ -682,5 +796,30 @@ mod channel_tests {
         ch.backfill(vec![msg("a", "x")]);
         assert_eq!(ch.heat, 0.0);
         assert_eq!(ch.messages[0].heat, 0.0);
+    }
+
+    #[test]
+    fn special_tabs_join_nothing_and_match_nothing() {
+        let mut c = Channel::special(TabKind::Mentions, 10);
+        assert_eq!(c.kind, TabKind::Mentions);
+        assert_eq!(c.subs().count(), 0);
+        assert!(!c.matches(Platform::Twitch, "mentions")); // not even its own name
+        let mut m = msg("bob", "hey");
+        m.heat = 42.0;
+        c.deliver(m);
+        assert_eq!(c.messages[0].heat, 42.0, "row keeps its own heat");
+        assert_eq!(c.heat, 0.0);
+        assert_eq!(c.unread(), Unread::Chat);
+        c.ping();
+        assert_eq!(c.unread(), Unread::Ping);
+    }
+
+    #[test]
+    fn tab_kinds_parse_and_pin_in_order() {
+        assert_eq!(TabKind::parse("Feed"), Some(TabKind::Feed));
+        assert_eq!(TabKind::parse("xqc"), None);
+        assert_eq!(TabKind::parse("channel"), None);
+        assert!(TabKind::Mentions < TabKind::Feed && TabKind::Feed < TabKind::Whispers);
+        assert!(!TabKind::Channel.is_special());
     }
 }
