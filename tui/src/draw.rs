@@ -8,6 +8,7 @@ use heatsync_core::edit;
 use heatsync_core::emote::{segments, EmoteSet, Segment};
 use heatsync_core::heat::Tier;
 use heatsync_core::scroll;
+use heatsync_core::TabKind;
 use heatsync_core::{Channel, Platform};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Modifier;
@@ -525,22 +526,32 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // Insert mode → the message composer for the focused channel.
     if app.mode == InputMode::Insert && !app.channels.is_empty() {
         let ch = &app.channels[app.focus];
-        // read-only only when there's genuinely no send path for this platform:
-        // twitch needs the user's own token; kick can also relay via the ws.
-        // the mock feed echoes locally, so it always composes.
-        let readonly = match (&app.feed, ch.platform) {
-            (Feed::Mock(_), _) => false,
-            (_, Platform::Twitch) => app.twitch_tx.is_none(),
-            (_, Platform::Kick) => app.kick_tx.is_none() && app.out.is_none(),
-            (_, Platform::Youtube) => app.out.is_none(),
+        // read-only only when there's genuinely no send path — the same order
+        // send_line tries: heatsync login, then the user's own token, then the
+        // ws relay. the mock feed echoes locally, so it always composes.
+        let hs = app.hs.is_some();
+        let readonly = match (&app.feed, ch.kind, ch.platform) {
+            (Feed::Mock(_), ..) => false,
+            // mentions still takes slash commands.
+            (_, TabKind::Mentions, _) => false,
+            (_, TabKind::Feed | TabKind::Whispers, _) => !hs,
+            (_, _, Platform::Twitch) => !hs && app.twitch_tx.is_none(),
+            (_, _, Platform::Kick) => !hs && app.kick_tx.is_none() && app.out.is_none(),
+            (_, _, Platform::Youtube) => app.out.is_none() || app.special.ws_cli,
         };
         // the tag names the mode as well as the target, so `esc` never leaves
         // you guessing whether a keystroke will type or command.
         let normal = app.line.mode() == edit::Mode::Normal;
-        let prompt = if normal {
-            format!(" {}·{} NORMAL ", ch.name, ch.platform.tag())
+        // a virtual tab has no platform, so it carries no ·tw.
+        let target = if ch.kind.is_special() {
+            ch.name.clone()
         } else {
-            format!(" {}·{} ", ch.name, ch.platform.tag())
+            format!("{}·{}", ch.name, ch.platform.tag())
+        };
+        let prompt = if normal {
+            format!(" {target} NORMAL ")
+        } else {
+            format!(" {target} ")
         };
         let tag = palette::TAG;
         let mut spans = vec![
@@ -551,7 +562,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         if let Some((_, user)) = &app.reply {
             spans.push(Span::styled(format!("↪@{user} "), palette::DIM_TAG));
         }
-        if readonly {
+        // the warning stands in for an empty line only — whatever is typed
+        // (a /join, a /w) always stays visible.
+        if readonly && app.line.text().is_empty() {
             spans.push(Span::styled(
                 "read-only — no send token · esc",
                 palette::WARN,
@@ -583,10 +596,19 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             if let Some(msg) = &app.status {
                 spans.push(Span::styled(format!("   {msg}"), palette::WARN));
             } else if app.line.is_empty() && !normal {
-                spans.push(Span::styled(
-                    "   tab completes emotes/@users  ·  /join /part /quit  ·  text goes to chat",
-                    palette::DIM,
-                ));
+                let hint = match ch.kind {
+                    TabKind::Feed => "   text posts to the feed  ·  /op /re  ·  r on a row replies",
+                    TabKind::Whispers => {
+                        "   /w <user> <msg>  ·  /dm <user> <msg>  ·  r on a row replies"
+                    }
+                    TabKind::Mentions => {
+                        "   commands only  ·  /join /w /dm  ·  esc, enter jumps to the source"
+                    }
+                    TabKind::Channel => {
+                        "   tab completes emotes/@users  ·  /join /part /quit  ·  text goes to chat"
+                    }
+                };
+                spans.push(Span::styled(hint, palette::DIM));
             } else if normal {
                 spans.push(Span::styled("   kj history  esc leave", palette::DIM));
             }
