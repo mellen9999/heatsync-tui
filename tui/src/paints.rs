@@ -3,6 +3,7 @@
 //! tick, merges finished batches and starts the next one. drawing only ever
 //! reads the cache — it never waits on the network.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -14,6 +15,8 @@ use crate::http;
 
 /// resolved entries kept; the oldest go first.
 const CACHE_CAP: usize = 4096;
+/// live name colors kept by username.
+const NAMES_CAP: usize = 1024;
 /// ids waiting for a batch — a raid's worth of new chatters is bounded.
 const PENDING_CAP: usize = 512;
 /// the server's per-request id limit.
@@ -37,6 +40,10 @@ pub(crate) struct Paints {
     known: HashMap<String, UserLook>,
     /// insertion order of `known`, for eviction.
     order: VecDeque<String>,
+    /// lowercase username → live `profile:color`, for lines with no sender id
+    /// (kick/youtube frames may omit it). newest wins.
+    names: HashMap<String, String>,
+    names_order: VecDeque<String>,
     pending: Vec<String>,
     queued: HashSet<String>,
     inflight: bool,
@@ -51,6 +58,8 @@ impl Paints {
         Paints {
             known: HashMap::new(),
             order: VecDeque::new(),
+            names: HashMap::new(),
+            names_order: VecDeque::new(),
             pending: Vec::new(),
             queued: HashSet::new(),
             inflight: false,
@@ -60,6 +69,7 @@ impl Paints {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&self, id: &str) -> Option<&UserLook> {
         self.known.get(id)
     }
@@ -76,18 +86,55 @@ impl Paints {
         self.pending.push(id.to_string());
     }
 
-    /// a live `profile:color`: just the color, a cached paint stays.
-    pub(crate) fn set_color(&mut self, id: &str, color: &str) {
-        if let Some(l) = self.known.get_mut(id) {
-            l.color = Some(color.to_string());
-        } else {
-            self.store(
-                id.to_string(),
-                UserLook {
-                    paint: None,
-                    color: Some(color.to_string()),
-                },
-            );
+    /// what to draw a line's name with: the cached look for its sender id,
+    /// else (only when chat sent no color) a live color matched by username.
+    pub(crate) fn look_for(
+        &self,
+        uid: Option<&str>,
+        user: &str,
+        has_color: bool,
+    ) -> Option<Cow<'_, UserLook>> {
+        if let Some(l) = uid.and_then(|u| self.known.get(u)) {
+            return Some(Cow::Borrowed(l));
+        }
+        if has_color || self.names.is_empty() {
+            return None;
+        }
+        let color = self.names.get(&user.to_lowercase())?;
+        Some(Cow::Owned(UserLook {
+            paint: None,
+            color: Some(color.clone()),
+        }))
+    }
+
+    /// a live `profile:color`: the color for that id (a cached paint stays)
+    /// and for each username it names.
+    pub(crate) fn set_color(&mut self, id: Option<&str>, names: &[String], color: &str) {
+        if let Some(id) = id {
+            if let Some(l) = self.known.get_mut(id) {
+                l.color = Some(color.to_string());
+            } else {
+                self.store(
+                    id.to_string(),
+                    UserLook {
+                        paint: None,
+                        color: Some(color.to_string()),
+                    },
+                );
+            }
+        }
+        for n in names {
+            if self.names.insert(n.clone(), color.to_string()).is_none() {
+                self.names_order.push_back(n.clone());
+            }
+        }
+        while self.names.len() > NAMES_CAP {
+            match self.names_order.pop_front() {
+                Some(old) => {
+                    self.names.remove(&old);
+                }
+                None => break,
+            }
         }
     }
 
@@ -267,9 +314,26 @@ mod tests {
                 color: None,
             },
         );
-        p.set_color("1", "#112233");
+        p.set_color(Some("1"), &[], "#112233");
         assert_eq!(p.get("1").unwrap().paint, paint);
         assert_eq!(p.get("1").unwrap().color.as_deref(), Some("#112233"));
+    }
+
+    #[test]
+    fn live_color_matches_by_lowercase_username_when_chat_sent_none() {
+        let mut p = Paints::new();
+        p.set_color(None, &["kicker".into()], "#445566");
+        let c = |l: Option<Cow<UserLook>>| l.and_then(|l| l.color.clone());
+        assert_eq!(
+            c(p.look_for(None, "KicKer", false)).as_deref(),
+            Some("#445566")
+        );
+        assert_eq!(c(p.look_for(None, "KicKer", true)), None, "chat color wins");
+        assert_eq!(c(p.look_for(None, "other", false)), None);
+        for i in 0..NAMES_CAP + 5 {
+            p.set_color(None, &[format!("n{i}")], "#000000");
+        }
+        assert_eq!(p.names.len(), NAMES_CAP);
     }
 
     #[test]

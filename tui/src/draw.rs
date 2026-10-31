@@ -246,7 +246,9 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
         ch.messages.len()
     };
     for (n, m) in ch.messages.range(..end).rev().enumerate() {
-        let user = m.uid.as_deref().and_then(|u| app.paints.get(u));
+        let user = app
+            .paints
+            .look_for(m.uid.as_deref(), &m.user, m.color.is_some());
         let mut rows = layout_message(
             m,
             set,
@@ -256,7 +258,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
                 me: &app.me,
                 tag_platform: ch.merged(),
                 stamps: app.stamps,
-                user,
+                user: user.as_deref(),
             },
         );
         if cursor_on && n == 0 {

@@ -96,7 +96,8 @@ pub enum ChatEvent {
     },
     /// a heatsync name color changed (paint-space id).
     Color {
-        id: String,
+        id: Option<String>,
+        names: Vec<String>,
         color: String,
     },
     /// paints changed for these paint-space ids.
@@ -128,7 +129,7 @@ fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
             let _ = tx.send(ChatEvent::SendResult { ok, error });
             true
         }
-        Event::Color { id, color } => tx.send(ChatEvent::Color { id, color }).is_ok(),
+        Event::Color { id, names, color } => tx.send(ChatEvent::Color { id, names, color }).is_ok(),
         Event::Cosmetic(ids) => tx.send(ChatEvent::Cosmetic(ids)).is_ok(),
         Event::FollowLive(v) => tx.send(ChatEvent::FollowLive(v)).is_ok(),
         Event::Pin(p, c, pin) => tx.send(ChatEvent::Pin(p, c, pin)).is_ok(),

@@ -347,7 +347,9 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
             ev @ (ChatEvent::Special(_)
             | ChatEvent::FeedHeat { .. }
             | ChatEvent::FeedHidden { .. }) => specials.push(ev),
-            ChatEvent::Color { id, color } => app.paints.set_color(&id, &color),
+            ChatEvent::Color { id, names, color } => {
+                app.paints.set_color(id.as_deref(), &names, &color)
+            }
             ChatEvent::Cosmetic(ids) => app.paints.invalidate(&ids),
             ChatEvent::Connected | ChatEvent::Disconnected => {
                 if let Feed::Live { connected, .. } = &mut app.feed {

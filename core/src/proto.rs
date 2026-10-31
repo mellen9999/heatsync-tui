@@ -124,7 +124,10 @@ pub enum Event {
     Pong,
     /// `profile:color`: a user's picked name color, by paint-space id.
     Color {
-        id: String,
+        /// paint-space id, when the push named one.
+        id: Option<String>,
+        /// the user's linked usernames, lowercased (platform not stated).
+        names: Vec<String>,
         color: String,
     },
     /// `cosmetic:changed`: paints changed for these paint-space ids.
@@ -240,16 +243,33 @@ pub fn parse(raw: &str) -> Event {
         },
         "pong" => Event::Pong,
         // a user's name color changed on heatsync (paint space id).
-        "profile:color" => match (
-            v.get("userId").and_then(Value::as_str),
-            v.get("color").and_then(color_str),
-        ) {
-            (Some(id), Some(color)) if paint_id("", id).is_some() => Event::Color {
-                id: id.to_string(),
-                color: color.to_string(),
-            },
-            _ => Event::Ignore,
-        },
+        "profile:color" => {
+            let id = v
+                .get("userId")
+                .and_then(Value::as_str)
+                .and_then(|s| paint_id("", s));
+            // bounded: a hostile frame can't make us hold a wall of names
+            let names: Vec<String> = v
+                .get("usernames")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .filter(|s| !s.is_empty() && s.len() <= 64)
+                        .map(|s| sanitize::clean(s).to_lowercase())
+                        .take(16)
+                        .collect()
+                })
+                .unwrap_or_default();
+            match v.get("color").and_then(color_str) {
+                Some(color) if id.is_some() || !names.is_empty() => Event::Color {
+                    id,
+                    names,
+                    color: color.to_string(),
+                },
+                _ => Event::Ignore,
+            }
+        }
         // paints / badges changed for these ids — refetch what's cached.
         "cosmetic:changed" => Event::Cosmetic(
             v.get("ids")
@@ -2358,12 +2378,25 @@ mod tests {
         assert_eq!(
             parse(c),
             Event::Color {
-                id: "7".into(),
+                id: Some("7".into()),
+                names: vec!["a".into()],
                 color: "#aabbcc".into()
             }
         );
         let bad = r#"{"type":"profile:color","userId":"7","color":"red"}"#;
         assert_eq!(parse(bad), Event::Ignore);
+        let names =
+            r##"{"type":"profile:color","usernames":["MixedCase","kicker"],"color":"#010203"}"##;
+        assert_eq!(
+            parse(names),
+            Event::Color {
+                id: None,
+                names: vec!["mixedcase".into(), "kicker".into()],
+                color: "#010203".into()
+            }
+        );
+        let empty = r##"{"type":"profile:color","usernames":[],"color":"#010203"}"##;
+        assert_eq!(parse(empty), Event::Ignore);
         let ch = r#"{"type":"cosmetic:changed","ids":["7","kick_9","bad id"]}"#;
         assert_eq!(
             parse(ch),
