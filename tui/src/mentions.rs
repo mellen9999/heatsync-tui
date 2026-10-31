@@ -22,6 +22,8 @@ pub struct Mention {
     pub user: String,
     pub color: Option<String>,
     pub text: String,
+    /// the platform message id when known — dedupe only, never persisted.
+    pub id: Option<String>,
 }
 
 pub struct Log {
@@ -71,6 +73,7 @@ fn from_line(line: &str) -> Option<Mention> {
         user: s("u").unwrap_or_default(),
         color: s("k").filter(|c| c.starts_with('#')),
         text,
+        id: None,
     })
 }
 
@@ -163,6 +166,7 @@ mod tests {
             user: format!("u{i}"),
             color: Some("#ff0000".into()),
             text: format!("hey {i}"),
+            id: None,
         }
     }
 

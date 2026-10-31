@@ -260,6 +260,7 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
             user: m.user.clone(),
             color: m.color.clone(),
             text: m.text.clone(),
+            id: m.id.clone(),
         });
     if pinged {
         channels[i].ping();

@@ -6,6 +6,7 @@
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use heatsync_core::emote::{ref_set, EmoteSet};
 use heatsync_core::proto::SpecialLine;
@@ -23,6 +24,9 @@ const FEED_BACKLOG: usize = 30;
 
 pub(crate) struct State {
     pub(crate) log: mentions::Log,
+    /// recent mentions + arrival time: a live ping and the server's rule match
+    /// for one message must read as one row.
+    recent: Vec<(Instant, Mention)>,
     feed_tx: Sender<Vec<SpecialLine>>,
     feed_rx: Receiver<Vec<SpecialLine>>,
 }
@@ -36,6 +40,7 @@ impl State {
         let (feed_tx, feed_rx) = channel();
         State {
             log,
+            recent: Vec::new(),
             feed_tx,
             feed_rx,
         }
@@ -188,9 +193,34 @@ pub(crate) fn drain_backlog(app: &mut App) {
     }
 }
 
+/// how long two reports of one message count as the same mention.
+const DUP_WINDOW: Duration = Duration::from_secs(10);
+
+/// same message? an id match when both sides have one, else same channel +
+/// user with one text the other's prefix / substring (snippets are cut short).
+fn same_mention(a: &Mention, b: &Mention) -> bool {
+    if let (Some(x), Some(y)) = (&a.id, &b.id) {
+        return x == y;
+    }
+    let (t, u) = (a.text.trim(), b.text.trim());
+    a.channel.eq_ignore_ascii_case(&b.channel)
+        && a.user.eq_ignore_ascii_case(&b.user)
+        && !t.is_empty()
+        && !u.is_empty()
+        && (t.contains(u) || u.contains(t))
+}
+
 /// a mention landed (a live ping, or a server rule match): always remembered,
-/// and shown + flagged when the tab is open.
+/// and shown + flagged when the tab is open. a repeat report is dropped.
 pub(crate) fn mention(app: &mut App, m: Mention) {
+    let now = Instant::now();
+    app.special
+        .recent
+        .retain(|(t, _)| now.duration_since(*t) < DUP_WINDOW);
+    if app.special.recent.iter().any(|(_, r)| same_mention(r, &m)) {
+        return;
+    }
+    app.special.recent.push((now, m.clone()));
     if let Some(i) = find(app, TabKind::Mentions) {
         let ch = &mut app.channels[i];
         ch.deliver(mention_msg(&m));
@@ -215,6 +245,7 @@ pub(crate) fn event(app: &mut App, ev: ChatEvent) {
                     user: s.line.user,
                     color: s.line.color,
                     text: s.line.content,
+                    id: s.line.id,
                 },
             ),
             TabKind::Feed | TabKind::Whispers => {
@@ -389,6 +420,7 @@ mod tests {
             user: user.into(),
             color: None,
             text: "hey me".into(),
+            id: None,
         }
     }
 
@@ -400,6 +432,7 @@ mod tests {
             user: "bob".into(),
             color: None,
             text: "hey".into(),
+            id: None,
         });
         assert_eq!(m.tags[0].kind, TagKind::Platform);
         assert_eq!(m.tags[1], Tag::new("[xqc]", TagKind::Origin));
@@ -458,6 +491,36 @@ mod tests {
         assert_eq!(a.channels[0].messages.len(), 2);
         assert_eq!(a.channels[0].unread(), heatsync_core::Unread::Ping);
         assert_eq!(a.special.log.rows().count(), 2);
+    }
+
+    #[test]
+    fn a_ping_and_its_rule_match_are_one_row() {
+        let mut a = app();
+        open(&mut a, TabKind::Mentions);
+        // live ping (has the id), then the server's match with a cut snippet
+        let mut live = mention_of("xqc", "Bob");
+        live.text = "hey mellen look at this".into();
+        live.id = Some("m1".into());
+        mention(&mut a, live);
+        let mut rule = mention_of("xqc", "bob");
+        rule.text = "hey mellen look".into();
+        mention(&mut a, rule.clone());
+        assert_eq!(a.channels[0].messages.len(), 1, "snippet dedupe");
+        assert_eq!(a.special.log.rows().count(), 1);
+        // same id wins even when the text differs
+        let mut other = mention_of("kripp", "al");
+        other.id = Some("m1".into());
+        mention(&mut a, other);
+        assert_eq!(a.channels[0].messages.len(), 1);
+        // a different message from the same user is a new row
+        let mut next = mention_of("xqc", "bob");
+        next.text = "totally different".into();
+        mention(&mut a, next);
+        assert_eq!(a.channels[0].messages.len(), 2);
+        // outside the window the same text counts again
+        a.special.recent.clear();
+        mention(&mut a, rule);
+        assert_eq!(a.channels[0].messages.len(), 3);
     }
 
     #[test]
