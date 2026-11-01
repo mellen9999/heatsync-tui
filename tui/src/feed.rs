@@ -297,6 +297,7 @@ fn route(app: &mut App, l: ChatLine, now: u64) -> Vec<ChatLine> {
             if let Some(n) = &l.note {
                 app.status = Some(format!("{} {}", l.channel, n.what));
             }
+            special::follow_event(app, l);
         }
         return Vec::new();
     }
@@ -326,6 +327,8 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                 }
             }
             ChatEvent::FollowLive(live) => app.streams.seed_live(live),
+            ChatEvent::FollowHistory(h) => special::follow_history(app, h),
+            ChatEvent::FollowColors(c) => special::follow_colors(app, c),
             ChatEvent::Pin(p, c, pin) => set_pin(app, p, &c, pin),
             ChatEvent::Room(c, r) => {
                 for l in app.rooms.update(&c, r) {

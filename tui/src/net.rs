@@ -74,6 +74,10 @@ pub enum ChatEvent {
     Delete(proto::Delete),
     /// followed channels already live at connect (the server's catch-up).
     FollowLive(Vec<Sub>),
+    /// the server's last day of follow events (oldest first, unix ms).
+    FollowHistory(Vec<(proto::ChatLine, u64)>),
+    /// followed channels' name colours (login → `#rrggbb`).
+    FollowColors(Vec<(String, String)>),
     /// a channel pin was set / cleared.
     Pin(Platform, String, Option<heatsync_core::Pin>),
     /// a twitch channel's chat modes (roomstate).
@@ -132,6 +136,8 @@ fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
         Event::Color { id, names, color } => tx.send(ChatEvent::Color { id, names, color }).is_ok(),
         Event::Cosmetic(ids) => tx.send(ChatEvent::Cosmetic(ids)).is_ok(),
         Event::FollowLive(v) => tx.send(ChatEvent::FollowLive(v)).is_ok(),
+        Event::FollowHistory(h) => tx.send(ChatEvent::FollowHistory(h)).is_ok(),
+        Event::FollowColors(c) => tx.send(ChatEvent::FollowColors(c)).is_ok(),
         Event::Pin(p, c, pin) => tx.send(ChatEvent::Pin(p, c, pin)).is_ok(),
         Event::Room(c, r) => tx.send(ChatEvent::Room(c, r)).is_ok(),
         Event::Pong | Event::Ignore => true,

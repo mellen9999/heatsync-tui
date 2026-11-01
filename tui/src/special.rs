@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use heatsync_core::emote::{ref_set, EmoteSet};
-use heatsync_core::proto::SpecialLine;
-use heatsync_core::{Channel, Message, Platform, TabKind, Tag, TagKind};
+use heatsync_core::proto::{ChatLine, SpecialLine};
+use heatsync_core::{Channel, Message, Note, Platform, TabKind, Tag, TagKind};
 
 use crate::app::{App, Feed};
+use crate::followlog::{FollowLog, FollowRow, Item};
 use crate::mentions::{self, Mention};
 use crate::net::{ChatEvent, Outbound};
 use crate::save_state;
@@ -27,6 +28,8 @@ const FEED_BACKLOG: usize = 30;
 
 pub(crate) struct State {
     pub(crate) log: mentions::Log,
+    /// followed-channel stream events shown among the mentions (never persisted).
+    follow: FollowLog,
     /// recent mentions + arrival time: a live ping and the server's rule match
     /// for one message must read as one row.
     recent: Vec<(Instant, Mention)>,
@@ -56,6 +59,7 @@ impl State {
         let (social_tx, social_rx) = channel();
         State {
             log,
+            follow: FollowLog::default(),
             recent: Vec::new(),
             feed_tx,
             feed_rx,
@@ -82,6 +86,98 @@ fn mention_msg(m: &Mention) -> Message {
     row(
         m.platform, &m.user, &m.color, &m.text, tags, 0.0, None, None,
     )
+}
+
+/// a followed-channel event as a dim `[chan]` row (the channel's colour when known).
+fn follow_msg(f: &FollowLog, r: &FollowRow) -> Message {
+    let mut m = row(
+        r.platform,
+        "",
+        &f.color_of(r),
+        &r.title,
+        vec![
+            Tag::platform(),
+            Tag::new(&format!("[{}]", r.channel), TagKind::Origin),
+        ],
+        0.0,
+        None,
+        None,
+    );
+    m.note = Some(Note {
+        kind: r.kind,
+        what: r.what.clone(),
+    });
+    m.extra.ts = r.at.max(0) as u64;
+    m
+}
+
+/// the mentions tab's rows: the log and the follow events in time order.
+fn mention_rows(s: &State) -> Vec<Message> {
+    s.follow
+        .timeline(s.log.rows())
+        .into_iter()
+        .map(|i| match i {
+            Item::Mention(m) => mention_msg(m),
+            Item::Follow(r) => follow_msg(&s.follow, r),
+        })
+        .collect()
+}
+
+/// refill the open mentions tab from scratch — history, not news.
+fn rebuild(app: &mut App) {
+    if let Some(i) = find(app, TabKind::Mentions) {
+        let mut ch = Channel::special(TabKind::Mentions, CAP);
+        for m in mention_rows(&app.special) {
+            ch.deliver(m);
+        }
+        ch.mark_seen();
+        app.channels[i] = ch;
+    }
+}
+
+/// `follow:history`: the server's replay. folded in by time, deduped against
+/// what is already here, never a ping.
+pub(crate) fn follow_history(app: &mut App, events: Vec<(ChatLine, u64)>) {
+    let mut fresh = false;
+    for (l, ms) in events {
+        if let Some(r) = FollowRow::of(&l, (ms / 1000) as i64) {
+            fresh |= app.special.follow.add(r);
+        }
+    }
+    if fresh {
+        rebuild(app);
+    }
+}
+
+/// `follow:colors`: repaint the rows when a channel's colour is new.
+pub(crate) fn follow_colors(app: &mut App, colors: Vec<(String, String)>) {
+    if app.special.follow.set_colors(colors) {
+        rebuild(app);
+    }
+}
+
+/// a live followed-channel event that passed the stream guards: remembered, and
+/// when the tab is open it lands at the bottom; a go-live marks the tab yellow.
+pub(crate) fn follow_event(app: &mut App, l: &ChatLine) {
+    let Some(r) = FollowRow::of(l, crate::clock::now_secs() as i64) else {
+        return;
+    };
+    let live = r.kind == heatsync_core::NoteKind::Live;
+    if !app.special.follow.add(r.clone()) {
+        return;
+    }
+    if let Some(i) = find(app, TabKind::Mentions) {
+        let m = follow_msg(&app.special.follow, &r);
+        let ch = &mut app.channels[i];
+        ch.system(m);
+        if app.focus != i {
+            if live {
+                ch.flag_event();
+            }
+        } else {
+            ch.mark_seen();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -134,8 +230,8 @@ pub(crate) fn add(app: &mut App, kind: TabKind) -> usize {
         .count();
     let mut ch = Channel::special(kind, CAP);
     if kind == TabKind::Mentions {
-        for m in app.special.log.rows() {
-            ch.deliver(mention_msg(m));
+        for m in mention_rows(&app.special) {
+            ch.deliver(m);
         }
         ch.mark_seen(); // history isn't news
     }
@@ -427,14 +523,7 @@ pub(crate) fn backfill_mentions(app: &mut App, hits: Vec<Mention>) {
         return;
     }
     app.special.log.merge(fresh);
-    if let Some(i) = find(app, TabKind::Mentions) {
-        let mut ch = Channel::special(TabKind::Mentions, CAP);
-        for m in app.special.log.rows() {
-            ch.deliver(mention_msg(m));
-        }
-        ch.mark_seen();
-        app.channels[i] = ch;
-    }
+    rebuild(app);
 }
 
 #[cfg(test)]
@@ -628,6 +717,72 @@ pub(crate) mod tests {
         a.special.recent.clear();
         mention(&mut a, rule);
         assert_eq!(a.channels[0].messages.len(), 3);
+    }
+
+    fn follow_ev(chan: &str, what: &str, at_ms: u64) -> (ChatLine, u64) {
+        let raw = format!(
+            r##"{{"type":"follow:history","events":[{{"type":"follow:stream:online","platform":"twitch","channel":"{chan}","game":"{what}","color":"#ff0000","time":{at_ms}}}]}}"##
+        );
+        match proto::parse(&raw) {
+            Event::FollowHistory(mut h) => h.remove(0),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    fn history(chan: &str, game: &str, at_ms: u64) -> Event {
+        let (l, at) = follow_ev(chan, game, at_ms);
+        Event::FollowHistory(vec![(l, at)])
+    }
+
+    #[test]
+    fn follow_history_merges_by_time_dedupes_and_never_persists_or_pings() {
+        let mut a = app();
+        let mut early = mention_of("xqc", "al");
+        early.at = 1_000;
+        let mut late = mention_of("xqc", "bo");
+        late.at = 3_000;
+        late.text = "yo me".into();
+        a.special.log.push(early);
+        a.special.log.push(late);
+        let before = a.special.log.rows().count();
+        add(&mut a, TabKind::Mentions);
+        let i = find(&a, TabKind::Mentions).unwrap();
+        a.focus = a.channels.len() - 1; // not on the mentions tab
+        for _ in 0..2 {
+            // a reconnect resends the same history
+            let Event::FollowHistory(h) = history("cyr", "Doom", 2_000_000) else {
+                unreachable!()
+            };
+            follow_history(&mut a, h);
+        }
+        let ch = &a.channels[i];
+        assert_eq!(
+            ch.messages
+                .iter()
+                .map(|m| m.note.is_some())
+                .collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        let f = &ch.messages[1];
+        assert_eq!(f.tags[1], Tag::new("[cyr]", TagKind::Origin));
+        assert_eq!(f.note.as_ref().unwrap().what, "went live — Doom");
+        assert_eq!(f.color.as_deref(), Some("#ff0000"));
+        assert_eq!(ch.unread(), heatsync_core::Unread::None);
+        assert_eq!(a.special.log.rows().count(), before, "not in the log");
+    }
+
+    #[test]
+    fn live_follow_go_live_lands_in_the_tab_and_marks_it_yellow() {
+        let mut a = app();
+        add(&mut a, TabKind::Mentions);
+        let i = find(&a, TabKind::Mentions).unwrap();
+        a.focus = i + 1;
+        let (l, _) = follow_ev("cyr", "Doom", 1);
+        follow_event(&mut a, &l);
+        follow_event(&mut a, &l); // a repeat adds nothing
+        assert_eq!(a.channels[i].messages.len(), 1);
+        assert_eq!(a.channels[i].unread(), heatsync_core::Unread::Event);
+        assert_eq!(a.special.log.rows().count(), 0);
     }
 
     #[test]

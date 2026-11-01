@@ -14,6 +14,7 @@ mod draw;
 mod drawlog;
 mod emote;
 mod feed;
+mod followlog;
 mod held;
 mod hsauth;
 mod http;

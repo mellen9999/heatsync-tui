@@ -396,7 +396,11 @@ fn name(b: &mut Rows, user: &str, color: Color, paint: Option<&Paint>) {
 /// magenta, whispers magenta, DMs cyan, mention origins dim.
 fn tag_look(t: &Tag, m: &Message) -> (String, Style) {
     match t.kind {
-        TagKind::Origin => (t.text.clone(), palette::DIM),
+        // an event row (followed-channel go-live) wears its channel's colour.
+        TagKind::Origin => match (&m.note, m.color.as_deref().and_then(parse_hex)) {
+            (Some(_), Some(c)) => (t.text.clone(), Style::default().fg(c)),
+            _ => (t.text.clone(), palette::DIM),
+        },
         TagKind::Platform => (
             format!("[{}]", m.platform.letter()),
             palette::platform(m.platform),

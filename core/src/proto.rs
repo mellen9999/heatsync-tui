@@ -119,6 +119,11 @@ pub enum Event {
     /// followed channels already live at connect (`follow:live:snapshot`) —
     /// catch-up, never lines.
     FollowLive(Vec<(Platform, String)>),
+    /// the user's last day of follow events (`follow:history`), oldest first:
+    /// each a follow stream line plus its unix-ms time.
+    FollowHistory(Vec<(ChatLine, u64)>),
+    /// `follow:colors`: channel login (lowercase) → `#rrggbb`.
+    FollowColors(Vec<(String, String)>),
     /// a channel pin was set (`Some`) or cleared (`None`).
     Pin(Platform, String, Option<Pin>),
     /// a twitch ROOMSTATE: the channel's current chat modes.
@@ -183,6 +188,8 @@ pub fn parse(raw: &str) -> Event {
         "follow:stream:online" | "follow:stream:offline" | "follow:stream:update" => {
             stream_line(&v).map(Event::Chat).unwrap_or(Event::Ignore)
         }
+        "follow:history" => follow_history(&v),
+        "follow:colors" => follow_colors(&v),
         "pin:set" | "pin:clear" => pin_event(&v),
         "follow:live:snapshot" => follow_snapshot(&v),
         "kick-sub-event" => kick_sub_line(&v).map(Event::Chat).unwrap_or(Event::Ignore),
@@ -957,9 +964,68 @@ fn follow_snapshot(v: &Value) -> Event {
     Event::FollowLive(live)
 }
 
+/// `follow:history` → the stored events as follow stream lines. only the three
+/// lifecycle kinds count (stored `type` mirrors `follow:stream:*`, bare
+/// `stream:*` is accepted too); a bad row never costs the others.
+fn follow_history(v: &Value) -> Event {
+    let mut out: Vec<(ChatLine, u64)> = v
+        .get("events")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    let ty = e.get("type").and_then(Value::as_str)?;
+                    let ty = ty.strip_prefix("follow:").unwrap_or(ty);
+                    if !matches!(ty, "stream:online" | "stream:offline" | "stream:update") {
+                        return None;
+                    }
+                    let at = e.get("time").and_then(Value::as_f64).filter(|t| *t > 0.0)?;
+                    Some((stream_line_as(e, ty, true)?, at as u64))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|(_, at)| *at); // stable: oldest first
+    if out.is_empty() {
+        Event::Ignore
+    } else {
+        Event::FollowHistory(out)
+    }
+}
+
+/// `follow:colors` → (login, `#rrggbb`) pairs; anything else in the map is dropped.
+fn follow_colors(v: &Value) -> Event {
+    let colors: Vec<(String, String)> = v
+        .get("colors")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, c)| {
+                    let c = color_str(c)?;
+                    (!k.is_empty()).then(|| (k.to_lowercase(), c.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if colors.is_empty() {
+        Event::Ignore
+    } else {
+        Event::FollowColors(colors)
+    }
+}
+
 /// stream lifecycle / hype / redemption / heat-spike frames. these carry
 /// their platform + channel — the receiver routes them like chat.
 fn stream_line(v: &Value) -> Option<ChatLine> {
+    let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
+    match ty.strip_prefix("follow:") {
+        Some(t) => stream_line_as(v, t, true),
+        None => stream_line_as(v, ty, false),
+    }
+}
+
+/// [`stream_line`] with the (prefix-free) kind and follow flag already decided.
+fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
     let platform = match v.get("platform").and_then(Value::as_str)? {
         "twitch" => Platform::Twitch,
         "kick" => Platform::Kick,
@@ -971,12 +1037,6 @@ fn stream_line(v: &Value) -> Option<ChatLine> {
         return None;
     }
     let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
-    let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
-    // followed-channel pushes carry the same fields under a `follow:` prefix.
-    let (ty, follow) = match ty.strip_prefix("follow:") {
-        Some(t) => (t, true),
-        None => (ty, false),
-    };
     let color = if follow { color_of(v) } else { None };
     match ty {
         "stream:online" => {
@@ -2216,6 +2276,71 @@ mod tests {
         ) {
             Event::Chat(l) => assert_eq!(l.note.unwrap().what, "switched to B"),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn follow_history_becomes_ordered_follow_lines() {
+        let raw = r##"{"type":"follow:history","events":[
+          {"type":"follow:stream:offline","platform":"kick","channel":"b","time":2000000},
+          {"type":"follow:stream:online","platform":"twitch","channel":"a","game":"Doom","title":"t","color":"#ff0000","time":1000000},
+          {"type":"follow:stream:update","platform":"twitch","channel":"a","game":"Quake","prevGame":"Doom","time":1500000},
+          {"type":"follow:stream:update","platform":"twitch","channel":"a","game":"Quake","prevGame":"Quake","time":1600000},
+          {"type":"stream:raid","platform":"twitch","channel":"a","time":1700000},
+          {"type":"follow:stream:online","platform":"twitch","channel":"a","time":0},
+          {"type":"follow:stream:online","platform":"nope","channel":"a","time":5},
+          {"type":"follow:stream:online","channel":"a","time":5},
+          7]}"##;
+        match parse(raw) {
+            Event::FollowHistory(h) => {
+                let got: Vec<_> = h
+                    .iter()
+                    .map(|(l, at)| {
+                        let n = l.note.as_ref().unwrap();
+                        (
+                            l.channel.as_str(),
+                            n.what.as_str(),
+                            *at,
+                            l.stream.as_ref().unwrap().follow,
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    got,
+                    vec![
+                        ("a", "went live — Doom", 1_000_000, true),
+                        ("a", "switched to Quake", 1_500_000, true),
+                        ("b", "went offline", 2_000_000, true),
+                    ]
+                );
+                assert_eq!(h[0].0.color.as_deref(), Some("#ff0000"));
+                assert_eq!(h[0].0.content, "t");
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn follow_colors_keep_only_valid_hex_lowercased() {
+        let raw = r##"{"type":"follow:colors","colors":{"Cyr":"#ff00aa","bad":"red","short":"#fff","n":5}}"##;
+        assert_eq!(
+            parse(raw),
+            Event::FollowColors(vec![("cyr".into(), "#ff00aa".into())])
+        );
+    }
+
+    #[test]
+    fn follow_history_and_colors_garbage_is_ignored() {
+        for raw in [
+            r#"{"type":"follow:history"}"#,
+            r#"{"type":"follow:history","events":"x"}"#,
+            r#"{"type":"follow:history","events":[]}"#,
+            r#"{"type":"follow:history","events":[{"type":"follow:stream:online"}]}"#,
+            r#"{"type":"follow:colors"}"#,
+            r#"{"type":"follow:colors","colors":[1,2]}"#,
+            r#"{"type":"follow:colors","colors":{}}"#,
+        ] {
+            assert_eq!(parse(raw), Event::Ignore, "{raw}");
         }
     }
 
