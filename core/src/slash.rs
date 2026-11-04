@@ -25,7 +25,7 @@ pub enum Cmd {
     Op(String),
     /// `/re <text>` — reply to the last OP you posted.
     Re(String),
-    /// `/share` — copy the open channels as a heatsync.org/m/ link.
+    /// `/sharelayout` (`/sl`, `/share`) — copy the open channels as a heatsync.org/m/ link.
     Share,
     /// `/layout <link>` — open the channels in a share link.
     Layout(String),
@@ -72,7 +72,7 @@ pub fn parse(input: &str) -> Cmd {
                 _ => Cmd::Whisper(to.into(), text.into()),
             }
         }
-        "share" => Cmd::Share,
+        "sharelayout" | "sl" | "share" => Cmd::Share,
         "layout" => match arg {
             Some(a) => Cmd::Layout(a.to_string()),
             None => Cmd::Usage("usage: /layout <heatsync.org/m/ link>"),
@@ -131,6 +131,8 @@ mod tests {
     #[test]
     fn share_and_layout_are_ours() {
         assert_eq!(parse("/share"), Cmd::Share);
+        assert_eq!(parse("/sharelayout"), Cmd::Share);
+        assert_eq!(parse("/sl"), Cmd::Share);
         assert_eq!(
             parse("/layout https://heatsync.org/m/t:a"),
             Cmd::Layout("https://heatsync.org/m/t:a".into())
