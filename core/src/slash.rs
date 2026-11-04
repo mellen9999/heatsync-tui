@@ -25,6 +25,10 @@ pub enum Cmd {
     Op(String),
     /// `/re <text>` — reply to the last OP you posted.
     Re(String),
+    /// `/share` — copy the open channels as a heatsync.org/m/ link.
+    Share,
+    /// `/layout <link>` — open the channels in a share link.
+    Layout(String),
     /// send these bytes to the platform as an ordinary message.
     Send(String),
     /// a client command we recognise but that was typed without its argument.
@@ -68,6 +72,11 @@ pub fn parse(input: &str) -> Cmd {
                 _ => Cmd::Whisper(to.into(), text.into()),
             }
         }
+        "share" => Cmd::Share,
+        "layout" => match arg {
+            Some(a) => Cmd::Layout(a.to_string()),
+            None => Cmd::Usage("usage: /layout <heatsync.org/m/ link>"),
+        },
         "op" => match arg {
             Some(a) => Cmd::Op(a.to_string()),
             None => Cmd::Usage("usage: /op <text>  (posts to the heatsync feed)"),
@@ -117,6 +126,16 @@ mod tests {
         assert_eq!(parse("/mentions"), Cmd::Tab(TabKind::Mentions));
         assert_eq!(parse("/feed"), Cmd::Tab(TabKind::Feed));
         assert_eq!(parse("/Whispers"), Cmd::Tab(TabKind::Whispers));
+    }
+
+    #[test]
+    fn share_and_layout_are_ours() {
+        assert_eq!(parse("/share"), Cmd::Share);
+        assert_eq!(
+            parse("/layout https://heatsync.org/m/t:a"),
+            Cmd::Layout("https://heatsync.org/m/t:a".into())
+        );
+        assert!(matches!(parse("/layout"), Cmd::Usage(_)));
     }
 
     #[test]

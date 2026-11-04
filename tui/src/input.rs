@@ -5,7 +5,7 @@ use crate::{hsauth, key, modcmd, net, picker, special, talk};
 use crate::{parse_sub, parse_tab, save_state, yt_video_id};
 use crossterm::event::{KeyCode, KeyModifiers};
 use heatsync_core::complete::Completion;
-use heatsync_core::{clip, edit, scroll, slash};
+use heatsync_core::{clip, edit, layout, scroll, slash};
 use heatsync_core::{Channel, Message, Platform};
 use std::time::Instant;
 
@@ -338,6 +338,71 @@ fn open_channel(app: &mut App, tok: &str) {
     save_state(app);
 }
 
+/// `/share`: copy the open channels as a heatsync.org/m/ link and show it.
+/// youtube legs are left out: here they are live video ids, the link wants
+/// handles or channel ids.
+fn share_layout(app: &mut App) {
+    let tabs: Vec<layout::Tab> = app
+        .channels
+        .iter()
+        .map(|c| {
+            let mut t = layout::Tab::default();
+            for (p, n) in c.subs() {
+                let n = Some(n.to_ascii_lowercase());
+                match p {
+                    Platform::Twitch => t.twitch = t.twitch.take().or(n),
+                    Platform::Kick => t.kick = t.kick.take().or(n),
+                    Platform::Youtube => {}
+                }
+            }
+            t
+        })
+        .collect();
+    let l = layout::build(&tabs);
+    if l.is_empty() {
+        app.status = Some("nothing to share — open a twitch or kick channel".into());
+        return;
+    }
+    let link = format!("https://heatsync.org/m/{l}");
+    app.status = Some(match clip::copy(&link) {
+        Ok(via) => format!("copied ({via}) {link}"),
+        Err(e) => format!("{e} — {link}"),
+    });
+}
+
+/// `/layout <link>`: open every channel in a share link. a tab with several
+/// platforms becomes one merged tab; already-open ones just focus/merge.
+fn open_layout(app: &mut App, link: &str) {
+    let tabs = layout::parse(link);
+    if tabs.is_empty() {
+        app.status = Some("no channels in that link".into());
+        return;
+    }
+    let mut yt = 0;
+    let mut opened = 0;
+    for t in &tabs {
+        let mut specs: Vec<String> = Vec::new();
+        if let Some(n) = &t.twitch {
+            specs.push(n.clone());
+        }
+        if let Some(n) = &t.kick {
+            specs.push(format!("kick:{n}"));
+        }
+        if t.youtube.is_some() {
+            yt += 1;
+        }
+        if !specs.is_empty() {
+            open_channel(app, &specs.join("+"));
+            opened += 1;
+        }
+    }
+    app.status = Some(match (opened, yt) {
+        (0, _) => "link only has youtube — join a live video with /join yt:<id>".into(),
+        (n, 0) => format!("opened {n} tab(s)"),
+        (n, y) => format!("opened {n} tab(s), skipped {y} youtube (needs a live video id)"),
+    });
+}
+
 /// subscribe one source over the live WS and start its emote + history fetches
 /// (shared by open, merge-upgrade, and slot edits).
 fn start_sub(app: &App, p: Platform, n: &str) {
@@ -592,6 +657,16 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
             if talk::re(app, &t) {
                 app.line.accept();
             }
+            return Flow::Continue;
+        }
+        slash::Cmd::Share => {
+            app.line.accept();
+            share_layout(app);
+            return Flow::Continue;
+        }
+        slash::Cmd::Layout(l) => {
+            app.line.accept();
+            open_layout(app, &l);
             return Flow::Continue;
         }
         slash::Cmd::Quit => return Flow::Quit,

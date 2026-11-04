@@ -15,6 +15,7 @@ pub mod emote;
 pub mod heat;
 pub mod iso;
 pub mod key;
+pub mod layout;
 pub mod mock;
 pub mod paint;
 pub mod proto;
