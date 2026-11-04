@@ -3,7 +3,7 @@
 //! independent of HeatSync's relay (which only ingests twitch read-only). one
 //! persistent connection on a background thread; reconnects; PING/PONG keepalive.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -99,6 +99,8 @@ fn is_welcome(line: &str) -> bool {
 pub struct Gate {
     authed: bool,
     pending: Vec<Send>,
+    /// last wire text sent per channel, for the duplicate bypass.
+    last_wire: HashMap<String, String>,
 }
 
 impl Gate {
@@ -223,7 +225,16 @@ fn session(
                         let _ = ws.send(WsMsg::Text("PONG :tmi.twitch.tv\r\n".into()));
                     } else if is_welcome(line) {
                         for (chan, text, reply) in gate.open() {
-                            if post(&mut ws, &mut joined, &chan, &text, reply.as_deref()).is_err() {
+                            if post(
+                                &mut ws,
+                                &mut joined,
+                                &mut gate.last_wire,
+                                &chan,
+                                &text,
+                                reply.as_deref(),
+                            )
+                            .is_err()
+                            {
                                 return End::Dropped;
                             }
                         }
@@ -249,7 +260,16 @@ fn session(
             match rx.try_recv() {
                 Ok(send) => {
                     if let Some((chan, text, reply)) = gate.submit(send) {
-                        if post(&mut ws, &mut joined, &chan, &text, reply.as_deref()).is_err() {
+                        if post(
+                            &mut ws,
+                            &mut joined,
+                            &mut gate.last_wire,
+                            &chan,
+                            &text,
+                            reply.as_deref(),
+                        )
+                        .is_err()
+                        {
                             return End::Dropped;
                         }
                     }
@@ -273,6 +293,7 @@ fn privmsg(chan: &str, text: &str, reply: Option<&str>) -> String {
 fn post(
     ws: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>,
     joined: &mut HashSet<String>,
+    last_wire: &mut HashMap<String, String>,
     channel: &str,
     text: &str,
     reply: Option<&str>,
@@ -281,8 +302,11 @@ fn post(
     if joined.insert(chan.clone()) && ws.send(WsMsg::Text(format!("JOIN #{chan}\r\n"))).is_err() {
         return Err(());
     }
-    ws.send(WsMsg::Text(privmsg(&chan, text, reply)))
-        .map_err(|_| ())
+    let wire = heatsync_core::dupe::bypass(text, last_wire.get(&chan).map(String::as_str));
+    ws.send(WsMsg::Text(privmsg(&chan, &wire, reply)))
+        .map_err(|_| ())?;
+    last_wire.insert(chan, wire);
+    Ok(())
 }
 
 fn tcp_of(ws: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>) -> Option<&TcpStream> {

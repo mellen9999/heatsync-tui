@@ -9,6 +9,7 @@
 
 pub mod clip;
 pub mod complete;
+pub mod dupe;
 pub mod edit;
 pub mod emote;
 pub mod heat;

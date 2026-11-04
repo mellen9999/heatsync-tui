@@ -309,6 +309,7 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
     let (content_raw, emotes) = msg_emotes(m, platform, content_raw);
     let user = sanitize::clean(user_raw);
     let content = sanitize::clean(&content_raw);
+    let content = crate::dupe::strip(&content).to_string();
     if user.is_empty() && content.is_empty() {
         return None;
     }
