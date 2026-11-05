@@ -34,6 +34,7 @@ mod scroll;
 mod social;
 mod special;
 mod talk;
+mod temp;
 mod twitch;
 
 use std::io::{self, IsTerminal};
@@ -392,10 +393,15 @@ pub(crate) fn save_state(app: &App) {
     if !matches!(app.feed, Feed::Live { .. }) {
         return;
     }
+    config::save(&persisted(app));
+}
+
+/// what goes to disk. the temp tab is filtered here, at the only door.
+pub(crate) fn persisted(app: &App) -> config::Config {
     let channels = app
         .channels
         .iter()
-        .filter(|c| !c.kind.is_special())
+        .filter(|c| !c.kind.is_special() && !c.temp)
         .map(|c| c.subs().map(|(p, n)| (p, n.to_string())).collect())
         .collect();
     let special = app
@@ -404,12 +410,12 @@ pub(crate) fn save_state(app: &App) {
         .map(|c| c.kind)
         .filter(|k| k.is_special())
         .collect();
-    config::save(&config::Config {
+    config::Config {
         tab_pos: app.tab_pos,
         timestamps: app.stamps,
         channels,
         special,
-    });
+    }
 }
 
 /// one tab spec: `+`-joined subs merge into a single interleaved tab

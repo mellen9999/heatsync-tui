@@ -12,6 +12,10 @@
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
     Join(String),
+    /// `/open <channel>` — look at a stream in the one unsaved temp tab.
+    Open(String),
+    /// `/keep` — promote the temp tab to a saved one.
+    Keep,
     /// leave a named channel, or the focused one when `None`.
     Part(Option<String>),
     Quit,
@@ -55,6 +59,11 @@ pub fn parse(input: &str) -> Cmd {
             Some(a) => Cmd::Join(a.to_string()),
             None => Cmd::Usage("usage: /join <channel>  (or kick:<channel>)"),
         },
+        "open" => match arg {
+            Some(a) => Cmd::Open(a.to_string()),
+            None => Cmd::Usage("usage: /open <channel>  (or kick:<channel>)"),
+        },
+        "keep" => Cmd::Keep,
         "part" | "leave" | "close" => Cmd::Part(arg.map(str::to_string)),
         "quit" | "q" | "exit" => Cmd::Quit,
         "mentions" | "feed" | "whispers" => match crate::TabKind::parse(&verb) {
@@ -103,6 +112,14 @@ mod tests {
             Cmd::Join("kick:trainwreckstv".into())
         );
         assert_eq!(parse("  /join   hot  "), Cmd::Join("hot".into()));
+    }
+
+    #[test]
+    fn open_and_keep_are_ours() {
+        assert_eq!(parse("/open xqc"), Cmd::Open("xqc".into()));
+        assert_eq!(parse("/open kick:abc"), Cmd::Open("kick:abc".into()));
+        assert!(matches!(parse("/open"), Cmd::Usage(_)));
+        assert_eq!(parse("/keep"), Cmd::Keep);
     }
 
     #[test]

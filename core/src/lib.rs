@@ -380,6 +380,9 @@ pub struct Channel {
     /// further sources merged into this tab (a `+`-joined channel). their
     /// lines interleave into the one ring in arrival order.
     pub extra: Vec<(Platform, String)>,
+    /// the unsaved "stream i'm looking at" tab: one slot, never persisted or
+    /// shared, promoted to a saved tab by keeping it.
+    pub temp: bool,
     pub heat: f64,
     /// wall-clock ms of the last heat update — decay is computed against it.
     pub last_ms: u64,
@@ -417,6 +420,7 @@ impl Channel {
             name: name.to_string(),
             platform,
             extra: Vec::new(),
+            temp: false,
             heat: 0.0,
             last_ms: 0,
             messages: VecDeque::with_capacity(cap),

@@ -156,6 +156,10 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             close_channel(app);
             Flow::Continue
         }
+        KeyCode::Char('s') => {
+            crate::temp::keep(app);
+            Flow::Continue
+        }
         KeyCode::Char('m') => {
             app.mode = InputMode::Manage;
             app.manage_cursor = app.focus;
@@ -281,7 +285,8 @@ fn pick_key(app: &mut App, k: crossterm::event::KeyEvent) {
         picker::Action::Join(spec) => {
             app.picker = None;
             app.mode = InputMode::Normal;
-            open_channel(app, &spec);
+            // picking a stream is looking at it: the temp tab, not a save.
+            crate::temp::open(app, &spec);
         }
         picker::Action::Merge(spec) => {
             app.picker = None;
@@ -303,9 +308,10 @@ fn pick_key(app: &mut App, k: crossterm::event::KeyEvent) {
     }
 }
 
-/// open (or focus, if already open) a tab by `name` / `kick:name` / `yt:id`,
-/// or a `+`-joined merge of several.
-fn open_channel(app: &mut App, tok: &str) {
+/// open (or focus, if already open) a SAVED tab by `name` / `kick:name` /
+/// `yt:id`, or a `+`-joined merge of several. an explicit add: it persists, and
+/// a temp tab it lands on is kept.
+pub(crate) fn open_channel(app: &mut App, tok: &str) {
     let subs = parse_tab(tok);
     let Some((platform, name)) = subs.first().cloned() else {
         return;
@@ -322,12 +328,23 @@ fn open_channel(app: &mut App, tok: &str) {
             start_sub(app, *p, n);
         }
         app.channels[i].extra.extend(fresh);
+        app.channels[i].temp = false; // an explicit add keeps a temp tab
         app.focus = i;
         save_state(app);
         return;
     }
-    let mut ch = Channel::new(&name, platform, 200);
+    add_tab(app, &subs, false);
+    save_state(app);
+}
+
+/// join `subs` as a new tab at the end and focus it. the one place a tab is born.
+pub(crate) fn add_tab(app: &mut App, subs: &[Sub], temp: bool) {
+    let Some((platform, name)) = subs.first() else {
+        return;
+    };
+    let mut ch = Channel::new(name, *platform, 200);
     ch.extra = subs[1..].to_vec();
+    ch.temp = temp;
     for (p, n) in ch.subs() {
         start_sub(app, p, n);
     }
@@ -335,7 +352,6 @@ fn open_channel(app: &mut App, tok: &str) {
     // seeded with globals now; channel sets merge in async (spawn_emote_fetch).
     app.emotes.push(app.globals.clone());
     app.focus = app.channels.len() - 1;
-    save_state(app);
 }
 
 /// `/share`: copy the open channels as a heatsync.org/m/ link and show it.
@@ -345,6 +361,7 @@ fn share_layout(app: &mut App) {
     let tabs: Vec<layout::Tab> = app
         .channels
         .iter()
+        .filter(|c| !c.temp) // the temp tab is never shared
         .map(|c| {
             let mut t = layout::Tab::default();
             for (p, n) in c.subs() {
@@ -581,7 +598,7 @@ fn part_channel(app: &mut App, which: Option<&str>) {
 }
 
 /// unsubscribe every source a tab merges.
-fn part_subs(out: &Option<net::Tx>, ch: &Channel) {
+pub(crate) fn part_subs(out: &Option<net::Tx>, ch: &Channel) {
     if let Some(out) = out {
         for (p, n) in ch.subs() {
             let _ = out.send(net::Outbound::Part {
@@ -623,6 +640,16 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
         slash::Cmd::Join(ch) => {
             app.line.accept();
             open_channel(app, &ch);
+            return Flow::Continue;
+        }
+        slash::Cmd::Open(ch) => {
+            app.line.accept();
+            crate::temp::open(app, &ch);
+            return Flow::Continue;
+        }
+        slash::Cmd::Keep => {
+            app.line.accept();
+            crate::temp::keep(app);
             return Flow::Continue;
         }
         slash::Cmd::Part(which) => {
@@ -738,6 +765,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                         if tx.send((name.clone(), text, reply)).is_ok() {
                             app.line.accept();
                             app.status = Some(format!("sent → {name}"));
+                            crate::temp::sent(app, platform, &name);
                         } else {
                             app.status =
                                 Some("twitch sender stopped — run: heatsync-tui login".into());
@@ -757,6 +785,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                 let _ = ktx.send((name.clone(), text, reply));
                 app.line.accept();
                 app.status = Some(format!("sent → {name}"));
+                crate::temp::sent(app, platform, &name);
             } else if let Some(out) = &app.out {
                 let _ = out.send(net::Outbound::Chat {
                     platform: Platform::Kick,
@@ -799,7 +828,7 @@ fn send_via_heatsync(
     reply: Option<String>,
 ) {
     let chan = name.clone();
-    hsauth::spawn_note(app.hs_tx.clone(), platform, name, move || {
+    hsauth::spawn_send(app.hs_tx.clone(), platform, name, move || {
         match client.send(platform, &chan, &text, reply.as_deref()) {
             Ok(()) => hsauth::Outcome {
                 ok: true,

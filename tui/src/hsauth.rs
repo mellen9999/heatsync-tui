@@ -636,12 +636,29 @@ pub struct Note {
     pub platform: Platform,
     pub channel: String,
     pub text: String,
+    /// a chat send from a channel tab that landed (nothing to say, but it counts).
+    pub sent: bool,
     /// the saved login is dead: the UI stops using it.
     pub logged_out: bool,
 }
 
 /// run `f` off the UI thread and post its words back as a note.
 pub fn spawn_note<F>(tx: Sender<Note>, platform: Platform, channel: String, f: F)
+where
+    F: FnOnce() -> Outcome + Send + 'static,
+{
+    spawn(tx, platform, channel, false, f)
+}
+
+/// same, for a chat send: a clean outcome also flags the note `sent`.
+pub fn spawn_send<F>(tx: Sender<Note>, platform: Platform, channel: String, f: F)
+where
+    F: FnOnce() -> Outcome + Send + 'static,
+{
+    spawn(tx, platform, channel, true, f)
+}
+
+fn spawn<F>(tx: Sender<Note>, platform: Platform, channel: String, is_send: bool, f: F)
 where
     F: FnOnce() -> Outcome + Send + 'static,
 {
@@ -654,6 +671,7 @@ where
         let _ = tx.send(Note {
             platform,
             channel,
+            sent: is_send && o.ok,
             text: o.text,
             logged_out,
         });

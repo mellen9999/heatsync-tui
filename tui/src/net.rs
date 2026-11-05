@@ -217,7 +217,7 @@ fn session(
     let mut last_hb = Instant::now();
     loop {
         // wake at the queue's cadence while frames wait, idle cadence otherwise.
-        if fast != !queue.is_empty() {
+        if fast == queue.is_empty() {
             fast = !queue.is_empty();
             if let Ok(sock) = tcp_of(&mut ws) {
                 let _ = sock.set_read_timeout(Some(if fast { FRAME_GAP } else { READ_TIMEOUT }));

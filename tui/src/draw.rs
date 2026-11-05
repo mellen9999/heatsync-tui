@@ -141,12 +141,18 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
 }
 
 /// the channel tab bar — horizontal row (top/bottom) or vertical list (left/right).
-fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
+pub(crate) fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
     let tab_style = |i: usize, ch: &Channel| {
-        if i == app.focus {
+        let base = if i == app.focus {
             palette::TAG
         } else {
             palette::tab(ch.unread())
+        };
+        // the temp tab is underlined: a look, not a save.
+        if ch.temp {
+            base.add_modifier(Modifier::UNDERLINED)
+        } else {
+            base
         }
     };
 
@@ -412,6 +418,11 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
         } else {
             palette::heat(Tier::of(ch.heat))
         };
+        let style = if ch.temp {
+            style.add_modifier(Modifier::UNDERLINED)
+        } else {
+            style
+        };
         let cursor = if sel { "❯" } else { " " };
         let active = if i == app.focus { "●" } else { " " };
         let tags = ch
@@ -619,7 +630,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                         "   commands only  ·  /join /w /dm  ·  esc, enter jumps to the source"
                     }
                     TabKind::Channel => {
-                        "   tab completes emotes/@users  ·  /join /part /quit  ·  text goes to chat"
+                        "   tab completes emotes/@users  ·  /join /open /part /quit  ·  text goes to chat"
                     }
                 };
                 spans.push(Span::styled(hint, palette::DIM));
@@ -684,10 +695,13 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         hint("i", "say"),
         hint("o", "pick"),
         hint("m", "manage"),
-        hint("q", "quit"),
     ] {
         spans.extend(pair);
     }
+    if app.channels.get(app.focus).is_some_and(|c| c.temp) {
+        spans.extend(hint("s", "keep"));
+    }
+    spans.extend(hint("q", "quit"));
     if app.paused {
         spans.push(Span::styled("PAUSED  ", palette::WARN_BOLD));
     }
