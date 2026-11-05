@@ -9,7 +9,7 @@ use heatsync_core::edit;
 use heatsync_core::emote::EmoteSet;
 use heatsync_core::room::RoomModes;
 use heatsync_core::streamev::StreamEvents;
-use heatsync_core::{mock, Channel, Message, Platform};
+use heatsync_core::{mock, Channel, Platform};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
@@ -86,8 +86,8 @@ pub(crate) struct App {
     pub(crate) emote_rx: Receiver<(Platform, String, EmoteSet)>,
     // archived scrollback arrives the same way: fetched per channel at join,
     // merged in behind whatever live lines have already landed.
-    pub(crate) hist_tx: Sender<(Platform, String, Vec<Message>)>,
-    pub(crate) hist_rx: Receiver<(Platform, String, Vec<Message>)>,
+    pub(crate) hist_tx: Sender<crate::feed::Hist>,
+    pub(crate) hist_rx: Receiver<crate::feed::Hist>,
     /// the channel picker: its state while open, the last fetch (reused for
     /// 30s), and the thread's way back.
     pub(crate) picker: Option<picker::Picker>,
@@ -110,6 +110,8 @@ pub(crate) struct App {
     pub(crate) chat_body: std::cell::Cell<ratatui::layout::Rect>,
     /// stream-event pairing + anti-wall guards, between the feed and the tabs.
     pub(crate) streams: StreamEvents,
+    /// colours + paint ids chat showed for each login, for the stream rows.
+    pub(crate) seen: crate::streamrow::Seen,
     /// last-seen room modes per channel, for `slow mode 30s`-style notes.
     pub(crate) rooms: RoomModes,
     /// mention log + feed backlog channel for the virtual tabs.

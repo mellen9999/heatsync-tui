@@ -255,9 +255,19 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
         ch.messages.len()
     };
     for (n, m) in ch.messages.range(..end).rev().enumerate() {
-        let user = app
-            .paints
-            .look_for(m.uid.as_deref(), &m.user, m.color.is_some());
+        // a stream row names the streamer: colour + paint resolved here, every
+        // frame, so a source that lands later restyles it.
+        let user = if crate::streamrow::is_row(m) {
+            Some(std::borrow::Cow::Owned(crate::streamrow::look(
+                m,
+                &app.paints,
+                &app.special.follow,
+                &app.seen,
+            )))
+        } else {
+            app.paints
+                .look_for(m.uid.as_deref(), &m.user, m.color.is_some())
+        };
         let mut rows = layout_message(
             m,
             set,

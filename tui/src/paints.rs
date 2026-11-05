@@ -74,6 +74,11 @@ impl Paints {
         self.known.get(id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&mut self, id: &str, look: UserLook) {
+        self.store(id.to_string(), look);
+    }
+
     /// ask for an id unless it's cached, queued, or the queue is full.
     pub(crate) fn want(&mut self, id: &str) {
         if self.known.contains_key(id)

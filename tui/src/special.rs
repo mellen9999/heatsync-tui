@@ -29,7 +29,7 @@ const FEED_BACKLOG: usize = 30;
 pub(crate) struct State {
     pub(crate) log: mentions::Log,
     /// followed-channel stream events shown among the mentions (never persisted).
-    follow: FollowLog,
+    pub(crate) follow: FollowLog,
     /// recent mentions + arrival time: a live ping and the server's rule match
     /// for one message must read as one row.
     recent: Vec<(Instant, Mention)>,
@@ -138,6 +138,7 @@ fn rebuild(app: &mut App) {
 /// `follow:history`: the server's replay. folded in by time, deduped against
 /// what is already here, never a ping.
 pub(crate) fn follow_history(app: &mut App, events: Vec<(ChatLine, u64)>) {
+    crate::streamrow::replay(app, &events, crate::clock::now_secs());
     let mut fresh = false;
     for (l, ms) in events {
         if let Some(r) = FollowRow::of(&l, (ms / 1000) as i64) {
@@ -574,6 +575,7 @@ pub(crate) mod tests {
             stamps: false,
             streams: StreamEvents::new(),
             rooms: RoomModes::new(),
+            seen: Default::default(),
             paints: crate::paints::Paints::new(),
             pin_tx: channel().0,
             pin_rx: channel().1,

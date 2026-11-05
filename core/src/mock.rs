@@ -166,16 +166,13 @@ impl Driver {
                 ch.record(
                     Message {
                         platform: ch.platform,
-                        user: if matches!(
-                            kind,
-                            crate::NoteKind::Raid
-                                | crate::NoteKind::Live
-                                | crate::NoteKind::Category
-                                | crate::NoteKind::Offline
-                        ) {
-                            String::new()
-                        } else {
-                            user
+                        user: match kind {
+                            crate::NoteKind::Raid => String::new(),
+                            // stream rows name the streamer, like the live feed's
+                            crate::NoteKind::Live
+                            | crate::NoteKind::Category
+                            | crate::NoteKind::Offline => ch.name.to_lowercase(),
+                            _ => user,
                         },
                         text: text.to_string(),
                         color: None,

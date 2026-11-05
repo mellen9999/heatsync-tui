@@ -92,6 +92,11 @@ impl FollowLog {
             .or_else(|| self.colors.get(&r.channel.to_lowercase()).cloned())
     }
 
+    /// a twitch login's colour from the `follow:colors` map.
+    pub fn login_color(&self, login: &str) -> Option<&str> {
+        self.colors.get(&login.to_lowercase()).map(String::as_str)
+    }
+
     /// mentions and follow rows in time order. a mention with no time (0, saved
     /// before times were kept) stays at the front; on a tie a mention goes first.
     pub fn timeline<'a>(&'a self, mentions: impl Iterator<Item = &'a Mention>) -> Vec<Item<'a>> {

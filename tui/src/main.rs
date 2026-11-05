@@ -33,6 +33,7 @@ mod sched;
 mod scroll;
 mod social;
 mod special;
+mod streamrow;
 mod talk;
 mod temp;
 mod twitch;
@@ -185,6 +186,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             picker: None,
             pick_cache: picker::Cache(None),
             streams: StreamEvents::new(),
+            seen: Default::default(),
             rooms: RoomModes::new(),
             pick_tx,
             pick_rx,
@@ -373,6 +375,7 @@ fn build_live(
         picker: None,
         pick_cache: picker::Cache(None),
         streams: StreamEvents::new(),
+        seen: Default::default(),
         rooms: RoomModes::new(),
         pick_tx,
         pick_rx,

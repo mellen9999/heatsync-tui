@@ -452,6 +452,18 @@ fn paint_id(prefix: &str, raw: &str) -> Option<String> {
     ok.then(|| format!("{prefix}{raw}"))
 }
 
+/// a stream frame's streamer id in paint space: the platform's own id as a
+/// string (twitch id, kick id, youtube channel id), prefixed like chat's.
+/// anything that isn't a short safe token is dropped.
+pub(crate) fn stream_uid(v: &Value, platform: Platform) -> Option<String> {
+    let id = v.get("userId").and_then(Value::as_str)?;
+    match platform {
+        Platform::Twitch => paint_id("", id),
+        Platform::Kick => paint_id("kick_", id),
+        Platform::Youtube => paint_id("yt_", id),
+    }
+}
+
 /// the sender's paint-space id: twitch's bare user id, kick's `kick_<id>`
 /// (kick ids overlap twitch's range, so they must never go bare). the relay
 /// sends `userId`; kick frames may name it `senderId`.
@@ -1038,7 +1050,11 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
         return None;
     }
     let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
-    let color = if follow { color_of(v) } else { None };
+    // the streamer's own chat colour and paint-space id ride on every stream
+    // frame; the three lifecycle rows wear them, the rest ignore them.
+    let color = color_of(v);
+    let who = channel.to_lowercase();
+    let uid = stream_uid(v, platform);
     match ty {
         "stream:online" => {
             let game = field(v, "game");
@@ -1050,12 +1066,13 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
             let mut l = note_line(
                 platform,
                 channel,
-                String::new(),
+                who,
                 color,
                 NoteKind::Live,
                 what,
                 field(v, "title"),
             )?;
+            l.uid = uid;
             l.stream = Some(stream_ev(StreamKind::Online, game, String::new(), follow));
             Some(l)
         }
@@ -1063,12 +1080,13 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
             let mut l = note_line(
                 platform,
                 channel,
-                String::new(),
+                who,
                 color,
                 NoteKind::Offline,
                 "went offline".into(),
                 String::new(),
             )?;
+            l.uid = uid;
             l.stream = Some(stream_ev(
                 StreamKind::Offline,
                 String::new(),
@@ -1087,12 +1105,13 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
             let mut l = note_line(
                 platform,
                 channel,
-                String::new(),
+                who,
                 color,
                 NoteKind::Category,
                 format!("switched to {game}"),
                 String::new(),
             )?;
+            l.uid = uid;
             l.stream = Some(stream_ev(StreamKind::Update, game, prev, follow));
             Some(l)
         }
@@ -2319,6 +2338,52 @@ mod tests {
             }
             e => panic!("{e:?}"),
         }
+    }
+
+    #[test]
+    fn stream_rows_name_the_streamer_with_colour_and_a_safe_id() {
+        let line = |raw: &str| match parse(raw) {
+            Event::Chat(l) => l,
+            e => panic!("{e:?}"),
+        };
+        let l = line(
+            r##"{"type":"stream:online","platform":"twitch","channel":"Cyr","game":"Doom","color":"#ff00aa","userId":"12345"}"##,
+        );
+        assert_eq!(
+            (l.user.as_str(), l.color.as_deref()),
+            ("cyr", Some("#ff00aa"))
+        );
+        assert_eq!(l.uid.as_deref(), Some("12345"));
+        let l = line(
+            r#"{"type":"follow:stream:offline","platform":"kick","channel":"b","userId":"77"}"#,
+        );
+        assert_eq!(l.uid.as_deref(), Some("kick_77"));
+        let l = line(
+            r#"{"type":"stream:update","platform":"youtube","channel":"y","game":"B","prevGame":"A","userId":"UCabc_-1"}"#,
+        );
+        assert_eq!(l.uid.as_deref(), Some("yt_UCabc_-1"));
+        // hostile ids are dropped, the row still lands
+        let long = "9".repeat(65);
+        for bad in [
+            "../x".to_string(),
+            "a,b".to_string(),
+            "1 2".to_string(),
+            String::new(),
+            long,
+        ] {
+            let l = line(&format!(
+                r#"{{"type":"stream:offline","platform":"twitch","channel":"c","userId":"{bad}"}}"#
+            ));
+            assert_eq!(l.uid, None, "{bad:?}");
+            assert_eq!(l.note.unwrap().what, "went offline");
+        }
+        let l = line(r#"{"type":"stream:offline","platform":"twitch","channel":"c","userId":5}"#);
+        assert_eq!(l.uid, None, "the id is a string");
+        // other stream rows carry neither
+        let l = line(
+            r##"{"type":"stream:raid","platform":"twitch","channel":"c","target":"t","userId":"1","color":"#ff0000"}"##,
+        );
+        assert_eq!((l.uid, l.color, l.user.as_str()), (None, None, ""));
     }
 
     #[test]

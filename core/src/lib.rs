@@ -509,6 +509,28 @@ impl Channel {
         self.seq += 1;
     }
 
+    /// slot a line in by its own time (`extra.ts`, seconds) — a replayed or
+    /// back-dated event, not news: no heat, no unread, no ping. it lands after
+    /// the last line that is not newer than it. false = it would sit older than
+    /// everything in a full ring, so it is dropped.
+    pub fn insert_by_ts(&mut self, msg: Message) -> bool {
+        let at = self
+            .messages
+            .iter()
+            .rposition(|m| m.extra.ts <= msg.extra.ts)
+            .map_or(0, |i| i + 1);
+        if self.messages.len() == self.cap {
+            if at == 0 {
+                return false;
+            }
+            self.messages.pop_front();
+            self.messages.insert(at - 1, msg);
+        } else {
+            self.messages.insert(at, msg);
+        }
+        true
+    }
+
     /// a mod removed lines: mark every matching chat line (events are never
     /// struck). returns how many were marked. the caller has already routed
     /// `d` to this tab; platform is checked per line (merged tabs).
@@ -756,6 +778,33 @@ mod channel_tests {
             heat: 0.0,
             uid: None,
         }
+    }
+
+    #[test]
+    fn insert_by_ts_lands_in_time_order_without_heat_or_unread() {
+        let at = |t: u64, text: &str| {
+            let mut m = msg("u", text);
+            m.extra.ts = t;
+            m
+        };
+        let mut ch = Channel::new("c", Platform::Twitch, 3);
+        ch.system(at(10, "a"));
+        ch.system(at(30, "c"));
+        assert!(ch.insert_by_ts(at(20, "b")));
+        let texts = |ch: &Channel| {
+            ch.messages
+                .iter()
+                .map(|m| m.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(&ch), ["a", "b", "c"]);
+        assert_eq!((ch.heat, ch.unread()), (0.0, Unread::None));
+        // full ring: older than everything is dropped, anything else evicts the oldest
+        assert!(!ch.insert_by_ts(at(5, "old")));
+        assert!(ch.insert_by_ts(at(25, "mid")));
+        assert_eq!(texts(&ch), ["b", "mid", "c"]);
+        assert!(ch.insert_by_ts(at(40, "new")));
+        assert_eq!(texts(&ch), ["mid", "c", "new"]);
     }
 
     #[test]

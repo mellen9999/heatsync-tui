@@ -38,18 +38,34 @@ pub(crate) fn spawn_global_emotes(tx: &Sender<(Platform, String, EmoteSet)>) {
     });
 }
 
+/// a channel's fetched scrollback, plus when its live twitch stream began.
+pub(crate) struct Hist {
+    pub(crate) platform: Platform,
+    pub(crate) name: String,
+    pub(crate) msgs: Vec<Message>,
+    /// (unix seconds, game) — twitch only, and only while the stream is live.
+    pub(crate) live: Option<(u64, String)>,
+}
+
 /// fetch a channel's recent archive tail on a detached thread — scrollback on
-/// open instead of an empty pane waiting for the feed to warm up.
-pub(crate) fn spawn_history(
-    tx: &Sender<(Platform, String, Vec<Message>)>,
-    platform: Platform,
-    name: String,
-) {
+/// open instead of an empty pane waiting for the feed to warm up. a twitch
+/// channel's stream start is asked for alongside, so neither waits on the other.
+pub(crate) fn spawn_history(tx: &Sender<Hist>, platform: Platform, name: String) {
     let tx = tx.clone();
     std::thread::spawn(move || {
+        let ask = (platform == Platform::Twitch).then(|| {
+            let n = name.clone();
+            std::thread::spawn(move || http::twitch_live(&n))
+        });
         let msgs = http::recent(&name, platform, 60);
+        let live = ask.and_then(|h| h.join().ok()).flatten();
         if !msgs.is_empty() {
-            let _ = tx.send((platform, name, msgs));
+            let _ = tx.send(Hist {
+                platform,
+                name,
+                msgs,
+                live,
+            });
         }
     });
 }
@@ -93,9 +109,33 @@ pub(crate) fn drain_history(app: &mut App) {
         focus,
         ..
     } = app;
-    while let Ok((platform, name, msgs)) = hist_rx.try_recv() {
+    while let Ok(Hist {
+        platform,
+        name,
+        msgs,
+        live,
+    }) = hist_rx.try_recv()
+    {
         if let Some(i) = channels.iter().position(|c| c.matches(platform, &name)) {
+            // history reaches back to its oldest timed line; the stream-start
+            // row goes in only when that is at or before the start.
+            let oldest = msgs
+                .iter()
+                .map(|m| m.extra.ts)
+                .filter(|t| *t > 0)
+                .min()
+                .unwrap_or(0);
             channels[i].backfill(msgs);
+            if let Some((start, game)) = live {
+                crate::streamrow::start_row(
+                    &mut channels[i],
+                    &name,
+                    oldest,
+                    start,
+                    &game,
+                    crate::clock::now_secs(),
+                );
+            }
             // focused channel only — background history warms up via the tick
             // sweep when it's actually looked at.
             if i == *focus {
@@ -179,7 +219,29 @@ pub(crate) fn request_stacks(
 
 /// land one line in its tab (if it has one): emote prefetch, the repeat-note
 /// guard, heat/unread, ping and stream-event flags.
-fn deliver(app: &mut App, l: ChatLine, now: u64) {
+pub(crate) fn deliver(app: &mut App, l: ChatLine, now: u64) {
+    if let Some(i) = app
+        .channels
+        .iter()
+        .position(|c| c.matches(l.platform, &l.channel))
+    {
+        deliver_at(app, i, l, now, true);
+    }
+}
+
+/// a followed channel's stream row, for every room tab (it has no tab of its
+/// own). a guest in someone else's tab: no heat, no unread, no light.
+fn fan_out(app: &mut App, l: &ChatLine, now: u64) {
+    for i in 0..app.channels.len() {
+        if app.channels[i].kind == heatsync_core::TabKind::Channel {
+            deliver_at(app, i, l.clone(), now, false);
+        }
+    }
+}
+
+/// land `l` in tab `i`. `own` = the line belongs to this tab (it counts as chat
+/// activity); otherwise it is only shown.
+fn deliver_at(app: &mut App, i: usize, l: ChatLine, now: u64, own: bool) {
     let App {
         channels,
         emotes,
@@ -188,14 +250,9 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
         focus,
         me,
         paints,
+        seen,
         ..
     } = app;
-    let Some(i) = channels
-        .iter()
-        .position(|c| c.matches(l.platform, &l.channel))
-    else {
-        return;
-    };
     // fetch starts the instant the line lands — but only for
     // the channel on screen. prefetching every background
     // channel's emotes burned network + decode for images
@@ -219,6 +276,9 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
     if let Some(u) = &l.uid {
         paints.want(u);
     }
+    if l.note.is_none() {
+        seen.note(l.platform, &l.user, l.color.as_deref(), l.uid.as_deref());
+    }
     let refs = (!l.emotes.is_empty())
         .then(|| std::sync::Arc::new(heatsync_core::emote::ref_set(&l.emotes)));
     if i == *focus {
@@ -230,28 +290,30 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
         && (mentions_any(&l.content, me) || replies_to_me(l.reply_to.as_deref(), me));
     let evented = l.stream.is_some();
     let chan = l.channel.clone();
-    channels[i].record(
-        Message {
-            platform: l.platform,
-            user: l.user,
-            text: l.content,
-            color: l.color,
-            badges: l.badges,
-            id: l.id,
-            gone: None,
-            reply_to: l.reply_to,
-            note: l.note,
-            extra: Extra {
-                ts: crate::clock::now_secs(),
-                ..l.extra
-            },
-            emotes: refs,
-            tags: Vec::new(),
-            heat: 0.0,
-            uid: l.uid,
+    let msg = Message {
+        platform: l.platform,
+        user: l.user,
+        text: l.content,
+        color: l.color,
+        badges: l.badges,
+        id: l.id,
+        gone: None,
+        reply_to: l.reply_to,
+        note: l.note,
+        extra: Extra {
+            ts: crate::clock::now_secs(),
+            ..l.extra
         },
-        now,
-    );
+        emotes: refs,
+        tags: Vec::new(),
+        heat: 0.0,
+        uid: l.uid,
+    };
+    if !own {
+        channels[i].system(msg);
+        return;
+    }
+    channels[i].record(msg, now);
     let mention = pinged
         .then(|| channels[i].messages.back())
         .flatten()
@@ -278,7 +340,7 @@ fn deliver(app: &mut App, l: ChatLine, now: u64) {
 /// a live line through the stream-event guards. a followed-channel twin of an
 /// open tab is dropped (the room's own event lands there); one for a channel
 /// with no tab becomes a status flash. returns what to deliver now.
-fn route(app: &mut App, l: ChatLine, now: u64) -> Vec<ChatLine> {
+pub(crate) fn route(app: &mut App, l: ChatLine, now: u64) -> Vec<ChatLine> {
     let follow = l.stream.as_ref().is_some_and(|s| s.follow);
     if follow {
         // live list changed — the picker's cached rows are now stale.
@@ -298,6 +360,7 @@ fn route(app: &mut App, l: ChatLine, now: u64) -> Vec<ChatLine> {
                 app.status = Some(format!("{} {}", l.channel, n.what));
             }
             special::follow_event(app, l);
+            fan_out(app, l, now);
         }
         return Vec::new();
     }

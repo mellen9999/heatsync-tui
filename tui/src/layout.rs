@@ -468,6 +468,20 @@ pub(crate) fn layout_message(
     if hang > 0 {
         b.indent = hang.min(b.maxw - 1);
     }
+    // went live / switched / went offline: `name ◆ verb game` — the name like
+    // chat's (bold, colour, paint), the verb in the event's hue, the game white.
+    if let Some(n) = m.note.as_ref().filter(|_| crate::streamrow::is_row(m)) {
+        let (verb, hue, game) = crate::streamrow::parts(n);
+        name(&mut b, &m.user, user_color, paint);
+        b.prefix(Span::raw(" "), 1);
+        for w in verb.split(' ') {
+            b.word(w, hue);
+        }
+        for w in game.split(' ').filter(|w| !w.is_empty()) {
+            b.word(w, palette::TEXT);
+        }
+        return b.finish();
+    }
     // an event line: glyph + actor + headline in the event's hue, then any
     // attached chat text (resub message, kicks message) laid out like chat.
     if let Some(n) = &m.note {
@@ -931,6 +945,111 @@ mod wrap_tests {
         } else {
             assert_eq!(spans[0].content, "abcdef");
         }
+    }
+
+    #[test]
+    fn stream_rows_read_name_verb_game_in_their_hues() {
+        use heatsync_core::{Note, NoteKind};
+        let set = EmoteSet::new();
+        for (kind, what, text, verb, hue) in [
+            (
+                NoteKind::Live,
+                "went live — Doom",
+                "cyr ◆ went live — Doom",
+                "◆",
+                Color::Red,
+            ),
+            (
+                NoteKind::Live,
+                "went live",
+                "cyr ◆ went live",
+                "◆",
+                Color::Red,
+            ),
+            (
+                NoteKind::Category,
+                "switched to Doom",
+                "cyr ◆ switched to Doom",
+                "◆",
+                Color::Yellow,
+            ),
+            (
+                NoteKind::Offline,
+                "went offline",
+                "cyr ◆ went offline",
+                "◆",
+                Color::White,
+            ),
+        ] {
+            let mut m = msg("");
+            m.user = "cyr".into();
+            m.color = Some("#00ff00".into());
+            m.text = "a title that stays off the row".into();
+            m.note = Some(Note {
+                kind,
+                what: what.into(),
+            });
+            let look = Look {
+                tag_platform: true,
+                ..Look::default()
+            };
+            let rows = layout_message(&m, &set, EmoteMode::Text, 80, &look);
+            assert_eq!(flat(&rows), vec![format!("[T] {text}")]);
+            let spans = &rows[0].line.spans;
+            let fg = |t: &str| {
+                spans
+                    .iter()
+                    .find(|s| s.content.trim() == t)
+                    .map(|s| s.style)
+            };
+            let name = fg("cyr").unwrap();
+            assert_eq!(name.fg, Some(Color::Rgb(0, 255, 0)));
+            assert!(name.add_modifier.contains(Modifier::BOLD));
+            let v = fg(verb).unwrap();
+            assert_eq!(v.fg, Some(hue));
+            assert!(!v.add_modifier.contains(Modifier::ITALIC));
+            // every word of the verb (dash included) wears the hue
+            for w in what
+                .split(" — ")
+                .next()
+                .unwrap()
+                .split(' ')
+                .filter(|w| !matches!(*w, "Doom"))
+            {
+                assert_eq!(fg(w).unwrap().fg, Some(hue), "{w}");
+            }
+            if what.contains(" — ") {
+                assert_eq!(fg("—").unwrap().fg, Some(hue));
+            }
+            if what.ends_with("Doom") {
+                assert_eq!(fg("Doom").unwrap().fg, Some(Color::White));
+            }
+            // the tui draws no left stripe and no old glyphs
+            assert!(
+                !text.contains('●') && !spans.iter().any(|s| s.content.contains(['●', '→', '○']))
+            );
+        }
+    }
+
+    #[test]
+    fn a_nameless_or_raid_note_keeps_the_old_shape() {
+        use heatsync_core::{Note, NoteKind};
+        let set = EmoteSet::new();
+        let mut m = msg("");
+        m.user.clear();
+        m.note = Some(Note {
+            kind: NoteKind::Live,
+            what: "went live — Doom".into(),
+        });
+        let rows = layout_message(&m, &set, EmoteMode::Text, 80, &Look::default());
+        assert_eq!(flat(&rows), vec!["● went live — Doom"]);
+        m.user = "cyr".into();
+        m.note = Some(Note {
+            kind: NoteKind::Raid,
+            what: "raided x".into(),
+        });
+        let rows = layout_message(&m, &set, EmoteMode::Text, 80, &Look::default());
+        assert_eq!(flat(&rows), vec!["⚑ cyr raided x"]);
     }
 
     #[test]

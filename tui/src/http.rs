@@ -226,7 +226,12 @@ pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_co
                 gone: None,
                 reply_to: None,
                 note: None,
-                extra: Default::default(),
+                // its own time: stamps show, and a stream-start row can tell
+                // whether this history reaches back that far.
+                extra: heatsync_core::Extra {
+                    ts: heatsync_core::iso::parse(&r.timestamp).map_or(0, |t| t.max(0) as u64),
+                    ..Default::default()
+                },
                 emotes: None,
                 tags: Vec::new(),
                 heat: 0.0,
@@ -235,6 +240,53 @@ pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_co
         })
         .filter(|m| !m.user.is_empty() || !m.text.is_empty())
         .collect()
+}
+
+/// twitch's public web gql, the same one the heatsync desktop app's /status
+/// asks: no login, 3s at most, answer capped.
+const GQL: &str = "https://gql.twitch.tv/gql";
+const GQL_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+const MAX_GQL: u64 = 1 << 20;
+
+/// (stream start in unix seconds, game) if `login` is live on twitch right now.
+/// `None` when offline, unknown, or anything at all goes wrong.
+pub fn twitch_live(login: &str) -> Option<(u64, String)> {
+    let ok = !login.is_empty()
+        && login.len() <= 25
+        && login
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !ok {
+        return None;
+    }
+    let body = serde_json::json!({
+        "query": "query($login:String!){user(login:$login){displayName stream{type viewersCount createdAt game{name}} broadcastSettings{title language}}}",
+        "variables": { "login": login.to_lowercase() },
+    });
+    let resp = agent()
+        .post(GQL)
+        .set("Client-Id", GQL_CLIENT_ID)
+        .timeout(Duration::from_secs(3))
+        .send_json(body)
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_reader(resp.into_reader().take(MAX_GQL)).ok()?;
+    parse_live(&v)
+}
+
+/// gql answer → (start, game) of a live stream.
+fn parse_live(v: &serde_json::Value) -> Option<(u64, String)> {
+    let s = v.pointer("/data/user/stream").filter(|s| s.is_object())?;
+    if s.get("type").and_then(|t| t.as_str()) != Some("live") {
+        return None;
+    }
+    let at = s.get("createdAt").and_then(|t| t.as_str())?;
+    let start = heatsync_core::iso::parse(at).filter(|t| *t > 0)? as u64;
+    let game = s
+        .pointer("/game/name")
+        .and_then(|g| g.as_str())
+        .map(|g| heatsync_core::sanitize::clean(g).chars().take(80).collect())
+        .unwrap_or_default();
+    Some((start, game))
 }
 
 fn unix_now() -> u64 {
@@ -444,7 +496,34 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::iso_from_unix;
+    #[test]
+    fn the_gql_answer_gives_a_live_streams_start_and_game() {
+        let live = serde_json::json!({"data": {"user": {"stream": {"type": "live",
+            "createdAt": "2026-11-03T10:00:00Z", "game": {"name": "Just \u{7}Chatting"}}}}});
+        assert_eq!(
+            parse_live(&live),
+            Some((1_793_700_000, "Just Chatting".into()))
+        );
+        let no_game = serde_json::json!({"data": {"user": {"stream": {"type": "live",
+            "createdAt": "2026-11-03T10:00:00Z", "game": null}}}});
+        assert_eq!(parse_live(&no_game).map(|l| l.1), Some(String::new()));
+        for bad in [
+            serde_json::json!({"data": {"user": {"stream": null}}}),
+            serde_json::json!({"data": {"user": null}}),
+            serde_json::json!({"data": {"user": {"stream": {"type": "rerun", "createdAt": "2026-11-03T10:00:00Z"}}}}),
+            serde_json::json!({"data": {"user": {"stream": {"type": "live", "createdAt": "junk"}}}}),
+            serde_json::json!("junk"),
+        ] {
+            assert_eq!(parse_live(&bad), None);
+        }
+        assert_eq!(
+            twitch_live("a b"),
+            None,
+            "a bad login never leaves the machine"
+        );
+    }
+
+    use super::{iso_from_unix, parse_live, twitch_live};
 
     #[test]
     fn iso_conversion_hits_known_instants() {
