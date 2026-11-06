@@ -106,6 +106,16 @@ pub enum ChatEvent {
     },
     /// paints changed for these paint-space ids.
     Cosmetic(Vec<String>),
+    /// a feed row was edited.
+    FeedEdit {
+        id: String,
+        text: String,
+        emotes: Vec<heatsync_core::emote::Emote>,
+    },
+    /// the account's linked platforms / scopes moved.
+    Account,
+    /// the follow list moved.
+    Follows,
 }
 
 /// hand one parsed frame upward. false = the receiver is gone.
@@ -135,6 +145,11 @@ fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
         }
         Event::Color { id, names, color } => tx.send(ChatEvent::Color { id, names, color }).is_ok(),
         Event::Cosmetic(ids) => tx.send(ChatEvent::Cosmetic(ids)).is_ok(),
+        Event::FeedEdit { id, text, emotes } => {
+            tx.send(ChatEvent::FeedEdit { id, text, emotes }).is_ok()
+        }
+        Event::Account => tx.send(ChatEvent::Account).is_ok(),
+        Event::Follows => tx.send(ChatEvent::Follows).is_ok(),
         Event::FollowLive(v) => tx.send(ChatEvent::FollowLive(v)).is_ok(),
         Event::FollowHistory(h) => tx.send(ChatEvent::FollowHistory(h)).is_ok(),
         Event::FollowColors(c) => tx.send(ChatEvent::FollowColors(c)).is_ok(),

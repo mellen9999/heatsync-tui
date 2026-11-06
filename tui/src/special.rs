@@ -44,6 +44,9 @@ pub(crate) struct State {
     pub(crate) social_rx: Receiver<Msg>,
     /// people `/w` and `/dm` can address: your threads, follows, live senders.
     pub(crate) contacts: Vec<Contact>,
+    /// when the last push-driven refetches ran (see [`refetch_due`]).
+    pub(crate) account_at: Option<Instant>,
+    pub(crate) follows_at: Option<Instant>,
 }
 
 impl State {
@@ -68,6 +71,8 @@ impl State {
             social_tx,
             social_rx,
             contacts: Vec::new(),
+            account_at: None,
+            follows_at: None,
         }
     }
 }
@@ -354,6 +359,35 @@ pub(crate) fn mention(app: &mut App, m: Mention) {
     app.special.log.push(m);
 }
 
+/// least gap between two refetches the same push may cause — a hostile or
+/// buggy server can't turn a push flood into a request flood.
+pub(crate) const REFETCH_GAP: Duration = Duration::from_secs(5);
+
+/// true (and stamps `slot`) when a refetch is allowed now.
+pub(crate) fn refetch_due(slot: &mut Option<Instant>) -> bool {
+    let now = Instant::now();
+    if slot.is_some_and(|t| now.duration_since(t) < REFETCH_GAP) {
+        return false;
+    }
+    *slot = Some(now);
+    true
+}
+
+/// `account:changed`: ask who I am again off-thread; new names join `app.me`
+/// (see `feed::drain_hs`), so mention pings follow a newly linked platform.
+pub(crate) fn account_changed(app: &mut App) {
+    if !matches!(app.feed, Feed::Live { .. }) || !refetch_due(&mut app.special.account_at) {
+        return;
+    }
+    let Some(c) = app.hs.clone() else { return };
+    let tx = app.names_tx.clone();
+    std::thread::spawn(move || {
+        if let Ok(v) = c.me() {
+            let _ = tx.send(crate::hsauth::my_names(&v));
+        }
+    });
+}
+
 /// the socket's answer to `authenticate`. a login without the `account`
 /// permission is refused and stays anonymous: say so once, in plain words.
 pub(crate) fn auth(app: &mut App, ok: bool) {
@@ -416,6 +450,19 @@ pub(crate) fn event(app: &mut App, ev: ChatEvent) {
                     .find(|m| m.id.as_deref() == Some(id.as_str()))
                 {
                     m.heat = heat;
+                }
+            }
+        }
+        ChatEvent::FeedEdit { id, text, emotes } => {
+            if let Some(i) = find(app, TabKind::Feed) {
+                let refs = (!emotes.is_empty()).then(|| Arc::new(ref_set(&emotes)));
+                for m in app.channels[i]
+                    .messages
+                    .iter_mut()
+                    .filter(|m| m.id.as_deref() == Some(id.as_str()))
+                {
+                    m.text = text.clone();
+                    m.emotes = refs.clone();
                 }
             }
         }
@@ -572,6 +619,7 @@ pub(crate) mod tests {
             completion: None,
             me: Vec::new(),
             names_rx: channel().1,
+            names_tx: channel().0,
             stamps: false,
             streams: StreamEvents::new(),
             rooms: RoomModes::new(),
@@ -605,8 +653,85 @@ pub(crate) mod tests {
             Event::Special(s) => ChatEvent::Special(s),
             Event::FeedHeat { id, heat } => ChatEvent::FeedHeat { id, heat },
             Event::FeedHidden { id } => ChatEvent::FeedHidden { id },
+            Event::FeedEdit { id, text, emotes } => ChatEvent::FeedEdit { id, text, emotes },
             e => panic!("{e:?}"),
         }
+    }
+
+    #[test]
+    fn an_edit_push_rewrites_the_matching_feed_row_only() {
+        let mut a = app();
+        let i = add(&mut a, TabKind::Feed);
+        for id in ["a1", "b2"] {
+            let raw = format!(
+                r#"{{"type":"new-message","base36_id":"{id}","content":"old","username":"u","is_op":true}}"#
+            );
+            event(&mut a, ev(&raw));
+        }
+        event(
+            &mut a,
+            ev(
+                r##"{"type":"message-edited","message_id":"b2","content":"new Pog",
+                "emote_refs":{"Pog":{"url":"https://cdn.hs/p.webp"}}}"##,
+            ),
+        );
+        let m = &a.channels[i].messages;
+        assert_eq!((m[0].text.as_str(), m[0].emotes.is_some()), ("old", false));
+        assert_eq!(
+            (m[1].text.as_str(), m[1].emotes.is_some()),
+            ("new Pog", true)
+        );
+        // a later edit without refs drops them; an unknown id changes nothing
+        event(
+            &mut a,
+            ev(r#"{"type":"message-updated","base36_id":"b2","content":"plain"}"#),
+        );
+        event(
+            &mut a,
+            ev(r#"{"type":"message-edited","message_id":"zz","content":"ghost"}"#),
+        );
+        let m = &a.channels[i].messages;
+        assert_eq!(
+            (m[1].text.as_str(), m[1].emotes.is_some()),
+            ("plain", false)
+        );
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn refetches_are_rate_limited() {
+        let mut slot = None;
+        assert!(refetch_due(&mut slot));
+        assert!(!refetch_due(&mut slot), "a push flood is one request");
+        slot = Some(Instant::now() - REFETCH_GAP - Duration::from_millis(1));
+        assert!(refetch_due(&mut slot));
+    }
+
+    #[test]
+    fn account_changed_refetches_my_names_once() {
+        use crate::hsauth::testkit::{client as fake_client, Fake};
+        let f = Fake::new(vec![Ok((
+            200,
+            serde_json::json!({"twitch": {"login": "newme"}, "kick": {"linked": false}}),
+        ))]);
+        let mut a = app();
+        let (tx, rx) = channel();
+        a.names_tx = tx;
+        a.hs = Some(fake_client(&f));
+        // the demo never calls out
+        account_changed(&mut a);
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        a.feed = Feed::Live {
+            rx: channel().1,
+            start: Instant::now(),
+            connected: true,
+        };
+        account_changed(&mut a);
+        account_changed(&mut a); // inside the gap: no second call
+        let names = rx.recv_timeout(Duration::from_secs(2)).expect("names");
+        assert_eq!(names, vec!["newme".to_string()]);
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(f.seen.lock().unwrap().len(), 1);
     }
 
     fn mention_of(chan: &str, user: &str) -> Mention {

@@ -178,6 +178,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             completion: None,
             me: Vec::new(),
             names_rx: std::sync::mpsc::channel().1,
+            names_tx: std::sync::mpsc::channel().0,
             stamps: cfg.timestamps,
             emote_tx,
             emote_rx,
@@ -332,9 +333,10 @@ fn build_live(
     // my kick login isn't in the local auth — ask the heatsync login once, off-thread.
     let (names_tx, names_rx) = std::sync::mpsc::channel();
     if let Some(c) = hs.clone() {
+        let tx = names_tx.clone();
         std::thread::spawn(move || {
             if let Ok(v) = c.me() {
-                let _ = names_tx.send(hsauth::my_names(&v));
+                let _ = tx.send(hsauth::my_names(&v));
             }
         });
     }
@@ -367,6 +369,7 @@ fn build_live(
         completion: None,
         me,
         names_rx,
+        names_tx,
         stamps,
         emote_tx,
         emote_rx,

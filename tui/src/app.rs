@@ -78,6 +78,8 @@ pub(crate) struct App {
     pub(crate) me: Vec<String>,
     /// the heatsync login's names arrive here once, from a startup thread.
     pub(crate) names_rx: Receiver<Vec<String>>,
+    /// …and again whenever `account:changed` pushes.
+    pub(crate) names_tx: Sender<Vec<String>>,
     /// dim `HH:MM` before each line (`t`, persisted).
     pub(crate) stamps: bool,
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the

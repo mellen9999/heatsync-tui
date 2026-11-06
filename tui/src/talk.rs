@@ -58,6 +58,18 @@ pub(crate) fn load_hits(app: &mut App) {
     });
 }
 
+/// `follows:changed`: refetch the follow list; new people become `/dm`-able.
+pub(crate) fn refresh_follows(app: &mut App) {
+    if !special::refetch_due(&mut app.special.follows_at) {
+        return;
+    }
+    let Some(c) = client(app) else { return };
+    spawn(app, c, |c| match c.follow_contacts() {
+        Ok(f) => Msg::Follows(f),
+        Err(_) => Msg::Say(String::new()),
+    });
+}
+
 /// remember who a live whisper / dm came from, so `/w` and `r` can answer them.
 pub(crate) fn learn(app: &mut App, c: Contact) {
     let known = app
@@ -239,6 +251,13 @@ pub(crate) fn drain(app: &mut App) {
                     learn(app, c);
                 }
                 special::backfill_whispers(app, rows);
+            }
+            Msg::Follows(found) => {
+                for f in found {
+                    if !app.special.contacts.iter().any(|c| c.dm && c.id == f.id) {
+                        learn(app, f);
+                    }
+                }
             }
             Msg::Hits(hits) => {
                 let rows = hits
@@ -458,6 +477,33 @@ mod tests {
         assert!(!post(&mut a, "gm", None));
         assert!(!direct(&mut a, false, "bob", "hi"));
         assert!(a.status.as_deref().unwrap().contains("heatsync-tui login"));
+    }
+
+    #[test]
+    fn follows_changed_teaches_new_dm_contacts_without_duplicating() {
+        let f = Fake::new(vec![Ok((
+            200,
+            json!({"following": [{"id": "u9", "username": "streamer"}, {"id": "12", "username": "cat"}]}),
+        ))]);
+        let mut a = live(&f);
+        learn(
+            &mut a,
+            social::Contact {
+                name: "cat".into(),
+                login: "cat".into(),
+                id: "12".into(),
+                dm: true,
+            },
+        );
+        refresh_follows(&mut a);
+        refresh_follows(&mut a); // inside the gap: one request
+        let m = answer(&a);
+        assert!(matches!(&m, Msg::Follows(c) if c.len() == 2));
+        a.special.social_tx.send(m).unwrap();
+        drain(&mut a);
+        let ids: Vec<_> = a.special.contacts.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["12", "u9"]);
+        assert_eq!(f.seen.lock().unwrap().len(), 1);
     }
 
     fn feed_row(id: &str, reply: bool) -> Event {

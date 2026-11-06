@@ -20,6 +20,8 @@ pub(crate) enum Msg {
         rows: Vec<Row>,
     },
     Hits(Vec<Hit>),
+    /// the follow list, refetched after `follows:changed`.
+    Follows(Vec<Contact>),
     /// a whisper / dm went out to them — remembered so the next one skips any lookup.
     Sent(Contact),
     /// the name matched nobody: why, and the command to put back in the composer.
@@ -52,6 +54,12 @@ impl Client {
             (200, v) => Ok(v),
             (st, v) => Err(fail(self.base(), st, &v, false)),
         }
+    }
+
+    /// the people you follow, as dm-addressable contacts.
+    pub(crate) fn follow_contacts(&self) -> Result<Vec<Contact>, String> {
+        self.read("/api/cli/following")
+            .map(|v| social::following_contacts(&v))
     }
 
     fn write(&self, path: &str, body: Value) -> Result<Value, String> {

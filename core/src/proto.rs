@@ -139,6 +139,17 @@ pub enum Event {
     },
     /// `cosmetic:changed`: paints changed for these paint-space ids.
     Cosmetic(Vec<String>),
+    /// `message-edited` / `message-updated`: a feed row's text (and the emote
+    /// refs it now renders with) changed.
+    FeedEdit {
+        id: String,
+        text: String,
+        emotes: Vec<Emote>,
+    },
+    /// `account:changed`: linked platforms or scopes moved — re-ask who I am.
+    Account,
+    /// `follows:changed`: the follow list moved — refetch it.
+    Follows,
     Ignore,
 }
 
@@ -291,8 +302,33 @@ pub fn parse(raw: &str) -> Event {
                 })
                 .unwrap_or_default(),
         ),
+        "message-edited" | "message-updated" => feed_edit(&v),
+        "account:changed" => Event::Account,
+        "follows:changed" => Event::Follows,
         _ => Event::Ignore,
     }
+}
+
+/// longest edited feed text we take (the site caps posts well below this).
+const MAX_EDIT_TEXT: usize = 8_000;
+/// longest message id we take.
+const MAX_ID: usize = 128;
+
+/// `message-edited` {message_id, content, emote_refs} or `message-updated` (the
+/// whole row, `base36_id`), bare or wrapped in `data`. no id or no text → nothing.
+fn feed_edit(v: &Value) -> Event {
+    let m = v.get("data").filter(|d| d.is_object()).unwrap_or(v);
+    let Some(id) = str_or_num(m, &["base36_id", "message_id", "id"]).filter(|s| s.len() <= MAX_ID)
+    else {
+        return Event::Ignore;
+    };
+    let text = field(m, "content");
+    if text.is_empty() {
+        return Event::Ignore;
+    }
+    let text = text.chars().take(MAX_EDIT_TEXT).collect();
+    let emotes = refs_from(m.get("emote_refs").or_else(|| m.get("emoteRefs")));
+    Event::FeedEdit { id, text, emotes }
 }
 
 /// pull a ChatLine out of a message object. drops lines with empty user+text.
@@ -1750,6 +1786,61 @@ mod tests {
             parse(r#"{"type":"new-message","content":"c","username":"u"}"#),
             Event::Ignore
         ));
+    }
+
+    #[test]
+    fn feed_edits_carry_id_text_and_refs() {
+        let raw = r##"{"type":"message-edited","message_id":"00004a","content":"fixed Pog",
+            "emote_refs":{"Pog":{"url":"https://cdn.hs/p.webp"}}}"##;
+        match parse(raw) {
+            Event::FeedEdit { id, text, emotes } => {
+                assert_eq!((id.as_str(), text.as_str()), ("00004a", "fixed Pog"));
+                assert_eq!(emotes.len(), 1);
+            }
+            e => panic!("expected edit, got {e:?}"),
+        }
+        // the whole row, wrapped in data, keyed by base36_id; control bytes cleaned
+        let raw = "{\"type\":\"message-updated\",\"data\":{\"base36_id\":\"b\",\"id\":9,\
+            \"content\":\"a\\u001b[31mb\"}}";
+        match parse(raw) {
+            Event::FeedEdit { id, text, .. } => {
+                assert_eq!(id, "b");
+                assert!(!text.contains('\u{1b}'));
+            }
+            e => panic!("expected edit, got {e:?}"),
+        }
+        // malformed: no id, no text, id too long → ignored
+        for raw in [
+            r#"{"type":"message-edited","content":"x"}"#,
+            r#"{"type":"message-edited","message_id":"a"}"#,
+            r#"{"type":"message-edited","message_id":"a","content":5}"#,
+            r#"{"type":"message-updated","data":7}"#,
+        ] {
+            assert_eq!(parse(raw), Event::Ignore, "{raw}");
+        }
+        let long = format!(
+            r#"{{"type":"message-edited","message_id":"{}","content":"x"}}"#,
+            "a".repeat(129)
+        );
+        assert_eq!(parse(&long), Event::Ignore);
+        // oversized text is cut, not refused
+        let big = format!(
+            r#"{{"type":"message-edited","message_id":"a","content":"{}"}}"#,
+            "y".repeat(50_000)
+        );
+        match parse(&big) {
+            Event::FeedEdit { text, .. } => assert_eq!(text.chars().count(), MAX_EDIT_TEXT),
+            e => panic!("expected edit, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn account_and_follow_pushes_are_bare_signals() {
+        assert_eq!(parse(r#"{"type":"account:changed"}"#), Event::Account);
+        assert_eq!(
+            parse(r#"{"type":"follows:changed","junk":[1,2,3]}"#),
+            Event::Follows
+        );
     }
 
     #[test]

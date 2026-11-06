@@ -414,7 +414,10 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
             }
             ev @ (ChatEvent::Special(_)
             | ChatEvent::FeedHeat { .. }
-            | ChatEvent::FeedHidden { .. }) => specials.push(ev),
+            | ChatEvent::FeedHidden { .. }
+            | ChatEvent::FeedEdit { .. }) => specials.push(ev),
+            ChatEvent::Account => special::account_changed(app),
+            ChatEvent::Follows => talk::refresh_follows(app),
             ChatEvent::Color { id, names, color } => {
                 app.paints.set_color(id.as_deref(), &names, &color)
             }
