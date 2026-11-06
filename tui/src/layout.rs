@@ -1003,7 +1003,8 @@ mod wrap_tests {
                     .map(|s| s.style)
             };
             let name = fg("cyr").unwrap();
-            assert_eq!(name.fg, Some(Color::Rgb(0, 255, 0)));
+            // the exact rgb on truecolor, its nearest 256 index elsewhere (CI has no COLORTERM)
+            assert_eq!(name.fg, parse_hex("#00ff00"));
             assert!(name.add_modifier.contains(Modifier::BOLD));
             let v = fg(verb).unwrap();
             assert_eq!(v.fg, Some(hue));
