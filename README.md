@@ -1,6 +1,6 @@
 # heatsync tui
 
-heat-sorted live multichat in the terminal. twitch + kick, real emotes, vim keys.
+heat-sorted live multichat in the terminal. twitch, kick and youtube (read-only), real emotes, vim keys.
 
 install (needs [rust](https://rustup.rs)):
 
@@ -14,7 +14,7 @@ run:
 
 ```
 heatsync-tui                                   # your saved channels (or a demo set)
-heatsync-tui xqc forsen kick:trainwreckstv     # pick channels
+heatsync-tui xqc forsen kick:trainwreckstv     # pick channels (youtube: yt:<video id>)
 heatsync-tui login                             # pair this terminal (see login)
 ```
 
