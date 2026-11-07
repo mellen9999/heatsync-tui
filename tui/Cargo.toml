@@ -2,7 +2,7 @@
 name = "heatsync-tui"
 version = "0.1.2"
 edition = "2021"
-description = "heat-sorted live multichat in the terminal — twitch + kick, real emotes, vim keys"
+description = "heat-sorted live multichat in the terminal — twitch, kick + youtube (read-only), real emotes, vim keys"
 license = "MIT"
 repository = "https://github.com/mellen9999/heatsync-tui"
 homepage = "https://heatsync.org"
