@@ -2,14 +2,20 @@
 
 heat-sorted live multichat in the terminal. twitch + kick, real emotes, vim keys.
 
+install (needs [rust](https://rustup.rs)):
+
 ```
 cargo install heatsync-tui
 ```
 
+arch: `paru -S heatsync-tui` (also installs the short name `hs`).
+
+run:
+
 ```
-heatsync-tui                 # or just: hs — opens your saved channels (or a demo set)
-heatsync-tui xqc forsen kick:trainwreckstv   # explicit channels
-heatsync-tui login           # pair this terminal (see login)
+heatsync-tui                                   # your saved channels (or a demo set)
+heatsync-tui xqc forsen kick:trainwreckstv     # pick channels
+heatsync-tui login                             # pair this terminal (see login)
 ```
 
 keys: `j`/`k` scroll · `h`/`l` (or `j`/`k` with a side tab bar) switch channel ·
@@ -41,6 +47,7 @@ open with `/mentions`, `/feed`, `/whispers` — they pin left and stay open next
 | whispers | twitch whispers + heatsync dms, history loads on open | `r` on a row fills in `/w <them> ` or `/dm <them> ` |
 
 - `/open <channel>` look at a stream in the one temp tab (underlined, never saved, replaced by the next look); `/keep` or `s` saves it, and so does a send that lands. `/join` always saves
+- `/layout <heatsync.org/m/ link>` load a shared layout · `/sharelayout` (`/sl`) share yours
 - `/w <user> <msg>` twitch whisper · `/dm <user> <msg>` heatsync dm — works from any tab
 - `/op <text>` post to the feed · `/re <text>` reply to the newest OP in the feed tab
 - `/w` and `/dm` look the name up on heatsync (and remember it); an unknown name leaves your text in the composer. whispering needs twitch linked with whispers allowed (the tui prints the exact link if not).
@@ -48,22 +55,12 @@ open with `/mentions`, `/feed`, `/whispers` — they pin left and stay open next
 
 ## emotes
 
-emotes render as real (animated) images when the terminal supports inline
-graphics. the client auto-detects and picks the best protocol; nothing to set.
+emotes draw as real images (animated) in terminals that support inline
+graphics, detected automatically — nothing to set:
 
-| terminal | os | result |
-|----------|----|--------|
-| **foot** | linux | sixel — crisp, stable (the light default) |
-| **Windows Terminal** | windows | sixel — works out of the box |
-| **iTerm2** | macos | native inline images |
-| kitty · ghostty | linux/mac | flicker-free, extra smooth |
-| **WezTerm** | win/mac/linux | flicker-free — the one graphics terminal on all three |
-| anything else | — | emote names as text (still fully usable) |
+- kitty · ghostty · wezterm — kitty graphics, flicker-free
+- foot · mlterm · contour · gnome-terminal (vte 0.78+) — sixel
+- iterm2 · mintty — inline images
+- anything else — emote names as text, fully usable
 
-sixel terminals animate at a steady ~10fps (tear-free); the kitty protocol
-(kitty/ghostty/wezterm) runs smoother and never flickers. you don't need a heavy
-terminal — foot / Windows Terminal are light and look great. WezTerm is only
-worth it if you specifically want the silkiest animation on windows.
-
-running inside **tmux** works: the client asks tmux for the outer terminal and
-wraps graphics in passthrough — no keyboard-stealing capability query.
+works inside tmux (it asks tmux for the outer terminal).

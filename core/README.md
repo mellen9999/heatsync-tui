@@ -1,11 +1,9 @@
 # heatsync-core
 
-Protocol types, heat ranking and emote resolution for
-[heatsync](https://heatsync.org) — the shared brain behind the terminal client
-and the browser extension.
+protocol types, heat ranking and emote resolution for
+[heatsync](https://heatsync.org) — the shared logic behind the clients in this repo.
 
-No terminal, async or io dependencies: this crate is pure types and logic, so
-anything can be a face over it.
+no terminal, async or io dependencies — pure types and logic, so any ui can sit on top.
 
-The terminal client that uses it is [`heatsync-tui`](https://crates.io/crates/heatsync-tui).
-Source: <https://github.com/mellen9999/heatsync-tui>
+the terminal client is [`heatsync-tui`](https://crates.io/crates/heatsync-tui).
+source: <https://github.com/mellen9999/heatsync-tui>
