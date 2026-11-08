@@ -14,7 +14,7 @@ name = "heatsync-gui"
 path = "src/main.rs"
 
 [dependencies]
-heatsync-core = { path = "../core", version = "0.1.0" }
+heatsync-core = { path = "../core", version = "0.2.0" }
 # glow (OpenGL), not wgpu. A chat window is 2D text and quads — wgpu buys
 # nothing here and drags in the whole wgpu-hal/D3D12 tree, which as of
 # windows 0.62.2 does not compile on the windows runner at all. Fewer deps,
