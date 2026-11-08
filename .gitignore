@@ -1,1 +1,5 @@
 /target
+/packaging/aur/src
+/packaging/aur/pkg
+/packaging/aur/*.crate
+/packaging/aur/*.tar.*
