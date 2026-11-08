@@ -13,7 +13,8 @@ pub(crate) fn now_secs() -> u64 {
 /// (hour, minute) of a unix timestamp in local time.
 #[cfg(unix)]
 pub(crate) fn hhmm(secs: u64) -> (u32, u32) {
-    let t = secs as libc::time_t;
+    // `as _`, not `libc::time_t`: that alias is deprecated on musl, and the cast is the same size either way
+    let t = secs as _;
     // SAFETY: localtime_r writes only into the zeroed tm we hand it.
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
