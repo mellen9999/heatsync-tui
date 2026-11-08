@@ -63,9 +63,7 @@ pub fn global_emotes() -> Option<EmoteSet> {
         .ok()?
         .into_json()
         .ok()?;
-    let mut set = EmoteSet::from_list(resp.emotes);
-    set.mark_global();
-    Some(set)
+    Some(EmoteSet::from_global_list(resp.emotes))
 }
 
 /// `/api/paints` for a batch of paint-space ids (<=50): heatsync paint specs
@@ -81,7 +79,7 @@ pub fn cosmetics(ids: &[String]) -> Option<serde_json::Value> {
     agent().get(&url).call().ok()?.into_json().ok()
 }
 
-/// channel emote set (7tv/bttv/ffz precedence, deduped server-side).
+/// channel emote set (the server sends each name's winner last: ffz > 7tv > bttv).
 pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
     let url = format!(
         "{BASE}/api/channel/{channel}/emotes?platform={}",

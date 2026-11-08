@@ -50,13 +50,33 @@ impl EmoteSet {
         NONE.get_or_init(EmoteSet::new)
     }
 
-    /// build from an API list. the server already ordered by precedence and
-    /// deduped, but we defend with first-wins so a stray dup can't override.
+    /// build from a channel API list. the server sends the winner of a name
+    /// LAST (`[bttv, 7tv, ffz]` for last-writer-wins clients, so ffz > 7tv >
+    /// bttv), so a later entry replaces an earlier one.
     pub fn from_list(list: impl IntoIterator<Item = Emote>) -> EmoteSet {
         let mut set = EmoteSet::new();
         for e in list {
-            set.map.entry(e.name.clone()).or_insert(e);
+            set.map.insert(e.name.clone(), e);
         }
+        set
+    }
+
+    /// build from the pooled global list (`/api/emotes`), stamped global. its
+    /// row order says nothing about providers, so rank them here: 7tv > bttv >
+    /// ffz > twitch (the extension's global order), losers first.
+    pub fn from_global_list(list: impl IntoIterator<Item = Emote>) -> EmoteSet {
+        const WINNER_FIRST: [&str; 4] = ["7tv", "bttv", "ffz", "twitch"];
+        let rank = |e: &Emote| {
+            WINNER_FIRST
+                .iter()
+                .position(|p| *p == e.provider)
+                .unwrap_or(WINNER_FIRST.len())
+        };
+        let mut list: Vec<Emote> = list.into_iter().collect();
+        // stable, descending rank: the winner ends up last
+        list.sort_by_key(|e| std::cmp::Reverse(rank(e)));
+        let mut set = EmoteSet::from_list(list);
+        set.mark_global();
         set
     }
 
@@ -644,9 +664,8 @@ pub enum Segment {
 
 /// name → emote with per-message refs on top. refs (the sender's inventory
 /// emotes, twitch/kick native ids) win over the channel set — the emote the
-/// sender actually used is the only one that isn't a guess. native refs are
-/// the exception: a same-named emote in the set wins (its url is the animated
-/// / full-quality one and its zero-width flag is known).
+/// sender actually used is the only one that isn't a guess. a platform token
+/// is exact by position, so no same-named set emote ever replaces it.
 struct Lookup<'a> {
     set: &'a EmoteSet,
     refs: &'a EmoteSet,
@@ -654,13 +673,7 @@ struct Lookup<'a> {
 
 impl<'a> Lookup<'a> {
     fn get(&self, name: &str) -> Option<&'a Emote> {
-        match self.refs.get(name) {
-            Some(r) if matches!(r.provider.as_str(), "twitch" | "kick") => {
-                self.set.get(name).or(Some(r))
-            }
-            Some(r) => Some(r),
-            None => self.set.get(name),
-        }
+        self.refs.get(name).or_else(|| self.set.get(name))
     }
 }
 
@@ -954,19 +967,37 @@ mod tests {
     }
 
     #[test]
-    fn first_insert_wins_on_collision() {
-        let set = EmoteSet::from_list([
-            Emote {
-                provider: "7tv".into(),
-                ..e("Kappa")
-            },
-            Emote {
-                provider: "bttv".into(),
-                ..e("Kappa")
-            },
-        ]);
-        assert_eq!(set.get("Kappa").unwrap().provider, "7tv");
+    fn last_entry_wins_on_collision() {
+        // server order [bttv, 7tv, ffz]: ffz > 7tv > bttv
+        let p = |n: &str| Emote {
+            provider: n.into(),
+            ..e("Kappa")
+        };
+        let set = EmoteSet::from_list([p("bttv"), p("7tv"), p("ffz")]);
+        assert_eq!(set.get("Kappa").unwrap().provider, "ffz");
         assert_eq!(set.len(), 1);
+        let set = EmoteSet::from_list([p("bttv"), p("7tv")]);
+        assert_eq!(set.get("Kappa").unwrap().provider, "7tv");
+    }
+
+    #[test]
+    fn globals_rank_7tv_bttv_ffz_whatever_the_row_order() {
+        let p = |n: &str| Emote {
+            provider: n.into(),
+            ..e("Kappa")
+        };
+        for rows in [
+            vec![p("7tv"), p("bttv"), p("ffz"), p("twitch")],
+            vec![p("twitch"), p("ffz"), p("bttv"), p("7tv")],
+            vec![p("ffz"), p("7tv"), p("twitch"), p("bttv")],
+        ] {
+            let set = EmoteSet::from_global_list(rows);
+            let k = set.get("Kappa").unwrap();
+            assert_eq!(k.provider, "7tv");
+            assert!(k.global);
+        }
+        let set = EmoteSet::from_global_list([p("twitch"), p("ffz")]);
+        assert_eq!(set.get("Kappa").unwrap().provider, "ffz");
     }
 
     #[test]
@@ -1183,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn refs_outrank_the_set_but_native_yields_to_it() {
+    fn refs_outrank_the_set_native_included() {
         let set = EmoteSet::from_list([e("Kappa")]);
         let heat = Emote {
             url: "https://hs/Kappa".into(),
@@ -1197,13 +1228,13 @@ mod tests {
             Segment::Stack(s) => assert_eq!(s.layers[0].url, "https://hs/Kappa"),
             _ => panic!(),
         }
-        // native twitch ref yields to the set's copy…
+        // a native twitch token beats the same-name set emote
         let refs = EmoteSet::from_list([native("Kappa", "twitch")]);
         match &segments_with("Kappa", &set, &refs)[0] {
-            Segment::Stack(s) => assert_eq!(s.layers[0].url, "https://cdn/Kappa.webp"),
+            Segment::Stack(s) => assert_eq!(s.layers[0].url, "https://native/Kappa"),
             _ => panic!(),
         }
-        // …but resolves a name the set doesn't have, with modifiers
+        // and resolves a name the set doesn't have, with modifiers
         let refs = EmoteSet::from_list([native("SubEmote", "twitch")]);
         match &segments_with("w! SubEmote ffzX", &set, &refs)[0] {
             Segment::Stack(s) => {

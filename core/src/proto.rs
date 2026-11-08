@@ -418,8 +418,9 @@ fn refs_from(v: Option<&Value>) -> Vec<Emote> {
 const MAX_REFS: usize = 64;
 
 /// a message's emote refs, plus its text (kick tokens are rewritten to names).
-/// order is priority: the relay's `hsEmotes` (the sender's inventory emotes,
-/// resolved server-side) first, then the platform's native ids.
+/// order is priority, first wins: the platform's native ids (exact by position,
+/// what the line literally carries), then the relay's `hsEmotes` (the sender's
+/// inventory emotes, resolved server-side).
 fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emote>) {
     let mut refs: Vec<Emote> = Vec::new();
     let mut add = |e: Emote| {
@@ -427,9 +428,6 @@ fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emot
             refs.push(e);
         }
     };
-    for e in refs_from(m.get("hsEmotes")) {
-        add(e);
-    }
     let mut text = content.to_string();
     match platform {
         Platform::Twitch => {
@@ -458,6 +456,9 @@ fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emot
             }
         }
         _ => {}
+    }
+    for e in refs_from(m.get("hsEmotes")) {
+        add(e);
     }
     (text, refs)
 }
@@ -1634,7 +1635,7 @@ mod tests {
     }
 
     #[test]
-    fn hs_emotes_map_becomes_refs_and_outranks_native() {
+    fn native_token_outranks_hs_emotes_of_the_same_name() {
         let l = chat(
             r##"{"type":"irc:message","channel":"c","message":{
             "username":"u","content":"Kappa nope",
@@ -1646,11 +1647,16 @@ mod tests {
               "Evil":{"url":"javascript:alert(1)"},
               "two words":{"url":"https://cdn.hs/x.webp"}}}}"##,
         );
-        // inventory Kappa first (native Kappa dedupes behind it); stubs/bad dropped
+        // the irc-tag Kappa wins (inventory Kappa dedupes behind it); stubs/bad dropped
         assert_eq!(
             pairs(&l),
             vec![
-                ("Kappa", "https://cdn.hs/k.webp", "heatsync", false),
+                (
+                    "Kappa",
+                    "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0",
+                    "twitch",
+                    false
+                ),
                 ("notL", "https://cdn.7tv.app/n.webp", "7tv", true),
             ]
         );
