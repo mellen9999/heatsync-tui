@@ -957,14 +957,14 @@ mod wrap_tests {
                 "went live — Doom",
                 "cyr ◆ went live — Doom",
                 "◆",
-                Color::Red,
+                Color::Yellow,
             ),
             (
                 NoteKind::Live,
                 "went live",
                 "cyr ◆ went live",
                 "◆",
-                Color::Red,
+                Color::Yellow,
             ),
             (
                 NoteKind::Category,

@@ -94,8 +94,8 @@ pub(crate) fn parts(n: &Note) -> (String, Style, &str) {
     let s = Style::new();
     match n.kind {
         NoteKind::Live => match n.what.split_once(" — ") {
-            Some((v, game)) => (format!("◆ {v} —"), s.fg(Color::Red), game),
-            None => (format!("◆ {}", n.what), s.fg(Color::Red), ""),
+            Some((v, game)) => (format!("◆ {v} —"), s.fg(Color::Yellow), game),
+            None => (format!("◆ {}", n.what), s.fg(Color::Yellow), ""),
         },
         NoteKind::Category => {
             let game = n.what.strip_prefix("switched to ").unwrap_or("");
@@ -293,13 +293,13 @@ mod tests {
             (
                 r#"{"type":"stream:online","platform":"twitch","channel":"C","game":"Doom"}"#,
                 "◆ went live —",
-                Color::Red,
+                Color::Yellow,
                 "Doom",
             ),
             (
                 r#"{"type":"stream:online","platform":"twitch","channel":"c"}"#,
                 "◆ went live",
-                Color::Red,
+                Color::Yellow,
                 "",
             ),
             (
