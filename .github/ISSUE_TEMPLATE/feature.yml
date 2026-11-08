@@ -1,0 +1,15 @@
+name: feature
+description: an idea for heatsync-tui
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: what you want
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: why
+      description: what's hard or missing today

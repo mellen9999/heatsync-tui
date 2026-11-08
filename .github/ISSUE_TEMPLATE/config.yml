@@ -1,5 +1,5 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
   - name: security report
-    url: https://github.com/mellen9999/heatsync-tui/security/policy
-    about: please don't file security bugs as public issues. follow the steps in SECURITY.md
+    url: https://github.com/mellen9999/heatsync-tui/blob/main/SECURITY.md
+    about: please don't file security bugs as public issues. SECURITY.md says how to report one privately

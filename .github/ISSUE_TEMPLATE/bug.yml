@@ -1,0 +1,34 @@
+name: bug
+description: something broke or looks wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: what happened
+      description: and what you expected instead. a screenshot helps
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: steps to reproduce
+      placeholder: |
+        1.
+        2.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: version
+      description: run `heatsync-tui --version`
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: os and terminal
+      description: for example arch linux, foot, inside tmux
+    validations:
+      required: true
