@@ -2,15 +2,47 @@
 
 heat-sorted live multichat in the terminal. twitch, kick and youtube (read-only), real emotes, vim keys.
 
-install (needs [rust](https://rustup.rs)):
+## install
 
+pick one. each gives you the same `heatsync-tui`.
+
+**1. download it** (no rust needed). linux, on a 64-bit pc or arm board:
+
+```sh
+mkdir -p ~/.local/bin
+curl -fL -o ~/.local/bin/heatsync-tui "https://github.com/mellen9999/heatsync-tui/releases/latest/download/heatsync-tui-$(uname -m)-linux"
+chmod +x ~/.local/bin/heatsync-tui
+heatsync-tui --version
 ```
+
+if that last line says "command not found", `~/.local/bin` isn't on your PATH yet: run `~/.local/bin/heatsync-tui` instead, or add `export PATH="$HOME/.local/bin:$PATH"` to your `~/.bashrc` (`~/.zshrc` for zsh) and open a new terminal.
+
+- `uname -m` fills in `x86_64` (most pcs) or `aarch64` (raspberry pi 4/5 on a 64-bit os, asahi). anything else makes curl say "error: 404": there is no build for that machine, use cargo below
+- old or odd distro, or alpine, and the file won't start? get the static build (x86_64 only): end the url with `heatsync-tui-x86_64-linux-musl`
+- **windows** (10 or newer, 64-bit): open powershell in the folder you want it in and run
+
+  ```powershell
+  curl.exe -fL -o heatsync-tui.exe https://github.com/mellen9999/heatsync-tui/releases/latest/download/heatsync-tui-x86_64-windows.exe
+  .\heatsync-tui.exe --version
+  ```
+
+  it's a terminal app: run it from powershell or windows terminal, not by double-clicking. the exe isn't code-signed, so if you download it in a browser instead, windows says "windows protected your pc": click **more info**, then **run anyway**. downloading with the powershell command above usually skips that
+- proof it's the real file: every release has a `SHA256SUMS`. on linux, download it next to the binary and run `sha256sum -c --ignore-missing SHA256SUMS`; on windows `Get-FileHash heatsync-tui.exe` should print the same hash as the windows line
+- update: run the same commands again
+
+**2. cargo** (needs [rust](https://rustup.rs) and a c compiler: `gcc` or `clang` on linux and mac, the visual studio build tools on windows):
+
+```sh
 cargo install heatsync-tui
 ```
 
-arch: `paru -S heatsync-tui` (also installs the short name `hs`).
+**3. arch** (builds it for you, also installs the short name `hs`):
 
-run:
+```sh
+paru -S heatsync-tui
+```
+
+## run
 
 ```
 heatsync-tui                                   # your saved channels (or a demo set)
@@ -64,3 +96,7 @@ graphics, detected automatically — nothing to set:
 - anything else — emote names as text, fully usable
 
 works inside tmux (it asks tmux for the outer terminal).
+
+## more
+
+[changelog](https://github.com/mellen9999/heatsync-tui/blob/main/CHANGELOG.md) · [contributing](https://github.com/mellen9999/heatsync-tui/blob/main/CONTRIBUTING.md) · [security](https://github.com/mellen9999/heatsync-tui/blob/main/SECURITY.md) · MIT
