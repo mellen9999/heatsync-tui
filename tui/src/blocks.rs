@@ -1,6 +1,6 @@
 //! per-emote blocks from the keyboard: `/block <emote>`, `/unblock <emote>`,
 //! `/blocked`, and `b` in the message cursor. hides the EXACT emote (keyed by
-//! url, see core's block module), never the name. kept in the config; when
+//! its identity, see core's blockid module), never the name. kept in the config; when
 //! logged in the account is told too, so the extension and chatterino agree.
 
 use crate::app::App;
@@ -62,8 +62,8 @@ pub(crate) fn unblock_cmd(app: &mut App, name: &str) {
     if keys.is_empty() {
         keys.extend(
             resolve(app, name)
-                .and_then(|e| block::key(&e))
-                .filter(|k| block::list().iter().any(|(b, _)| b == k)),
+                .map(|e| block::held(&e))
+                .unwrap_or_default(),
         );
     }
     if keys.is_empty() {

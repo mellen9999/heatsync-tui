@@ -1,14 +1,17 @@
 //! per-emote blocks: hide one exact emote, never a name.
 //!
-//! a block is keyed by the emote's url, base64'd — the same key the extension
-//! files (`emoteBlockKey`: btoa(url)) and the server stores, because refs carry
-//! no hash. two emotes sharing a name (7tv `W`, bttv `W`) are two keys; a
-//! friend's same-named emote is a third. blocking never touches a name.
+//! a block is keyed by the emote's identity (see `blockid`): the provider's own
+//! id for 7tv/bttv/kick/ffz/twitch urls, else sha256 of the normalised url — the
+//! same key the extension, desktop and chatterino file, so a block made in any
+//! client hides the emote in every other. a block an older build filed as
+//! btoa(url) is still honoured. two emotes sharing a name (7tv `W`, bttv `W`)
+//! are two keys; blocking never touches a name.
 //!
 //! the set is process-global: layout and completion consult it without every
 //! caller threading it through. the face loads it from config at start and
 //! persists after every change.
 
+use crate::blockid::{all_forms, emote_hash, Scope};
 use crate::emote::Emote;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -62,19 +65,41 @@ fn unb64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// the block key of an emote: btoa(url). None when it won't fit the server.
-pub fn key_of_url(url: &str) -> Option<String> {
+/// the old key shape (btoa of the url), kept so existing blocks still match.
+/// None when it won't fit the server.
+fn legacy_key_of_url(url: &str) -> Option<String> {
     let k = b64(url.as_bytes());
     (!url.is_empty() && k.len() <= KEY_MAX).then_some(k)
 }
 
+/// the key a new block of this emote is filed under. None when it has no url.
 pub fn key(e: &Emote) -> Option<String> {
-    key_of_url(&e.url)
+    if e.url.is_empty() {
+        return None;
+    }
+    let scope = if e.global {
+        Scope::Global
+    } else {
+        Scope::Channel
+    };
+    Some(emote_hash(&e.url, scope))
+}
+
+/// every key this emote could be blocked under, any client or build.
+fn forms(e: &Emote) -> Vec<String> {
+    let mut v = all_forms(&e.url);
+    v.extend(legacy_key_of_url(&e.url));
+    if e.id.len() >= 8 {
+        v.push(e.id.clone());
+    }
+    v
 }
 
 /// what a key points at, for display: the url's last two path parts.
 pub fn describe(key: &str) -> String {
-    let url = unb64(key).and_then(|b| String::from_utf8(b).ok());
+    let url = unb64(key)
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|u| u.starts_with("http"));
     match url {
         Some(u) => {
             let tail: Vec<&str> = u.rsplit('/').take(2).collect();
@@ -152,17 +177,14 @@ impl Blocks {
             .collect()
     }
 
-    /// is this exact emote blocked — by url key, or by the provider id the
-    /// extension files long ids under (ulids, bttv hex; short numeric ids are
-    /// not unique across providers, so they never match).
+    /// is this exact emote blocked — under any key any client files it by.
     pub fn hides(&self, e: &Emote) -> bool {
-        if self.order.is_empty() {
-            return false;
-        }
-        if key(e).is_some_and(|k| self.has(&k)) {
-            return true;
-        }
-        e.id.len() >= 8 && self.has(&e.id)
+        !self.order.is_empty() && forms(e).iter().any(|k| self.has(k))
+    }
+
+    /// the keys held for this exact emote (to unblock every form).
+    pub fn held(&self, e: &Emote) -> Vec<String> {
+        forms(e).into_iter().filter(|k| self.has(k)).collect()
     }
 }
 
@@ -197,6 +219,11 @@ pub fn block(e: &Emote) -> bool {
         Some(k) => write(|b| b.add(k, &e.name)),
         None => false,
     }
+}
+
+/// the keys held for this exact emote.
+pub fn held(e: &Emote) -> Vec<String> {
+    read(|b| b.held(e))
 }
 
 /// unblock by key; the name it was filed under.
@@ -245,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn key_is_btoa_of_the_url() {
+    fn legacy_key_is_btoa_of_the_url() {
         // known btoa vectors
         assert_eq!(b64(b""), "");
         assert_eq!(b64(b"f"), "Zg==");
@@ -254,13 +281,13 @@ mod tests {
         assert_eq!(b64(b"foobar"), "Zm9vYmFy");
         let u = "https://cdn.7tv.app/emote/01AAA/2x.webp";
         assert_eq!(
-            key_of_url(u).unwrap(),
+            legacy_key_of_url(u).unwrap(),
             "aHR0cHM6Ly9jZG4uN3R2LmFwcC9lbW90ZS8wMUFBQS8yeC53ZWJw"
         );
-        assert_eq!(unb64(&key_of_url(u).unwrap()).unwrap(), u.as_bytes());
-        assert!(key_of_url("").is_none());
+        assert_eq!(unb64(&legacy_key_of_url(u).unwrap()).unwrap(), u.as_bytes());
+        assert!(legacy_key_of_url("").is_none());
         assert!(
-            key_of_url(&"x".repeat(200)).is_none(),
+            legacy_key_of_url(&"x".repeat(200)).is_none(),
             "won't fit 255 once encoded"
         );
     }
@@ -275,6 +302,23 @@ mod tests {
         assert!(!s.hides(&b), "same name, other emote: still shown");
         assert!(!s.add(key(&a).unwrap(), "W"), "second block is a no-op");
         assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn a_block_from_any_client_hides_it_here() {
+        let e = em("W", "https://cdn.7tv.app/emote/01ABC/1x.webp", "01ABC");
+        assert_eq!(key(&e).unwrap(), "01ABC", "new blocks file by provider id");
+        let sha = "b77bff3d9068dbd6ac26734d183ecb9480e63250de106a79ab1c317d0360dc65";
+        let old = legacy_key_of_url(&e.url).unwrap();
+        for k in ["01ABC", sha, old.as_str()] {
+            let mut s = Blocks::default();
+            s.add(k.into(), "W");
+            assert!(s.hides(&e), "{k}");
+            assert_eq!(s.held(&e), vec![k.to_owned()]);
+        }
+        let mut s = Blocks::default();
+        s.add("01ZZZ".into(), "W");
+        assert!(!s.hides(&e));
     }
 
     #[test]
@@ -321,7 +365,7 @@ mod tests {
 
     #[test]
     fn describe_shows_where_a_key_points() {
-        let k = key_of_url("https://cdn.7tv.app/emote/01AAA/2x.webp").unwrap();
+        let k = legacy_key_of_url("https://cdn.7tv.app/emote/01AAA/2x.webp").unwrap();
         assert_eq!(describe(&k), "01AAA/2x.webp");
         assert_eq!(
             describe("!!notbase64!!"),
