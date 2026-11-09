@@ -92,7 +92,9 @@ pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
     if chan.is_none() && owner.is_empty() {
         return None;
     }
-    Some(EmoteSet::from_list(chan.unwrap_or_default().into_iter().chain(owner)))
+    Some(EmoteSet::from_list(
+        chan.unwrap_or_default().into_iter().chain(owner),
+    ))
 }
 
 fn channel_emotes(channel: &str, platform: Platform) -> Option<Vec<heatsync_core::emote::Emote>> {
@@ -119,7 +121,12 @@ fn owner_emotes(channel: &str, platform: Platform) -> Vec<heatsync_core::emote::
         "{BASE}/api/emotes/user/{channel}?platform={}",
         platform_q(platform)
     );
-    let v: serde_json::Value = match agent().get(&url).call().ok().and_then(|r| r.into_json().ok()) {
+    let v: serde_json::Value = match agent()
+        .get(&url)
+        .call()
+        .ok()
+        .and_then(|r| r.into_json().ok())
+    {
         Some(v) => v,
         None => return Vec::new(),
     };

@@ -15,14 +15,46 @@ pub struct HsBadge {
 }
 
 pub const BADGES: [HsBadge; 8] = [
-    HsBadge { id: "staff", glyph: '■', hue: Hue::White },
-    HsBadge { id: "plus_24m", glyph: '★', hue: Hue::Magenta },
-    HsBadge { id: "plus_12m", glyph: '★', hue: Hue::Yellow },
-    HsBadge { id: "plus_6m", glyph: '◆', hue: Hue::Green },
-    HsBadge { id: "plus_3m", glyph: '◆', hue: Hue::Cyan },
-    HsBadge { id: "plus_1m", glyph: '◇', hue: Hue::Cyan },
-    HsBadge { id: "ember", glyph: '▲', hue: Hue::Red },
-    HsBadge { id: "early_supporter", glyph: '●', hue: Hue::Blue },
+    HsBadge {
+        id: "staff",
+        glyph: '■',
+        hue: Hue::White,
+    },
+    HsBadge {
+        id: "plus_24m",
+        glyph: '★',
+        hue: Hue::Magenta,
+    },
+    HsBadge {
+        id: "plus_12m",
+        glyph: '★',
+        hue: Hue::Yellow,
+    },
+    HsBadge {
+        id: "plus_6m",
+        glyph: '◆',
+        hue: Hue::Green,
+    },
+    HsBadge {
+        id: "plus_3m",
+        glyph: '◆',
+        hue: Hue::Cyan,
+    },
+    HsBadge {
+        id: "plus_1m",
+        glyph: '◇',
+        hue: Hue::Cyan,
+    },
+    HsBadge {
+        id: "ember",
+        glyph: '▲',
+        hue: Hue::Red,
+    },
+    HsBadge {
+        id: "early_supporter",
+        glyph: '●',
+        hue: Hue::Blue,
+    },
 ];
 
 /// the catalogue entry for an id; None for an id this build doesn't know.

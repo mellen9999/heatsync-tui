@@ -28,9 +28,7 @@ pub(crate) fn of(m: &Message, pinged: bool) -> Option<Fill> {
         return match n.kind {
             K::Live | K::Offline | K::Category => Some(Fill::Olive),
             K::Raid => Some(Fill::Purple),
-            K::Sub | K::Gift | K::Cheer | K::Streak | K::Milestone | K::Charity => {
-                Some(Fill::Navy)
-            }
+            K::Sub | K::Gift | K::Cheer | K::Streak | K::Milestone | K::Charity => Some(Fill::Navy),
             K::Redeem | K::Announce(_) => Some(Fill::Teal),
             K::Notice | K::Spike | K::Mod | K::Ritual | K::Mode => None,
         };
@@ -103,7 +101,11 @@ mod tests {
             of(&note(NoteKind::Announce(heatsync_core::Tint::Plain)), false),
             Some(Fill::Teal)
         );
-        assert_eq!(of(&note(NoteKind::Mod), false), None, "mod actions stay plain");
+        assert_eq!(
+            of(&note(NoteKind::Mod), false),
+            None,
+            "mod actions stay plain"
+        );
         let mut first = msg();
         first.extra.first = true;
         assert_eq!(of(&first, false), Some(Fill::Purple));

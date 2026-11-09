@@ -215,9 +215,17 @@ mod tests {
             (95, 0, 0),      // dim red
         ];
         for c in [
-            READ, TWITCH, FILL_OLIVE, FILL_PURPLE, FILL_NAVY, FILL_TEAL, FILL_RED,
+            READ,
+            TWITCH,
+            FILL_OLIVE,
+            FILL_PURPLE,
+            FILL_NAVY,
+            FILL_TEAL,
+            FILL_RED,
         ] {
-            let Color::Rgb(r, g, b) = c else { panic!("{c:?}") };
+            let Color::Rgb(r, g, b) = c else {
+                panic!("{c:?}")
+            };
             assert!(allowed.contains(&(r, g, b)), "{c:?}");
         }
         let src = include_str!("palette.rs");

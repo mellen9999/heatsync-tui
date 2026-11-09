@@ -175,15 +175,16 @@ mod tests {
     fn case_twins_both_stay_and_the_typed_spelling_leads() {
         let emotes = ["sadge", "Sadge", "SADGE"];
         let run = |t: &str| {
-            let mut c = Completion::build(t, t.len(), emotes.iter().copied(), [].into_iter())
-                .unwrap();
-            (0..3).map(|_| c.advance(1).2.to_string()).collect::<Vec<_>>()
+            let mut c =
+                Completion::build(t, t.len(), emotes.iter().copied(), [].into_iter()).unwrap();
+            (0..3)
+                .map(|_| c.advance(1).2.to_string())
+                .collect::<Vec<_>>()
         };
         assert_eq!(run("Sad"), ["Sadge", "SADGE", "sadge"]);
         assert_eq!(run("sad"), ["sadge", "SADGE", "Sadge"]);
         let rev = ["Sadge", "SADGE", "sadge"];
-        let mut c =
-            Completion::build("sad", 3, rev.iter().copied(), [].into_iter()).unwrap();
+        let mut c = Completion::build("sad", 3, rev.iter().copied(), [].into_iter()).unwrap();
         assert_eq!(c.advance(1).2, "sadge", "input order never matters");
     }
 }

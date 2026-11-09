@@ -971,11 +971,20 @@ mod wrap_tests {
         for r in &rows {
             assert_eq!(r.line.style.bg, Some(palette::FILL_PURPLE));
         }
-        let name = &rows[0].line.spans.iter().find(|s| s.content == "bob").unwrap();
+        let name = &rows[0]
+            .line
+            .spans
+            .iter()
+            .find(|s| s.content == "bob")
+            .unwrap();
         assert_eq!(name.style.bg, Some(Color::Black), "name on a black cutout");
         // body text is white, the gray first-message tag lifts to white too
         for r in &rows {
-            assert!(r.line.spans.iter().all(|s| s.style.fg != Some(palette::READ)));
+            assert!(r
+                .line
+                .spans
+                .iter()
+                .all(|s| s.style.fg != Some(palette::READ)));
         }
         // plain chat: no fill, no cutout
         let plain = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, &Look::default());
@@ -1000,13 +1009,20 @@ mod wrap_tests {
         let mut m = msg("hi");
         m.user = "bob".into();
         let flat = |u: Option<&UserLook>| -> String {
-            first_span(&m, u).iter().map(|s| s.content.as_ref()).collect()
+            first_span(&m, u)
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
         };
         let badged = UserLook {
             badge: heatsync_core::hsbadge::by_id("ember"),
             ..Default::default()
         };
-        assert!(flat(Some(&badged)).starts_with("bob ▲: "), "{}", flat(Some(&badged)));
+        assert!(
+            flat(Some(&badged)).starts_with("bob ▲: "),
+            "{}",
+            flat(Some(&badged))
+        );
         assert!(flat(None).starts_with("bob: "));
         assert!(flat(Some(&UserLook::default())).starts_with("bob: "));
     }

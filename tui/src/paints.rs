@@ -256,7 +256,14 @@ fn resolve(ids: &[String], hs: &Value, stv: &Value) -> HashMap<String, UserLook>
                 .and_then(|b| b.get(id))
                 .and_then(Value::as_str)
                 .and_then(heatsync_core::hsbadge::by_id);
-            (id.clone(), UserLook { paint, color, badge })
+            (
+                id.clone(),
+                UserLook {
+                    paint,
+                    color,
+                    badge,
+                },
+            )
         })
         .collect()
 }
