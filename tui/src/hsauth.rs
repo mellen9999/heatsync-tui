@@ -441,6 +441,58 @@ impl Client {
         }
     }
 
+    /// the account's blocked-emote keys (`/api/cli/emote-blocks`).
+    pub fn emote_blocks(&self) -> Result<Vec<String>, String> {
+        match self.call("GET", "/api/cli/emote-blocks", None)? {
+            (200, v) => Ok(v
+                .get("blocked_emotes")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| r.get("hash").unwrap_or(r).as_str())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()),
+            (st, v) => {
+                Err(scope_note(&v, "account").unwrap_or_else(|| explain(st, &v, &self.base)))
+            }
+        }
+    }
+
+    /// file (or lift) one emote block on the account. an already-blocked /
+    /// already-gone answer is fine: the account says what we wanted.
+    pub fn set_emote_block(&self, key: &str, block: bool) -> Outcome {
+        let r = if block {
+            self.call(
+                "POST",
+                "/api/cli/emote-blocks",
+                Some(json!({ "emote_hash": key })),
+            )
+        } else {
+            self.call(
+                "DELETE",
+                &format!("/api/cli/emote-blocks/{}", pct(key)),
+                None,
+            )
+        };
+        match r {
+            Ok((200, _)) => Outcome {
+                ok: true,
+                text: String::new(),
+            },
+            Ok((404, _)) if !block => Outcome {
+                ok: true,
+                text: String::new(),
+            },
+            Ok((st, v)) => Outcome {
+                ok: false,
+                text: scope_note(&v, "account").unwrap_or_else(|| explain(st, &v, &self.base)),
+            },
+            Err(e) => Outcome { ok: false, text: e },
+        }
+    }
+
     /// send chat through heatsync. Ok = posted (nothing to show), Err = words for the user.
     pub fn send(
         &self,
@@ -462,6 +514,21 @@ impl Client {
             Err(e) => Err(e),
         }
     }
+}
+
+/// percent-encode a path segment: only unreserved bytes pass (a block key is
+/// base64, so `/`, `+` and `=` must not reach the router raw).
+fn pct(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// the send request body; a reply names its parent message.
@@ -733,6 +800,41 @@ pub(crate) mod testkit {
 mod tests {
     use super::testkit::{client, Fake};
     use super::*;
+
+    #[test]
+    fn emote_blocks_list_posts_and_deletes_with_an_encoded_key() {
+        let f = Fake::new(vec![
+            Ok((
+                200,
+                json!({"blocked_emotes": [{"hash": "aGk="}, "bare", {"x": 1}], "count": 3}),
+            )),
+            Ok((200, json!({"success": true}))),
+            Ok((200, json!({"success": true}))),
+            Ok((404, json!({"error": "Block not found"}))),
+            Ok((400, json!({"error": "invalid"}))),
+        ]);
+        let c = client(&f);
+        assert_eq!(
+            c.emote_blocks().unwrap(),
+            vec!["aGk=".to_string(), "bare".to_string()]
+        );
+        assert!(c.set_emote_block("a/b+c=", true).ok);
+        assert!(c.set_emote_block("a/b+c=", false).ok);
+        assert!(
+            c.set_emote_block("gone", false).ok,
+            "already unblocked is fine"
+        );
+        assert!(!c.set_emote_block("bad", true).ok);
+        let seen = f.seen.lock().unwrap();
+        assert_eq!(seen[0].1, "https://h.test/api/cli/emote-blocks");
+        assert_eq!(seen[1].0, "POST");
+        assert_eq!(seen[1].3, Some(json!({"emote_hash": "a/b+c="})));
+        assert_eq!(seen[2].0, "DELETE");
+        assert_eq!(
+            seen[2].1,
+            "https://h.test/api/cli/emote-blocks/a%2Fb%2Bc%3D"
+        );
+    }
 
     #[test]
     fn following_reads_streams_and_goes_quiet_on_anything_else() {

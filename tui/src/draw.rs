@@ -676,6 +676,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             hint("r", "reply"),
             hint("y", "yank"),
             hint("d", "delete"),
+            hint("b", "block emote"),
             hint("G", "live"),
         ] {
             spans.extend(pair);

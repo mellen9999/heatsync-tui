@@ -7,6 +7,7 @@
 //! for crossterm's key type, which `key` now replaces — a face maps its own
 //! keystrokes into `key::KeyEvent` and gets the same editor.
 
+pub mod block;
 pub mod clip;
 pub mod complete;
 pub mod dupe;

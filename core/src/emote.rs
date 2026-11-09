@@ -796,6 +796,22 @@ fn is_modifier(word: &str, look: &Lookup) -> bool {
     classify(word).is_some_and(|c| c.exact || look.get(word).is_none())
 }
 
+/// the emotes a line names by their literal word (refs first, then the set) —
+/// blocked ones included, so a block key can still be aimed at them. in order,
+/// each exact emote once.
+pub fn emotes_in<'a>(content: &str, set: &'a EmoteSet, refs: &'a EmoteSet) -> Vec<&'a Emote> {
+    let look = Lookup { set, refs };
+    let mut out: Vec<&Emote> = Vec::new();
+    for w in content.split_whitespace() {
+        if let Some(e) = look.get(w) {
+            if !out.iter().any(|o| o.url == e.url) {
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
 /// parse message text into text + emote-stack segments. handles:
 ///   - zero-width emotes overlaying the preceding base (`GAMBA notL`) and the
 ///     `Name0` overlay convention
@@ -870,6 +886,13 @@ pub fn segments_with(content: &str, set: &EmoteSet, refs: &EmoteSet) -> Vec<Segm
             push_text(&mut text, word);
             continue;
         };
+        // a blocked emote is hidden outright: its word, and any modifiers
+        // waiting for it, vanish — the exact emote only, never the name.
+        if crate::block::is_blocked(r.emote) {
+            pending = Mods::default();
+            pending_words.clear();
+            continue;
+        }
         let mut mods = std::mem::take(&mut pending);
         pending_words.clear();
         mods.merge(r.mods);
@@ -1486,5 +1509,45 @@ mod tests {
         mine.url = "https://heatsync.org/w.webp".into();
         let set = EmoteSet::from_list(chan.into_iter().chain([mine]));
         assert_eq!(set.get("W").unwrap().provider, "upload");
+    }
+
+    #[test]
+    fn a_blocked_emote_vanishes_but_its_same_named_twin_stays() {
+        let mut mine = e("BlockTwin");
+        mine.url = "https://block.test/seg/mine.webp".into();
+        let mut other = e("BlockTwin");
+        other.url = "https://block.test/seg/other.webp".into();
+        let set_a = EmoteSet::from_list([mine.clone()]);
+        let set_b = EmoteSet::from_list([other.clone()]);
+        let text = |s: &[Segment]| -> String {
+            s.iter()
+                .map(|g| match g {
+                    Segment::Text(t) => t.clone(),
+                    Segment::Stack(_) => "<emote>".into(),
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        assert_eq!(text(&segments("hi BlockTwin yo", &set_a)), "hi|<emote>|yo");
+        assert!(crate::block::block(&mine));
+        assert_eq!(
+            text(&segments("hi BlockTwin yo", &set_a)),
+            "hi yo",
+            "hidden"
+        );
+        assert_eq!(
+            text(&segments("hi BlockTwin yo", &set_b)),
+            "hi|<emote>|yo",
+            "the other emote with that name is untouched"
+        );
+        // its pending modifiers go with it instead of turning into stray text
+        assert_eq!(text(&segments("w! BlockTwin", &set_a)), "");
+        // aimable while hidden
+        assert_eq!(
+            emotes_in("a BlockTwin BlockTwin", &set_a, EmoteSet::none()).len(),
+            1
+        );
+        crate::block::unblock_key(&crate::block::key(&mine).unwrap());
+        assert_eq!(text(&segments("BlockTwin", &set_a)), "<emote>");
     }
 }

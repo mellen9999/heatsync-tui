@@ -29,6 +29,12 @@ pub enum Cmd {
     Op(String),
     /// `/re <text>` — reply to the last OP you posted.
     Re(String),
+    /// `/block <emote>` — hide that exact emote everywhere.
+    Block(String),
+    /// `/unblock <emote>` — bring it back.
+    Unblock(String),
+    /// `/blocked` — list what's hidden.
+    Blocked,
     /// `/sharelayout` (`/sl`, `/share`) — copy the open channels as a heatsync.org/m/ link.
     Share,
     /// `/layout <link>` — open the channels in a share link.
@@ -81,6 +87,15 @@ pub fn parse(input: &str) -> Cmd {
                 _ => Cmd::Whisper(to.into(), text.into()),
             }
         }
+        "block" | "blockemote" => match arg {
+            Some(a) => Cmd::Block(a.to_string()),
+            None => Cmd::Usage("usage: /block <emote>  (/unblock <emote> · /blocked lists them)"),
+        },
+        "unblock" | "unblockemote" => match arg {
+            Some(a) => Cmd::Unblock(a.to_string()),
+            None => Cmd::Usage("usage: /unblock <emote>  (/blocked lists what's hidden)"),
+        },
+        "blocked" | "blocks" => Cmd::Blocked,
         "sharelayout" | "sl" | "share" => Cmd::Share,
         "layout" => match arg {
             Some(a) => Cmd::Layout(a.to_string()),
@@ -112,6 +127,15 @@ mod tests {
             Cmd::Join("kick:trainwreckstv".into())
         );
         assert_eq!(parse("  /join   hot  "), Cmd::Join("hot".into()));
+    }
+
+    #[test]
+    fn emote_block_commands_are_ours() {
+        assert_eq!(parse("/block Kappa"), Cmd::Block("Kappa".into()));
+        assert_eq!(parse("/unblock  Kappa "), Cmd::Unblock("Kappa".into()));
+        assert_eq!(parse("/blocked"), Cmd::Blocked);
+        assert!(matches!(parse("/block"), Cmd::Usage(_)));
+        assert!(matches!(parse("/unblock"), Cmd::Usage(_)));
     }
 
     #[test]

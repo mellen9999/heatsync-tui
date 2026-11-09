@@ -6,6 +6,7 @@
 //! is no message cursor and no keyboard nav over messages.
 
 mod app;
+mod blocks;
 #[allow(dead_code)]
 mod cli;
 mod clock;
@@ -147,6 +148,7 @@ fn chat(args: &[String]) -> io::Result<()> {
     let mock_mode = args.iter().any(|a| a == "--mock");
     let chan_args: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     let cfg = config::load();
+    heatsync_core::block::load(cfg.blocks.clone());
     let mut app = if mock_mode {
         let (hs_tx, hs_rx) = std::sync::mpsc::channel::<hsauth::Note>();
         let (emote_tx, emote_rx) = std::sync::mpsc::channel();
@@ -215,6 +217,7 @@ fn chat(args: &[String]) -> io::Result<()> {
     // virtual tabs pin left of whatever the channel args / config opened.
     special::restore(&mut app, &cfg.special);
     if !mock_mode {
+        blocks::pull(&app);
         app.line.set_history(config::load_history());
     }
 
@@ -425,6 +428,7 @@ pub(crate) fn persisted(app: &App) -> config::Config {
         timestamps: app.stamps,
         channels,
         special,
+        blocks: heatsync_core::block::list(),
     }
 }
 

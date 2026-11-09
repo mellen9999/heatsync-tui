@@ -51,7 +51,7 @@ heatsync-tui login                             # pair this terminal (see login)
 ```
 
 keys: `j`/`k` scroll · `h`/`l` (or `j`/`k` with a side tab bar) switch channel ·
-`i` compose · `o` pick a live channel (opens a temp tab, underlined) · `s` keep the temp tab · `m` manage · `x` close · `T` move tab bar · `v` message cursor (`j`/`k` `ctrl-d`/`ctrl-u` `g`/`G` move · `r` reply · `y` yank · `d` delete · `esc` back) · `t` timestamps · `P` hide the pinned message · `space` pause · `q` quit.
+`i` compose · `o` pick a live channel (opens a temp tab, underlined) · `s` keep the temp tab · `m` manage · `x` close · `T` move tab bar · `v` message cursor (`j`/`k` `ctrl-d`/`ctrl-u` `g`/`G` move · `r` reply · `y` yank · `d` delete · `b` block an emote on the line · `esc` back) · `t` timestamps · `P` hide the pinned message · `space` pause · `q` quit.
 open channels + tab-bar position persist in `~/.config/heatsync/config`.
 
 ## login
@@ -80,6 +80,8 @@ open with `/mentions`, `/feed`, `/whispers` — they pin left and stay open next
 
 - `/open <channel>` look at a stream in the one temp tab (underlined, never saved, replaced by the next look); `/keep` or `s` saves it, and so does a send that lands. `/join` always saves
 - `/layout <heatsync.org/m/ link>` load a shared layout · `/sharelayout` (`/sl`) share yours
+- `/block <emote>` hide that exact emote (not every emote with the name) · `/unblock <emote>` · `/blocked` lists them. kept in `~/.config/heatsync/config`; logged in, your heatsync account gets them too, so the extension agrees
+- `alt+1`..`alt+9` jump to that tab · what you've sent is remembered across restarts (last 200, `~/.config/heatsync/history`; whispers and dms are never saved)
 - `/w <user> <msg>` twitch whisper · `/dm <user> <msg>` heatsync dm — works from any tab
 - `/op <text>` post to the feed · `/re <text>` reply to the newest OP in the feed tab
 - `/w` and `/dm` look the name up on heatsync (and remember it); an unknown name leaves your text in the composer. whispering needs twitch linked with whispers allowed (the tui prints the exact link if not).

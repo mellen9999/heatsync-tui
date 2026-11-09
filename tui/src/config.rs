@@ -59,6 +59,8 @@ pub struct Config {
     pub channels: Vec<Vec<(Platform, String)>>,
     /// open virtual tabs (mentions / feed / whispers), in pin order.
     pub special: Vec<heatsync_core::TabKind>,
+    /// blocked emotes: (key, name the block was filed under).
+    pub blocks: Vec<(String, String)>,
 }
 
 /// serialize a channel as `twitch:name` / `kick:name` / `yt:videoid`.
@@ -94,6 +96,37 @@ fn parse_special(v: &str) -> Vec<heatsync_core::TabKind> {
     }
     out.sort();
     out
+}
+
+/// `block=<key> <name>` — the name is optional (a block learned from the account).
+fn parse_block(v: &str) -> Option<(String, String)> {
+    let v = v.trim();
+    let (k, n) = v.split_once(char::is_whitespace).unwrap_or((v, ""));
+    (!k.is_empty()).then(|| (k.to_string(), n.trim().to_string()))
+}
+
+fn block_lines(blocks: &[(String, String)]) -> String {
+    blocks
+        .iter()
+        .map(|(k, n)| format!("block={k} {n}\n"))
+        .collect()
+}
+
+/// rewrite only the `block=` lines of the config, leaving the rest as it is.
+/// for changes that land off the main thread (the account pull).
+pub fn save_blocks(blocks: &[(String, String)]) {
+    let Some(p) = path() else { return };
+    let text = fs::read_to_string(&p).unwrap_or_default();
+    let mut out: String = text
+        .lines()
+        .filter(|l| !l.starts_with("block="))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    out.push_str(&block_lines(blocks));
+    if let Some(d) = p.parent() {
+        let _ = fs::create_dir_all(d);
+    }
+    let _ = fs::write(&p, out);
 }
 
 /// parse one `twitch:name` / `kick:name` / `yt:id` / `name` token (bare = twitch).
@@ -184,6 +217,7 @@ pub fn load() -> Config {
         timestamps: false,
         channels: Vec::new(),
         special: Vec::new(),
+        blocks: Vec::new(),
     };
     if let Some(p) = path() {
         if let Ok(text) = fs::read_to_string(&p) {
@@ -198,6 +232,7 @@ pub fn load() -> Config {
                         "timestamps" => cfg.timestamps = matches!(v.trim(), "on" | "true" | "1"),
                         "channels" => cfg.channels = parse_channels(v),
                         "special" => cfg.special = parse_special(v),
+                        "block" => cfg.blocks.extend(parse_block(v)),
                         _ => {}
                     }
                 }
@@ -283,6 +318,7 @@ pub fn save(cfg: &Config) {
             let names: Vec<&str> = cfg.special.iter().map(|k| k.name()).collect();
             out.push_str(&format!("special={}\n", names.join(",")));
         }
+        out.push_str(&block_lines(&cfg.blocks));
         let _ = fs::write(&p, out);
     }
 }
@@ -290,6 +326,21 @@ pub fn save(cfg: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_lines_round_trip_with_and_without_a_name() {
+        let blocks = vec![
+            ("aHR0cHM6Ly94".to_string(), "Kappa".to_string()),
+            ("c3luY2Vk".to_string(), String::new()),
+        ];
+        let text = block_lines(&blocks);
+        let back: Vec<_> = text
+            .lines()
+            .filter_map(|l| parse_block(l.strip_prefix("block=")?))
+            .collect();
+        assert_eq!(back, blocks);
+        assert_eq!(parse_block("  "), None);
+    }
 
     #[test]
     fn whispers_and_dms_never_reach_history_on_disk() {

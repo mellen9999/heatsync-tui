@@ -711,6 +711,21 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
             }
             return Flow::Continue;
         }
+        slash::Cmd::Block(n) => {
+            app.line.accept();
+            crate::blocks::block_cmd(app, &n);
+            return Flow::Continue;
+        }
+        slash::Cmd::Unblock(n) => {
+            app.line.accept();
+            crate::blocks::unblock_cmd(app, &n);
+            return Flow::Continue;
+        }
+        slash::Cmd::Blocked => {
+            app.line.accept();
+            crate::blocks::list_cmd(app);
+            return Flow::Continue;
+        }
         slash::Cmd::Share => {
             app.line.accept();
             share_layout(app);
@@ -890,7 +905,11 @@ fn complete_step(app: &mut App, dir: i32) {
         app.completion = Completion::build(
             &text,
             app.line.cursor(),
-            app.emotes[app.focus].names(),
+            app.emotes[app.focus].names().filter(|n| {
+                app.emotes[app.focus]
+                    .get(n)
+                    .is_some_and(|e| !heatsync_core::block::is_blocked(e))
+            }),
             users.into_iter(),
         );
     }
@@ -980,6 +999,7 @@ fn cursor_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         KeyCode::Char('r') => cursor_reply(app),
         KeyCode::Char('y') => cursor_yank(app),
         KeyCode::Char('d') => cursor_delete(app),
+        KeyCode::Char('b') => cursor_block_emote(app),
         _ => {}
     }
     Flow::Continue
@@ -990,6 +1010,14 @@ fn cursor_line(app: &App) -> Option<&Message> {
     let ch = app.channels.get(app.focus)?;
     let i = scroll::index_of(ch.seq, ch.messages.len(), app.cursor)?;
     ch.messages.get(i)
+}
+
+/// `b`: block an emote on the line under the cursor.
+fn cursor_block_emote(app: &mut App) {
+    let Some((text, refs)) = cursor_line(app).map(|m| (m.text.clone(), m.refs().clone())) else {
+        return;
+    };
+    crate::blocks::cursor_block(app, &text, &refs);
 }
 
 /// `r`: compose a reply to the line under the cursor.
