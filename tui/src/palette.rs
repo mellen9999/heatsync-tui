@@ -2,7 +2,7 @@
 //! rules) plus vt320 attributes. nothing else in the tui names a color.
 //! non-ansi colors allowed, exactly these and no others (a test pins the list):
 //! the twitch marker, the read-tab gray, a future [H] marker, and the brand's
-//! five dim row fills (olive, purple, navy, teal, dim red) — solid backgrounds
+//! six dim row fills (olive, purple, navy, green, teal, dim red) — solid backgrounds
 //! for notification rows, never text colors.
 
 use heatsync_core::heat::{Hue, Look, Tier};
@@ -51,13 +51,14 @@ pub fn tab(u: Unread) -> Style {
 }
 
 /// a notification row's solid fill: the dim twin of the row's meaning.
-/// olive = stream events, purple = new people, navy = support, teal = channel
+/// olive = stream events, purple = new people, navy = support, green = mod anniversaries, teal = channel
 /// points + announcements, red = aimed at you.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fill {
     Olive,
     Purple,
     Navy,
+    Green,
     Teal,
     Red,
 }
@@ -65,6 +66,7 @@ pub enum Fill {
 pub const FILL_OLIVE: Color = Color::Rgb(128, 128, 0);
 pub const FILL_PURPLE: Color = Color::Rgb(128, 0, 128);
 pub const FILL_NAVY: Color = Color::Rgb(0, 0, 128);
+pub const FILL_GREEN: Color = Color::Rgb(0, 128, 0);
 pub const FILL_TEAL: Color = Color::Rgb(0, 128, 128);
 pub const FILL_RED: Color = Color::Rgb(95, 0, 0);
 
@@ -74,6 +76,7 @@ impl Fill {
             Fill::Olive => FILL_OLIVE,
             Fill::Purple => FILL_PURPLE,
             Fill::Navy => FILL_NAVY,
+            Fill::Green => FILL_GREEN,
             Fill::Teal => FILL_TEAL,
             Fill::Red => FILL_RED,
         }
@@ -192,6 +195,7 @@ pub fn note(k: NoteKind) -> (&'static str, Style) {
         K::Streak => ("≈", s.fg(Color::Yellow)),
         K::Milestone => ("♦", s.fg(Color::Magenta)),
         K::Charity => ("♥", s.fg(Color::Magenta)),
+        K::ModAnniv => ("✪", s.fg(Color::White)),
         K::Ritual => ("✧", s.fg(Color::Green)),
         K::Mode => ("◈", s.fg(Color::Cyan)),
     }
@@ -211,6 +215,7 @@ mod tests {
             (128, 128, 0),   // olive
             (128, 0, 128),   // purple
             (0, 0, 128),     // navy
+            (0, 128, 0),     // green
             (0, 128, 128),   // teal
             (95, 0, 0),      // dim red
         ];
@@ -220,6 +225,7 @@ mod tests {
             FILL_OLIVE,
             FILL_PURPLE,
             FILL_NAVY,
+            FILL_GREEN,
             FILL_TEAL,
             FILL_RED,
         ] {
@@ -231,7 +237,14 @@ mod tests {
         let src = include_str!("palette.rs");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
         assert_eq!(code.matches("Color::Rgb(").count(), allowed.len());
-        for f in [Fill::Olive, Fill::Purple, Fill::Navy, Fill::Teal, Fill::Red] {
+        for f in [
+            Fill::Olive,
+            Fill::Purple,
+            Fill::Navy,
+            Fill::Green,
+            Fill::Teal,
+            Fill::Red,
+        ] {
             assert!(matches!(f.bg(), Color::Rgb(..)));
         }
     }

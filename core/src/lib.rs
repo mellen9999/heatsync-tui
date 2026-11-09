@@ -263,6 +263,8 @@ pub enum NoteKind {
     Milestone,
     /// charity donation.
     Charity,
+    /// a mod's anniversary (twitch modiversary).
+    ModAnniv,
     /// a first-time chatter's welcome (ritual / new_chatter).
     Ritual,
     /// room mode change: slow, emote-only, followers-only, sub-only.

@@ -620,6 +620,7 @@ fn usernotice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
         "watchstreak" => NoteKind::Streak,
         "viewermilestone" => NoteKind::Milestone,
         "charitydonation" | "charity_donation" => NoteKind::Charity,
+        "modiversary" | "mod-anniversary" | "mod_anniversary" => NoteKind::ModAnniv,
         "ritual" | "new_chatter" => NoteKind::Ritual,
         _ => NoteKind::Notice, // future subtypes
     };
@@ -2128,6 +2129,9 @@ mod tests {
             ("watchstreak", "", NoteKind::Streak),
             ("viewermilestone", "", NoteKind::Milestone),
             ("charitydonation", "", NoteKind::Charity),
+            ("modiversary", "", NoteKind::ModAnniv),
+            ("mod-anniversary", "", NoteKind::ModAnniv),
+            ("mod_anniversary", "", NoteKind::ModAnniv),
             ("ritual", "", NoteKind::Ritual),
             ("new_chatter", "", NoteKind::Ritual),
             ("somethingnew", "", NoteKind::Notice),

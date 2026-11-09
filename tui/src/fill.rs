@@ -1,5 +1,5 @@
 //! filled notification rows: which dim fill a line wears, and painting it.
-//! olive = stream events, purple = new people, navy = support, teal = channel
+//! olive = stream events, purple = new people, navy = support, green = mod anniversaries, teal = channel
 //! points + the broadcaster's voice, red = aimed at you. the fill is the dim
 //! twin of the row's meaning; body text goes white and the name sits on a black
 //! cutout. there is no zebra striping in this tui, so a filled row has nothing
@@ -29,6 +29,7 @@ pub(crate) fn of(m: &Message, pinged: bool) -> Option<Fill> {
             K::Live | K::Offline | K::Category => Some(Fill::Olive),
             K::Raid => Some(Fill::Purple),
             K::Sub | K::Gift | K::Cheer | K::Streak | K::Milestone | K::Charity => Some(Fill::Navy),
+            K::ModAnniv => Some(Fill::Green),
             K::Redeem | K::Announce(_) => Some(Fill::Teal),
             K::Notice | K::Spike | K::Mod | K::Ritual | K::Mode => None,
         };
@@ -96,6 +97,7 @@ mod tests {
         assert_eq!(of(&note(NoteKind::Raid), false), Some(Fill::Purple));
         assert_eq!(of(&note(NoteKind::Sub), false), Some(Fill::Navy));
         assert_eq!(of(&note(NoteKind::Cheer), false), Some(Fill::Navy));
+        assert_eq!(of(&note(NoteKind::ModAnniv), false), Some(Fill::Green));
         assert_eq!(of(&note(NoteKind::Redeem), false), Some(Fill::Teal));
         assert_eq!(
             of(&note(NoteKind::Announce(heatsync_core::Tint::Plain)), false),
