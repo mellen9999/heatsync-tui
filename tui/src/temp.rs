@@ -5,6 +5,7 @@
 
 use crate::app::App;
 use crate::{input, parse_tab, save_state};
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::Platform;
 
 fn find(app: &App) -> Option<usize> {
@@ -50,9 +51,9 @@ pub(crate) fn keep(app: &mut App) {
             c.temp = false;
             let name = c.name.clone();
             save_state(app);
-            app.status = Some(format!("kept {name}"));
+            app.status = Some(trf("temp.kept", &[("name", &name)]));
         }
-        _ => app.status = Some("nothing to keep — open a stream with o or /open".into()),
+        _ => app.status = Some(tr("temp.nothing_to_keep").into()),
     }
 }
 

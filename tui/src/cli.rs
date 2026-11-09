@@ -5,6 +5,7 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::Platform;
 
 use crate::config;
@@ -28,7 +29,7 @@ pub fn log(args: &[String]) -> std::io::Result<()> {
     let (channel, date) = match args {
         [c, d, ..] => (c.as_str(), d.as_str()),
         _ => {
-            eprintln!("usage: heatsync log <channel> <YYYY-MM-DD>");
+            eprintln!("{}", tr("cli.usage_log"));
             std::process::exit(2);
         }
     };
@@ -42,9 +43,9 @@ pub fn log(args: &[String]) -> std::io::Result<()> {
                 println!("{}  {}: {}", short_ts(&m.timestamp), who, m.message);
             }
         }
-        Some(_) => eprintln!("no logs for {name} on {date}"),
+        Some(_) => eprintln!("{}", trf("cli.no_logs", &[("name", name), ("date", date)])),
         None => {
-            eprintln!("request failed");
+            eprintln!("{}", tr("cli.request_failed"));
             std::process::exit(1);
         }
     }
@@ -56,7 +57,7 @@ pub fn search(args: &[String]) -> std::io::Result<()> {
     let q = match args.first() {
         Some(q) => q.as_str(),
         None => {
-            eprintln!("usage: heatsync search <query> [channel]");
+            eprintln!("{}", tr("cli.usage_search"));
             std::process::exit(2);
         }
     };
@@ -75,9 +76,9 @@ pub fn search(args: &[String]) -> std::io::Result<()> {
                 );
             }
         }
-        Some(_) => eprintln!("no matches for {q:?}"),
+        Some(_) => eprintln!("{}", trf("cli.no_matches", &[("query", &format!("{q:?}"))])),
         None => {
-            eprintln!("request failed");
+            eprintln!("{}", tr("cli.request_failed"));
             std::process::exit(1);
         }
     }
@@ -100,9 +101,12 @@ pub fn hot(args: &[String]) -> std::io::Result<()> {
                 );
             }
         }
-        Some(_) => eprintln!("nothing hot in the last {hours}h"),
+        Some(_) => eprintln!(
+            "{}",
+            trf("cli.nothing_hot", &[("hours", &hours.to_string())])
+        ),
         None => {
-            eprintln!("request failed");
+            eprintln!("{}", tr("cli.request_failed"));
             std::process::exit(1);
         }
     }
@@ -127,19 +131,22 @@ pub fn login(kick: bool) -> std::io::Result<bool> {
             std::process::exit(1);
         }
     };
-    println!("log in to heatsync\n");
-    println!("  1. open   {}", pair.url);
-    println!("  2. log in there (twitch or kick) if it asks");
-    println!("  3. type   {}   and press approve\n", pair.user_code);
+    println!("{}\n", tr("cli.login_title"));
+    println!("  {}", trf("cli.login_step1", &[("url", &pair.url)]));
+    println!("  {}", tr("cli.login_step2"));
+    println!(
+        "  {}\n",
+        trf("cli.login_step3", &[("code", &pair.user_code)])
+    );
     open_browser(&pair.url);
-    println!("waiting for you… (ctrl-c to cancel)");
+    println!("{}", tr("cli.login_waiting"));
 
     let mut interval = pair.interval;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(pair.expires_in);
     let session = loop {
         std::thread::sleep(std::time::Duration::from_secs(interval));
         if std::time::Instant::now() > deadline {
-            eprintln!("that code expired — run the login again");
+            eprintln!("{}", tr("cli.code_expired"));
             std::process::exit(1);
         }
         match hsauth::poll_once(&t, &base, &pair.device_code) {
@@ -153,7 +160,7 @@ pub fn login(kick: bool) -> std::io::Result<bool> {
         }
     };
     if let Err(e) = hsauth::save_session(&session) {
-        eprintln!("logged in, but could not save the login: {e}");
+        eprintln!("{}", trf("cli.save_failed", &[("err", &e.to_string())]));
         std::process::exit(1);
     }
     let client = hsauth::Client::new(&session, std::sync::Arc::new(hsauth::UreqTransport));
@@ -181,7 +188,7 @@ fn finish_login(
 ) -> bool {
     let me = client.me();
     if !tty {
-        println!("logged in ✓\n");
+        println!("{}\n", tr("cli.logged_in_ok"));
     }
     match &me {
         Ok(me) => {
@@ -193,13 +200,16 @@ fn finish_login(
                 print_kick(me, base, true);
             }
             if tty {
-                println!("logged in as {} — opening chat…", account_name(me));
+                println!(
+                    "{}",
+                    trf("cli.logged_in_as", &[("name", &account_name(me))])
+                );
             }
         }
         Err(e) => {
             println!("{e}");
             if tty {
-                println!("logged in — opening chat…");
+                println!("{}", tr("cli.logged_in_opening"));
             }
         }
     }
@@ -241,7 +251,7 @@ fn offer_scopes(
         return;
     }
     let what: Vec<&str> = need.iter().map(|n| n.0).collect();
-    println!("twitch needs one more ok for {}:", what.join(" + "));
+    println!("{}", trf("cli.scopes_need", &[("what", &what.join(" + "))]));
     for (_, url) in need {
         println!("  {url}");
     }
@@ -249,8 +259,12 @@ fn offer_scopes(
         return;
     }
     print!(
-        "open {}? [y/N] ",
-        if need.len() > 1 { "them" } else { "it" }
+        "{} ",
+        tr(if need.len() > 1 {
+            "cli.open_them_prompt"
+        } else {
+            "cli.open_it_prompt"
+        })
     );
     let _ = std::io::stdout().flush();
     let mut ans = String::new();
@@ -278,32 +292,53 @@ fn open_browser(url: &str) {
 /// who is logged in and what each platform lets them do. never the token.
 fn print_me(me: &serde_json::Value, base: &str, want_kick: bool, link_hints: bool) {
     let s = |v: &serde_json::Value| v.as_str().map(str::to_string);
-    println!("  account   {}", account_name(me));
+    println!("  {}   {}", tr("cli.lbl_account"), account_name(me));
     let scopes: Vec<String> = me["scopes"]
         .as_array()
         .map(|a| a.iter().filter_map(s).collect())
         .unwrap_or_default();
-    println!("  this login can: {}", scopes.join(", "));
+    println!(
+        "  {}",
+        trf("cli.login_can", &[("scopes", &scopes.join(", "))])
+    );
     if !scopes.iter().any(|x| x == "mod") {
-        println!("            no mod tools — run `heatsync-tui login` again and tick mod");
+        println!("            {}", tr("cli.no_mod_tools"));
     }
     if !scopes.iter().any(|x| x == "account") {
-        println!("            no whispers, dms or mention hits — run `heatsync-tui login` again and tick account");
+        println!("            {}", tr("cli.no_account_tools"));
     }
     if let Some(e) = s(&me["expires_at"]) {
-        println!("  renews itself; valid until {e}");
+        println!("  {}", trf("cli.renews", &[("date", &e)]));
     }
     let tw = &me["twitch"];
     if tw["linked"].as_bool() == Some(true) {
         println!("  twitch    {}", s(&tw["login"]).unwrap_or_default());
         if link_hints && tw["can_mod"].as_bool() == Some(false) {
-            println!("            to mod: open {base}/api/auth/login?scopes=mod");
+            println!(
+                "            {}",
+                trf(
+                    "cli.to_mod",
+                    &[("url", &format!("{base}/api/auth/login?scopes=mod"))]
+                )
+            );
         }
         if link_hints && tw["can_send"].as_bool() == Some(false) {
-            println!("            to chat: open {base}/api/auth/login?scopes=chatsend");
+            println!(
+                "            {}",
+                trf(
+                    "cli.to_chat",
+                    &[("url", &format!("{base}/api/auth/login?scopes=chatsend"))]
+                )
+            );
         }
     } else {
-        println!("  twitch    not linked — open {base}/api/auth/login");
+        println!(
+            "  twitch    {}",
+            trf(
+                "cli.twitch_unlinked",
+                &[("url", &format!("{base}/api/auth/login"))]
+            )
+        );
     }
     print_kick(me, base, want_kick);
 }
@@ -314,28 +349,32 @@ fn print_kick(me: &serde_json::Value, base: &str, want_kick: bool) {
     if k["linked"].as_bool() == Some(true) {
         println!("  kick      {}", s(&k["login"]).unwrap_or_default());
     } else if want_kick {
-        println!("  kick      not linked yet — open {base}/api/auth/kick/login, then you can chat on kick from here");
+        println!(
+            "  kick      {}",
+            trf(
+                "cli.kick_unlinked_want",
+                &[("url", &format!("{base}/api/auth/kick/login"))]
+            )
+        );
     } else {
-        println!("  kick      not linked (heatsync-tui login kick shows how)");
+        println!("  kick      {}", tr("cli.kick_unlinked"));
     }
 }
 
 /// `heatsync-tui logout` — kill the login on the server, then delete the file.
 pub fn logout() -> std::io::Result<()> {
     let Some(s) = hsauth::load_session() else {
-        println!("not logged in");
+        println!("{}", tr("cli.not_logged_in"));
         return Ok(());
     };
     let client = hsauth::Client::new(&s, std::sync::Arc::new(hsauth::UreqTransport));
     let revoked = client.revoke();
     let removed = hsauth::delete_session();
     match (revoked, removed) {
-        (true, true) => println!("logged out ✓"),
-        (false, true) => println!(
-            "logged out here. heatsync couldn't be reached, so also run: heatsync.org/cli → \"log all out\""
-        ),
+        (true, true) => println!("{}", tr("cli.logged_out_ok")),
+        (false, true) => println!("{}", tr("cli.logged_out_local")),
         (_, false) => {
-            eprintln!("could not delete the saved login");
+            eprintln!("{}", tr("cli.delete_failed"));
             std::process::exit(1);
         }
     }
@@ -354,10 +393,10 @@ pub fn status() -> std::io::Result<()> {
         std::process::exit(1);
     });
     match hsauth::load_session() {
-        None => println!("not logged in — run: heatsync-tui login"),
+        None => println!("{}", tr("cli.not_logged_in_run")),
         Some(s) => {
             let client = hsauth::Client::new(&s, std::sync::Arc::new(hsauth::UreqTransport));
-            println!("logged in to {}", s.base);
+            println!("{}", trf("cli.logged_in_to", &[("base", &s.base)]));
             match client.me() {
                 Ok(me) => print_me(&me, &base, false, true),
                 Err(e) => {

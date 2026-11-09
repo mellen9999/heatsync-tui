@@ -63,11 +63,11 @@ pub fn parse(input: &str) -> Cmd {
     match verb.as_str() {
         "join" | "j" => match arg {
             Some(a) => Cmd::Join(a.to_string()),
-            None => Cmd::Usage("usage: /join <channel>  (or kick:<channel>)"),
+            None => Cmd::Usage(crate::i18n::tr("slash.usage_join")),
         },
         "open" => match arg {
             Some(a) => Cmd::Open(a.to_string()),
-            None => Cmd::Usage("usage: /open <channel>  (or kick:<channel>)"),
+            None => Cmd::Usage(crate::i18n::tr("slash.usage_open")),
         },
         "keep" => Cmd::Keep,
         "part" | "leave" | "close" => Cmd::Part(arg.map(str::to_string)),
@@ -81,33 +81,33 @@ pub fn parse(input: &str) -> Cmd {
             let to = p.next().unwrap_or_default();
             let text = p.next().map(str::trim).unwrap_or_default();
             match (verb == "dm", to.is_empty() || text.is_empty()) {
-                (_, true) if verb == "dm" => Cmd::Usage("usage: /dm <user> <message>"),
-                (_, true) => Cmd::Usage("usage: /w <user> <message>"),
+                (_, true) if verb == "dm" => Cmd::Usage(crate::i18n::tr("slash.usage_dm")),
+                (_, true) => Cmd::Usage(crate::i18n::tr("slash.usage_w")),
                 (true, _) => Cmd::Dm(to.into(), text.into()),
                 _ => Cmd::Whisper(to.into(), text.into()),
             }
         }
         "block" | "blockemote" => match arg {
             Some(a) => Cmd::Block(a.to_string()),
-            None => Cmd::Usage("usage: /block <emote>  (/unblock <emote> · /blocked lists them)"),
+            None => Cmd::Usage(crate::i18n::tr("slash.usage_block")),
         },
         "unblock" | "unblockemote" => match arg {
             Some(a) => Cmd::Unblock(a.to_string()),
-            None => Cmd::Usage("usage: /unblock <emote>  (/blocked lists what's hidden)"),
+            None => Cmd::Usage(crate::i18n::tr("slash.usage_unblock")),
         },
         "blocked" | "blocks" => Cmd::Blocked,
         "sharelayout" | "sl" | "share" => Cmd::Share,
         "layout" => match arg {
             Some(a) => Cmd::Layout(a.to_string()),
-            None => Cmd::Usage("usage: /layout <heatsync.org/m/ link>"),
+            None => Cmd::Usage(crate::i18n::tr("slash.usage_layout")),
         },
         "op" => match arg {
             Some(a) => Cmd::Op(a.to_string()),
-            None => Cmd::Usage("usage: /op <text>  (posts to the heatsync feed)"),
+            None => Cmd::Usage(crate::i18n::tr("slash.usage_op")),
         },
         "re" => match arg {
             Some(a) => Cmd::Re(a.to_string()),
-            None => Cmd::Usage("usage: /re <text>  (replies to your last OP)"),
+            None => Cmd::Usage(crate::i18n::tr("slash.usage_re")),
         },
         // not ours — the platform's problem, and it must arrive untouched.
         _ => Cmd::Send(line.to_string()),

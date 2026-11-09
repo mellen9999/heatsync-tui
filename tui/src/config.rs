@@ -61,6 +61,8 @@ pub struct Config {
     pub special: Vec<heatsync_core::TabKind>,
     /// blocked emotes: (key, name the block was filed under).
     pub blocks: Vec<(String, String)>,
+    /// ui language: `auto` (os locale) or one of the shipped codes.
+    pub lang: String,
 }
 
 /// serialize a channel as `twitch:name` / `kick:name` / `yt:videoid`.
@@ -218,6 +220,7 @@ pub fn load() -> Config {
         channels: Vec::new(),
         special: Vec::new(),
         blocks: Vec::new(),
+        lang: "auto".into(),
     };
     if let Some(p) = path() {
         if let Ok(text) = fs::read_to_string(&p) {
@@ -233,6 +236,7 @@ pub fn load() -> Config {
                         "channels" => cfg.channels = parse_channels(v),
                         "special" => cfg.special = parse_special(v),
                         "block" => cfg.blocks.extend(parse_block(v)),
+                        "lang" => cfg.lang = v.trim().to_string(),
                         _ => {}
                     }
                 }
@@ -240,6 +244,24 @@ pub fn load() -> Config {
         }
     }
     cfg
+}
+
+/// read `lang=` and point the ui at it. runs first thing in main, before any
+/// text is printed.
+pub fn init_lang() {
+    let mut setting = "auto".to_string();
+    if let Some(text) = path().and_then(|p| fs::read_to_string(p).ok()) {
+        for l in text.lines() {
+            if let Some(("lang", v)) = l.split_once('=').map(|(k, v)| (k.trim(), v)) {
+                setting = v.trim().to_string();
+            }
+        }
+    }
+    crate::lang::apply(&setting);
+}
+
+pub fn lang_setting() -> String {
+    crate::lang::setting()
 }
 
 /// sent-line history, one per line, oldest first.
@@ -297,6 +319,9 @@ pub fn save(cfg: &Config) {
             let _ = fs::create_dir_all(dir);
         }
         let mut out = format!("tab_pos={}\n", cfg.tab_pos.as_str());
+        if !cfg.lang.is_empty() && cfg.lang != "auto" {
+            out.push_str(&format!("lang={}\n", cfg.lang));
+        }
         if cfg.timestamps {
             out.push_str("timestamps=on\n");
         }

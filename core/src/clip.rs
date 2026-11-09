@@ -5,6 +5,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use crate::i18n::trf;
+
 /// copy `text` to the clipboard. `Err` carries something worth showing the user.
 pub fn copy(text: &str) -> Result<&'static str, String> {
     // wayland, then X — whichever tool is present. a missing binary is not an
@@ -38,7 +40,7 @@ fn pipe_to(bin: &str, args: &[&str], text: &str) -> Result<bool, String> {
     child
         .stdin
         .take()
-        .ok_or_else(|| format!("{bin}: no stdin"))?
+        .ok_or_else(|| trf("clip.no_stdin", &[("bin", &bin)]))?
         .write_all(text.as_bytes())
         .map_err(|e| format!("{bin}: {e}"))?;
     // wl-copy forks a server that holds the selection; don't block on it.

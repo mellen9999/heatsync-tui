@@ -6,6 +6,7 @@
 use serde_json::{json, Value};
 
 use crate::emote::{self, Emote};
+use crate::i18n::{tr, trf};
 use crate::{sanitize, Badge, Extra, Note, NoteKind, Pin, Platform, TabKind, Tag, TagKind, Tint};
 
 /// a normalized chat line, ready for a channel buffer.
@@ -356,7 +357,7 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
     let note = if let Some(bits) = m.get("bits").and_then(Value::as_u64).filter(|b| *b > 0) {
         Some(Note {
             kind: NoteKind::Cheer,
-            what: format!("cheered {bits} bits"),
+            what: trf("proto.cheered", &[("bits", &bits.to_string())]),
         })
     } else if m
         .get("isRedemption")
@@ -365,7 +366,7 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
     {
         Some(Note {
             kind: NoteKind::Redeem,
-            what: "redeemed".into(),
+            what: tr("proto.redeemed").into(),
         })
     } else {
         None
@@ -636,7 +637,7 @@ fn usernotice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
     let sys = field(m, "systemMessage");
     let mut what = split_headline(&mut user, &sys);
     if what.is_empty() && sub == "announcement" {
-        what = "announced".into();
+        what = tr("proto.announced").into();
     }
     let channel = channel.and_then(Value::as_str).unwrap_or("").to_string();
     let color = color_of(m);
@@ -899,7 +900,7 @@ fn clearmsg_event(v: &Value) -> Event {
             platform: Platform::Twitch,
             channel: field(v, "channel"),
             target: Target::Msg(id),
-            label: "deleted".into(),
+            label: tr("proto.deleted").into(),
         },
     }
 }
@@ -910,11 +911,11 @@ fn clearchat_event(v: &Value) -> Event {
     let m = &v["message"];
     let target = field(m, "targetUsername");
     let (label, t) = if target.is_empty() {
-        ("cleared".to_string(), Target::All)
+        (tr("proto.cleared").to_string(), Target::All)
     } else {
         let label = match m.get("banDuration").and_then(Value::as_u64) {
-            Some(s) => format!("timed out {}", fmt_secs(s)),
-            None => "banned".to_string(),
+            Some(s) => trf("proto.timed_out", &[("dur", &fmt_secs(s))]),
+            None => tr("proto.banned").to_string(),
         };
         (label, Target::User(target.clone()))
     };
@@ -926,7 +927,7 @@ fn clearchat_event(v: &Value) -> Event {
         None,
         NoteKind::Mod,
         if matches!(t, Target::All) {
-            "chat cleared".into()
+            tr("proto.chat_cleared").into()
         } else {
             label.clone()
         },
@@ -958,7 +959,7 @@ fn youtube_delete_event(v: &Value) -> Event {
                 platform: Platform::Youtube,
                 channel: field(v, "videoId"),
                 target: Target::Msg(id.to_string()),
-                label: "deleted".into(),
+                label: tr("proto.deleted").into(),
             },
         })
         .collect();
@@ -1097,9 +1098,9 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
         "stream:online" => {
             let game = field(v, "game");
             let what = if game.is_empty() {
-                "went live".to_string()
+                tr("proto.went_live").to_string()
             } else {
-                format!("went live — {game}")
+                trf("proto.went_live_game", &[("game", &game)])
             };
             let mut l = note_line(
                 platform,
@@ -1121,7 +1122,7 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
                 who,
                 color,
                 NoteKind::Offline,
-                "went offline".into(),
+                tr("proto.went_offline").into(),
                 String::new(),
             )?;
             l.uid = uid;
@@ -1146,7 +1147,7 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
                 who,
                 color,
                 NoteKind::Category,
-                format!("switched to {game}"),
+                trf("proto.switched_to", &[("game", &game)]),
                 String::new(),
             )?;
             l.uid = uid;
@@ -1160,9 +1161,12 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
             }
             let viewers = n("viewers");
             let what = if viewers > 0 {
-                format!("raided {target} with {viewers} viewers")
+                trf(
+                    "proto.raided_viewers",
+                    &[("target", &target), ("viewers", &viewers.to_string())],
+                )
             } else {
-                format!("raided {target}")
+                trf("proto.raided", &[("target", &target)])
             };
             note_line(
                 platform,
@@ -1178,9 +1182,12 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
             let title = field(v, "title");
             let cost = n("cost");
             let what = match (title.is_empty(), cost) {
-                (false, c) if c > 0 => format!("redeemed {title} ({c})"),
-                (false, _) => format!("redeemed {title}"),
-                _ => "redeemed".to_string(),
+                (false, c) if c > 0 => trf(
+                    "proto.redeemed_cost",
+                    &[("title", &title), ("cost", &c.to_string())],
+                ),
+                (false, _) => trf("proto.redeemed_title", &[("title", &title)]),
+                _ => tr("proto.redeemed").to_string(),
             };
             note_line(
                 platform,
@@ -1198,7 +1205,10 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
             String::new(),
             None,
             NoteKind::Spike,
-            format!("hype train — level {}", n("level").max(1)),
+            trf(
+                "proto.hype_start",
+                &[("level", &n("level").max(1).to_string())],
+            ),
             String::new(),
         ),
         "stream:hype-end" => note_line(
@@ -1207,16 +1217,25 @@ fn stream_line_as(v: &Value, ty: &str, follow: bool) -> Option<ChatLine> {
             String::new(),
             None,
             NoteKind::Spike,
-            format!("hype train ended — level {}", n("level").max(1)),
+            trf(
+                "proto.hype_end",
+                &[("level", &n("level").max(1).to_string())],
+            ),
             String::new(),
         ),
         "moment:spike" => {
             let rate = v.get("rate").and_then(Value::as_f64)?;
             let base = v.get("baseline").and_then(Value::as_f64).unwrap_or(0.0);
             let what = if base > 0.0 {
-                format!("chat spike — {rate:.0}/s (avg {base:.0})")
+                trf(
+                    "proto.spike_avg",
+                    &[
+                        ("rate", &format!("{rate:.0}")),
+                        ("avg", &format!("{base:.0}")),
+                    ],
+                )
             } else {
-                format!("chat spike — {rate:.0}/s")
+                trf("proto.spike", &[("rate", &format!("{rate:.0}"))])
             };
             note_line(
                 platform,
@@ -1251,8 +1270,8 @@ fn kick_sub_line(v: &Value) -> Option<ChatLine> {
     if what.is_empty() {
         what = match et {
             "renewal" => match v.get("months").and_then(Value::as_u64) {
-                Some(mo) if mo > 0 => format!("resubscribed — {mo} months"),
-                _ => "resubscribed".into(),
+                Some(mo) if mo > 0 => trf("proto.resub_months", &[("months", &mo.to_string())]),
+                _ => tr("proto.resub").into(),
             },
             "gift" => {
                 let n = v
@@ -1261,12 +1280,12 @@ fn kick_sub_line(v: &Value) -> Option<ChatLine> {
                     .map(Vec::len)
                     .unwrap_or(0);
                 if n > 1 {
-                    format!("gifted {n} subs")
+                    trf("proto.gifted_subs", &[("n", &n.to_string())])
                 } else {
-                    "gifted a sub".into()
+                    tr("proto.gifted_sub").into()
                 }
             }
-            _ => "subscribed".into(),
+            _ => tr("proto.subscribed").into(),
         };
     }
     note_line(
@@ -1288,9 +1307,9 @@ fn kick_kicks_line(v: &Value) -> Option<ChatLine> {
     }
     let amount = v.get("amount").and_then(Value::as_u64).unwrap_or(0);
     let what = if amount > 0 {
-        format!("gifted {amount} kicks")
+        trf("proto.gifted_kicks_n", &[("n", &amount.to_string())])
     } else {
-        "gifted kicks".to_string()
+        tr("proto.gifted_kicks").to_string()
     };
     note_line(
         Platform::Kick,
@@ -1311,19 +1330,23 @@ fn yt_status_line(v: &Value) -> Option<ChatLine> {
         return None;
     }
     let (kind, what, text) = match v.get("status").and_then(Value::as_str).unwrap_or("") {
-        "ended" => (NoteKind::Offline, "stream ended".to_string(), String::new()),
+        "ended" => (
+            NoteKind::Offline,
+            tr("proto.stream_ended").to_string(),
+            String::new(),
+        ),
         "connected" => {
             let name = field(v, "channelName");
             let what = if name.is_empty() {
-                "connected".to_string()
+                tr("proto.connected").to_string()
             } else {
-                format!("connected — {name}")
+                trf("proto.connected_name", &[("name", &name)])
             };
             (NoteKind::Notice, what, field(v, "title"))
         }
         "error" => (
             NoteKind::Notice,
-            "connection error".to_string(),
+            tr("proto.connection_error").to_string(),
             field(v, "error"),
         ),
         _ => return None,
@@ -1351,17 +1374,17 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
         "superchat" => Some(Note {
             kind: NoteKind::Cheer,
             what: if amount.is_empty() {
-                "superchat".into()
+                tr("proto.superchat").into()
             } else {
-                format!("superchat {amount}")
+                trf("proto.superchat_amount", &[("amount", &amount)])
             },
         }),
         "supersticker" => Some(Note {
             kind: NoteKind::Cheer,
             what: if amount.is_empty() {
-                "supersticker".into()
+                tr("proto.supersticker").into()
             } else {
-                format!("supersticker {amount}")
+                trf("proto.supersticker_amount", &[("amount", &amount)])
             },
         }),
         "membership" => {
@@ -1370,7 +1393,7 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
             Some(Note {
                 kind: NoteKind::Sub,
                 what: if what.is_empty() {
-                    "became a member".into()
+                    tr("proto.became_member").into()
                 } else {
                     what
                 },
@@ -1382,7 +1405,7 @@ fn yt_line(m: &Value, video: &str) -> Option<ChatLine> {
             Some(Note {
                 kind: NoteKind::Gift,
                 what: if what.is_empty() {
-                    "gifted memberships".into()
+                    tr("proto.gifted_memberships").into()
                 } else {
                     what
                 },

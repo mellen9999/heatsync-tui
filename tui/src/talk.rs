@@ -12,8 +12,7 @@ use crate::hsauth::{self, Client};
 use crate::mentions::Mention;
 use crate::social::Msg;
 use crate::special;
-
-const NO_LOGIN: &str = "not logged in — run: heatsync-tui login";
+use heatsync_core::i18n::{tr, trf};
 
 /// the login, when this run has one and is live (the demo never calls out).
 fn client(app: &App) -> Option<Client> {
@@ -116,14 +115,18 @@ fn find(app: &App, dm: bool, who: &str) -> Option<Contact> {
 /// true = the line was taken (the composer clears).
 pub(crate) fn direct(app: &mut App, dm: bool, to: &str, text: &str) -> bool {
     let Some(c) = client(app) else {
-        app.status = Some(NO_LOGIN.into());
+        app.status = Some(tr("input.talk_no_login").into());
         return false;
     };
     let known = find(app, dm, to);
-    let verb = if dm { "dm" } else { "whisper" };
+    let verb = if dm {
+        tr("input.talk_verb_dm")
+    } else {
+        tr("input.talk_verb_whisper")
+    };
     app.status = Some(match &known {
         Some(w) => format!("{verb} → {}", w.login),
-        None => format!("looking up {to}…"),
+        None => trf("input.talk_looking_up", &[("to", to)]),
     });
     let (to, text) = (
         to.trim().trim_start_matches('@').to_string(),
@@ -135,9 +138,13 @@ pub(crate) fn direct(app: &mut App, dm: bool, to: &str, text: &str) -> bool {
             None => match c.lookup(&to, dm) {
                 Ok(Some(w)) => w,
                 Ok(None) => {
-                    let side = if dm { "heatsync" } else { "twitch" };
+                    let key = if dm {
+                        "input.talk_no_user_heatsync"
+                    } else {
+                        "input.talk_no_user_twitch"
+                    };
                     return Msg::Missing(
-                        format!("no {side} user {to}"),
+                        trf(key, &[("to", &to)]),
                         format!("/{} {to} {text}", if dm { "dm" } else { "w" }),
                     );
                 }
@@ -160,13 +167,13 @@ pub(crate) fn direct(app: &mut App, dm: bool, to: &str, text: &str) -> bool {
 /// a feed post: `reply` is the base36 id being answered. true = it went.
 pub(crate) fn post(app: &mut App, text: &str, reply: Option<String>) -> bool {
     let Some(c) = client(app) else {
-        app.status = Some(NO_LOGIN.into());
+        app.status = Some(tr("input.talk_no_login").into());
         return false;
     };
     app.status = Some(if reply.is_some() {
-        "replied → feed".into()
+        tr("input.talk_replied").into()
     } else {
-        "posted → feed".into()
+        tr("input.talk_posted").into()
     });
     let text = text.to_string();
     spawn(app, c, move |c| {
@@ -199,7 +206,7 @@ pub(crate) fn re(app: &mut App, text: &str) -> bool {
     match last_op(app) {
         Some(id) => post(app, text, Some(id)),
         None => {
-            app.status = Some("no post to reply to — open /feed first".into());
+            app.status = Some(tr("input.talk_no_post").into());
             false
         }
     }

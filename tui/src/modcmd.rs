@@ -5,6 +5,7 @@
 //! the network.
 
 use crate::hsauth::ModAction;
+use heatsync_core::i18n::tr;
 
 #[derive(Debug, PartialEq)]
 pub enum Parsed {
@@ -14,10 +15,6 @@ pub enum Parsed {
     Usage(&'static str),
 }
 
-const USAGE_BAN: &str = "usage: /ban <user> [reason]";
-const USAGE_UNBAN: &str = "usage: /unban <user>";
-const USAGE_TIMEOUT: &str = "usage: /timeout <user> [10m|600|1h] [reason]";
-const USAGE_DELETE: &str = "usage: /delete <user>  (their last message)  or  /delete <message-id>";
 const MAX_TIMEOUT: u32 = 14 * 24 * 3600;
 
 /// `Some` when the line is one of ours. `last_id_of(user)` finds that user's
@@ -33,11 +30,11 @@ pub fn parse(line: &str, last_id_of: impl Fn(&str) -> Option<String>) -> Option<
     match verb.as_str() {
         "ban" => Some(match first.and_then(login) {
             Some(u) => Parsed::Run(ModAction::Ban, u),
-            None => Parsed::Usage(USAGE_BAN),
+            None => Parsed::Usage(tr("input.usage_ban")),
         }),
         "unban" | "untimeout" => Some(match first.and_then(login) {
             Some(u) => Parsed::Run(ModAction::Unban, u),
-            None => Parsed::Usage(USAGE_UNBAN),
+            None => Parsed::Usage(tr("input.usage_unban")),
         }),
         "timeout" => Some(match first.and_then(login) {
             Some(u) => match it.next().map(secs) {
@@ -46,15 +43,15 @@ pub fn parse(line: &str, last_id_of: impl Fn(&str) -> Option<String>) -> Option<
                 // a word that isn't a duration is the start of the reason
                 Some(None) => Parsed::Run(ModAction::Timeout(600), u),
             },
-            None => Parsed::Usage(USAGE_TIMEOUT),
+            None => Parsed::Usage(tr("input.usage_timeout")),
         }),
         "delete" => Some(match first {
             Some(a) if is_message_id(a) => Parsed::Run(ModAction::Delete, a.to_string()),
             Some(a) => match login(a).and_then(|u| last_id_of(&u)) {
                 Some(id) => Parsed::Run(ModAction::Delete, id),
-                None => Parsed::Usage("no recent message from them here to delete"),
+                None => Parsed::Usage(tr("input.usage_delete_none")),
             },
-            None => Parsed::Usage(USAGE_DELETE),
+            None => Parsed::Usage(tr("input.usage_delete")),
         }),
         _ => None,
     }

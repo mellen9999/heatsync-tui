@@ -24,6 +24,7 @@ mod input;
 mod intr;
 mod key;
 mod kick;
+mod lang;
 mod layout;
 mod mentions;
 mod modcmd;
@@ -55,6 +56,7 @@ use feed::{
 };
 use heatsync_core::edit;
 use heatsync_core::emote::EmoteSet;
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::room::RoomModes;
 use heatsync_core::streamev::StreamEvents;
 use heatsync_core::TabKind;
@@ -63,34 +65,8 @@ use input::{drain_picker, handle_key, Flow};
 use net::Sub;
 use ratatui::Terminal;
 
-/// Printed by `--help`, and again when the TUI is asked to start without a tty.
-const USAGE: &str = "\
-heatsync-tui — heat-sorted live multichat in the terminal
-
-USAGE:
-    heatsync-tui [CHANNEL...]        open the chat UI on those channels
-                                     (name, kick:name, yt:videoid or a youtube url)
-    heatsync-tui <SUBCOMMAND>
-
-SUBCOMMANDS:
-    log        print recent messages
-    search     search the chat archive
-    hot, top   busiest channels right now
-    login      log in with heatsync (chat + mod, twitch and kick)
-    login kick same login, with how to link kick
-    logout     log out and forget the login
-    status     who is logged in and what they can do
-    probe      check a channel is reachable
-    diag       dump diagnostics
-    render-test  draw the emote/paint test pattern
-
-OPTIONS:
-    --mock     run against a synthetic feed, no network
-    -h, --help
-    -V, --version
-";
-
 fn main() -> io::Result<()> {
+    config::init_lang();
     intr::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -101,6 +77,7 @@ fn main() -> io::Result<()> {
         Some("diag") => return cli::diag(&args[1..]),
         Some("render-test") => return cli::render_test(&args[1..]),
         Some("status") => return cli::status(),
+        Some("lang") => return lang::run(&args[1..]),
         Some("login") => {
             intr::login_phase();
             // an interactive login drops you into the chat, same as plain `hs`
@@ -122,7 +99,7 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
         Some("--help") | Some("-h") | Some("help") => {
-            print!("{USAGE}");
+            print!("{}", tr("input.main_usage"));
             return Ok(());
         }
         _ => {}
@@ -137,10 +114,8 @@ fn chat(args: &[String]) -> io::Result<()> {
     // job or a CI step would otherwise get.
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         eprintln!(
-            "heatsync-tui: not a terminal — the chat UI needs an interactive tty.\n\
-             Run it directly, or use a subcommand that writes to stdout:\n\
-             \n\
-             {USAGE}"
+            "{}",
+            trf("input.main_no_tty", &[("usage", tr("input.main_usage"))])
         );
         std::process::exit(1);
     }
@@ -263,8 +238,8 @@ fn build_live(
     let tabs: Vec<Vec<Sub>> = tabs.into_iter().filter(|t| !t.is_empty()).collect();
 
     eprintln!(
-        "heatsync: fetching emotes + connecting to {} channels…",
-        tabs.len()
+        "{}",
+        trf("input.main_connecting", &[("n", &tabs.len().to_string())])
     );
     // pick the emote tier now, while we're still a normal terminal:
     //   1. a graphics-capable emulator (sixel/kitty) → EmoteStore
@@ -279,15 +254,12 @@ fn build_live(
     };
     let tier = match (&store, &fb) {
         (Some(s), _) => s.tier_label(),
-        (None, Some(_)) => "framebuffer",
-        _ => "text (no terminal graphics)",
+        (None, Some(_)) => tr("input.main_tier_fb"),
+        _ => tr("input.main_tier_text"),
     };
-    eprintln!("heatsync: emotes = {tier}");
+    eprintln!("{}", trf("input.main_emotes_tier", &[("tier", tier)]));
     if store.is_none() && fb.is_none() {
-        eprintln!(
-            "  → for image emotes, run in a graphics terminal: foot (linux), \
-             windows terminal (win), wezterm (any) — else names show as text"
-        );
+        eprintln!("{}", tr("input.main_emote_hint"));
     }
     // channels open immediately with empty emote sets; each set is fetched on a
     // background thread and merged in via emote_rx once it lands (no UI stall).
@@ -429,6 +401,7 @@ pub(crate) fn persisted(app: &App) -> config::Config {
         channels,
         special,
         blocks: heatsync_core::block::list(),
+        lang: config::lang_setting(),
     }
 }
 

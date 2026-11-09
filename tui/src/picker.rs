@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
 use crate::{hsauth, http, palette};
+use heatsync_core::i18n::{tr, trf};
 
 /// a fetched list is reused for this long when `o` is pressed again.
 pub const CACHE_FOR: Duration = Duration::from_secs(30);
@@ -29,9 +30,9 @@ pub enum Section {
 impl Section {
     fn label(self) -> &'static str {
         match self {
-            Section::Following => "following",
-            Section::Mine => "your channels",
-            Section::Top => "top live",
+            Section::Following => tr("picker.following"),
+            Section::Mine => tr("picker.your_channels"),
+            Section::Top => tr("picker.top_live"),
         }
     }
 }
@@ -146,7 +147,7 @@ pub fn assemble(
 ) -> Fetched {
     let mut out = Fetched::default();
     let Some(top) = top else {
-        out.error = Some("couldn't load the live list — type a channel and enter".into());
+        out.error = Some(tr("picker.load_failed").into());
         return out;
     };
     let pool: Vec<Entry> = top.iter().filter_map(entry_of).collect();
@@ -189,7 +190,7 @@ pub fn assemble(
                         display: n.clone(),
                         name: n,
                         viewers: None,
-                        info: "live".into(),
+                        info: tr("picker.live").into(),
                     },
                 },
             );
@@ -416,13 +417,16 @@ impl Picker {
     pub fn lines(&self, w: u16, h: u16) -> Vec<Line<'static>> {
         let w = w as usize;
         let mut head = vec![
-            Span::styled(" pick ", palette::TAG),
+            Span::styled(format!(" {} ", tr("picker.mode_pick")), palette::TAG),
             Span::styled(" ❯ ", palette::TEXT),
             Span::styled(self.filter.clone(), palette::TEXT),
             Span::styled("\u{2588}", palette::TEXT),
         ];
         if self.loading {
-            head.push(Span::styled("   loading…", palette::DIM));
+            head.push(Span::styled(
+                format!("   {}", tr("picker.loading")),
+                palette::DIM,
+            ));
         }
         let mut out = vec![Line::from(head)];
         if let Some(err) = self.fetched.as_ref().and_then(|f| f.error.as_ref()) {
@@ -448,9 +452,9 @@ impl Picker {
         if vis.is_empty() && self.fetched.is_some() {
             let t = self.filter.trim();
             let msg = if looks_like_spec(t) {
-                format!(" no match — enter joins \"{t}\"")
+                format!(" {}", trf("picker.no_match_join", &[("spec", t)]))
             } else {
-                " no match".to_string()
+                format!(" {}", tr("picker.no_match"))
             };
             body.push(Line::from(Span::styled(msg, palette::DIM)));
         }

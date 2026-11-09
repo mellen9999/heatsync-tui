@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::proto::ChatLine;
 use heatsync_core::streamev::StreamEvents;
 use heatsync_core::{Channel, Extra, Message, Note, NoteKind, Platform, TabKind};
@@ -98,8 +99,14 @@ pub(crate) fn parts(n: &Note) -> (String, Style, &str) {
             None => (format!("◆ {}", n.what), s.fg(Color::Yellow), ""),
         },
         NoteKind::Category => {
-            let game = n.what.strip_prefix("switched to ").unwrap_or("");
-            ("◆ switched to".into(), s.fg(Color::Yellow), game)
+            // the server's own text is english; strip it, or the translated verb.
+            let verb = tr("streamrow.switched_to");
+            let game = n
+                .what
+                .strip_prefix("switched to ")
+                .or_else(|| n.what.strip_prefix(verb).map(str::trim_start))
+                .unwrap_or("");
+            (format!("◆ {verb}"), s.fg(Color::Yellow), game)
         }
         _ => (format!("◆ {}", n.what), s.fg(Color::White), ""),
     }
@@ -226,9 +233,9 @@ pub(crate) fn replay(app: &mut App, events: &[(ChatLine, u64)], now_secs: u64) {
 pub(crate) fn went_live(login: &str, start: u64, game: &str) -> Message {
     let login = login.to_lowercase();
     let what = if game.is_empty() {
-        "went live".to_string()
+        tr("streamrow.went_live").to_string()
     } else {
-        format!("went live — {game}")
+        trf("streamrow.went_live_game", &[("game", game)])
     };
     Message {
         platform: Platform::Twitch,

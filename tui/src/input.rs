@@ -5,6 +5,7 @@ use crate::{hsauth, key, modcmd, net, picker, special, talk};
 use crate::{parse_sub, parse_tab, save_state, yt_video_id};
 use crossterm::event::{KeyCode, KeyModifiers};
 use heatsync_core::complete::Completion;
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::{clip, edit, layout, scroll, slash};
 use heatsync_core::{Channel, Message, Platform};
 use std::time::Instant;
@@ -197,14 +198,25 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
                 .channels
                 .get_mut(app.focus)
                 .is_some_and(|c| c.dismiss_pin());
-            app.status = Some(if hid { "pin hidden" } else { "no pin here" }.into());
+            app.status = Some(
+                if hid {
+                    tr("input.status_pin_hidden")
+                } else {
+                    tr("input.status_no_pin")
+                }
+                .into(),
+            );
             Flow::Continue
         }
         KeyCode::Char('t') => {
             app.stamps = !app.stamps;
-            app.status = Some(format!(
-                "timestamps {}",
-                if app.stamps { "on" } else { "off" }
+            app.status = Some(trf(
+                if app.stamps {
+                    "input.status_stamps_on"
+                } else {
+                    "input.status_stamps_off"
+                },
+                &[],
             ));
             save_state(app);
             Flow::Continue
@@ -402,12 +414,12 @@ fn share_layout(app: &mut App) {
         .collect();
     let l = layout::build(&tabs);
     if l.is_empty() {
-        app.status = Some("nothing to share — open a twitch or kick channel".into());
+        app.status = Some(tr("input.status_share_none").into());
         return;
     }
     let link = format!("https://heatsync.org/m/{l}");
     app.status = Some(match clip::copy(&link) {
-        Ok(via) => format!("copied ({via}) {link}"),
+        Ok(via) => trf("input.status_copied", &[("via", &via), ("link", &link)]),
         Err(e) => format!("{e} — {link}"),
     });
 }
@@ -417,7 +429,7 @@ fn share_layout(app: &mut App) {
 fn open_layout(app: &mut App, link: &str) {
     let tabs = layout::parse(link);
     if tabs.is_empty() {
-        app.status = Some("no channels in that link".into());
+        app.status = Some(tr("input.status_layout_empty").into());
         return;
     }
     let mut yt = 0;
@@ -439,9 +451,12 @@ fn open_layout(app: &mut App, link: &str) {
         }
     }
     app.status = Some(match (opened, yt) {
-        (0, _) => "link only has youtube — join a live video with /join yt:<id>".into(),
-        (n, 0) => format!("opened {n} tab(s)"),
-        (n, y) => format!("opened {n} tab(s), skipped {y} youtube (needs a live video id)"),
+        (0, _) => tr("input.status_layout_yt_only").into(),
+        (n, 0) => trf("input.status_layout_opened", &[("n", &n.to_string())]),
+        (n, y) => trf(
+            "input.status_layout_skipped",
+            &[("n", &n.to_string()), ("y", &y.to_string())],
+        ),
     });
 }
 
@@ -502,7 +517,7 @@ fn slot_apply(app: &mut App, p: Platform) {
         let Some(old) = old else { return };
         let ch = &mut app.channels[i];
         if ch.extra.is_empty() {
-            app.status = Some("last source — x leaves the tab".to_string());
+            app.status = Some(tr("input.status_last_source").to_string());
             return;
         }
         if ch.platform == p {
@@ -525,7 +540,10 @@ fn slot_apply(app: &mut App, p: Platform) {
     // duplicate guards: same source twice in one tab, or open in another tab
     // (inbound lines route to the first matching tab — a dupe would shadow it).
     if app.channels[i].matches(p, &new) {
-        app.status = Some(format!("{}:{new} already in this tab", p.tag()));
+        app.status = Some(trf(
+            "input.status_dup_here",
+            &[("src", &format!("{}:{new}", p.tag()))],
+        ));
         return;
     }
     if app
@@ -534,7 +552,10 @@ fn slot_apply(app: &mut App, p: Platform) {
         .enumerate()
         .any(|(j, c)| j != i && c.matches(p, &new))
     {
-        app.status = Some(format!("{}:{new} is open in another tab", p.tag()));
+        app.status = Some(trf(
+            "input.status_dup_other",
+            &[("src", &format!("{}:{new}", p.tag()))],
+        ));
         return;
     }
     match old {
@@ -614,7 +635,7 @@ fn part_channel(app: &mut App, which: Option<&str>) {
         {
             Some(i) => app.focus = i,
             None => {
-                app.status = Some(format!("not open: {name}"));
+                app.status = Some(trf("input.status_not_open", &[("name", &name)]));
                 return;
             }
         }
@@ -797,21 +818,20 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
             if let Some(client) = app.hs.clone() {
                 send_via_heatsync(app, client, platform, name.clone(), text, reply);
                 app.line.accept();
-                app.status = Some(format!("sent → {name}"));
+                app.status = Some(trf("input.status_sent", &[("name", &name)]));
             } else {
                 match &app.twitch_tx {
                     Some(tx) => {
                         // a dead sender (auth failed for good) must not look like a send.
                         if tx.send((name.clone(), text, reply)).is_ok() {
                             app.line.accept();
-                            app.status = Some(format!("sent → {name}"));
+                            app.status = Some(trf("input.status_sent", &[("name", &name)]));
                             crate::temp::sent(app, platform, &name);
                         } else {
-                            app.status =
-                                Some("twitch sender stopped — run: heatsync-tui login".into());
+                            app.status = Some(tr("input.status_twitch_stopped").into());
                         }
                     }
-                    None => app.status = Some("not logged in — run: heatsync-tui login".into()),
+                    None => app.status = Some(tr("input.talk_no_login").into()),
                 }
             }
         }
@@ -820,11 +840,11 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
             if let Some(client) = app.hs.clone() {
                 send_via_heatsync(app, client, platform, name.clone(), text, reply);
                 app.line.accept();
-                app.status = Some(format!("sent → {name}"));
+                app.status = Some(trf("input.status_sent", &[("name", &name)]));
             } else if let Some(ktx) = &app.kick_tx {
                 let _ = ktx.send((name.clone(), text, reply));
                 app.line.accept();
-                app.status = Some(format!("sent → {name}"));
+                app.status = Some(trf("input.status_sent", &[("name", &name)]));
                 crate::temp::sent(app, platform, &name);
             } else if let Some(out) = &app.out {
                 let _ = out.send(net::Outbound::Chat {
@@ -833,14 +853,14 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                     text,
                 });
                 app.line.accept();
-                app.status = Some(format!("sent → {name} (via ext)"));
+                app.status = Some(trf("input.status_sent_ext", &[("name", &name)]));
             } else {
-                app.status = Some("not logged in — run: heatsync-tui login kick".into());
+                app.status = Some(tr("input.status_no_login_kick").into());
             }
         }
         // youtube sends only via the authenticated relay (extension path).
         Platform::Youtube if app.special.ws_cli => {
-            app.status = Some("youtube sends need the extension".into())
+            app.status = Some(tr("input.status_yt_needs_ext").into())
         }
         Platform::Youtube => match &app.out {
             Some(out) => {
@@ -850,9 +870,9 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                     text,
                 });
                 app.line.accept();
-                app.status = Some(format!("sent → {name} (via ext)"));
+                app.status = Some(trf("input.status_sent_ext", &[("name", &name)]));
             }
-            None => app.status = Some("no send path — set HEATSYNC_TOKEN".into()),
+            None => app.status = Some(tr("input.status_no_send_path").into()),
         },
     }
     Flow::Continue
@@ -939,28 +959,28 @@ fn run_mod_from(app: &mut App, parsed: modcmd::Parsed, from_composer: bool) {
         (c.platform, c.name.clone())
     };
     if matches!(app.feed, Feed::Mock(_)) {
-        app.status = Some("offline demo — mod actions are off".into());
+        app.status = Some(tr("input.status_demo_mod").into());
         return;
     }
     match platform {
         Platform::Twitch => {}
         Platform::Kick => {
-            app.status = Some("mod tools aren't on kick yet — use kick.com for that".into());
+            app.status = Some(tr("input.status_mod_kick").into());
             return;
         }
         Platform::Youtube => {
-            app.status = Some("mod tools are twitch-only for now".into());
+            app.status = Some(tr("input.status_mod_twitch_only").into());
             return;
         }
     }
     let Some(client) = app.hs.clone() else {
-        app.status = Some("log in first to use mod tools — run: heatsync-tui login".into());
+        app.status = Some(tr("input.status_mod_login").into());
         return;
     };
     if from_composer {
         app.line.accept();
     }
-    app.status = Some("working…".into());
+    app.status = Some(tr("input.status_working").into());
     let chan = name.clone();
     hsauth::spawn_note(app.hs_tx.clone(), platform, name, move || {
         client.mod_action(platform, &chan, &target, &action)
@@ -1042,7 +1062,7 @@ fn cursor_reply(app: &mut App) {
             app.line.focus();
             app.status = None;
         }
-        None => app.status = Some("can't reply to that line".into()),
+        None => app.status = Some(tr("input.status_cant_reply").into()),
     }
 }
 
@@ -1055,7 +1075,7 @@ fn cursor_yank(app: &mut App) {
         m.text.clone()
     };
     app.status = Some(match clip::copy(&text) {
-        Ok(via) => format!("yanked ({via})"),
+        Ok(via) => trf("input.status_yanked", &[("via", &via)]),
         Err(e) => e,
     });
 }
@@ -1068,7 +1088,7 @@ fn cursor_delete(app: &mut App) {
             modcmd::Parsed::Run(hsauth::ModAction::Delete, id),
             false,
         ),
-        None => app.status = Some("can't delete that line".into()),
+        None => app.status = Some(tr("input.status_cant_delete").into()),
     }
 }
 

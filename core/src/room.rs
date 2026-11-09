@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::i18n::{tr, trf};
 use crate::proto::{fmt_secs, note_line, ChatLine, RoomState};
 use crate::{NoteKind, Platform};
 
@@ -73,31 +74,39 @@ impl RoomModes {
     }
 }
 
-fn on_off(label: &str, on: bool) -> String {
-    format!("{label} {}", if on { "on" } else { "off" })
+fn on_off(on_key: &'static str, off_key: &'static str, on: bool) -> String {
+    tr(if on { on_key } else { off_key }).to_string()
 }
 
 fn changes(was: Modes, now: Modes) -> Vec<String> {
     let mut out = Vec::new();
     if was.slow != now.slow {
         out.push(if now.slow == 0 {
-            "slow mode off".to_string()
+            tr("room.slow_off").to_string()
         } else {
-            format!("slow mode {}", fmt_secs(now.slow as u64))
+            trf("room.slow_on", &[("dur", &fmt_secs(now.slow as u64))])
         });
     }
     if was.followers != now.followers {
         out.push(match now.followers {
-            n if n < 0 => "followers-only off".to_string(),
-            0 => "followers-only on".to_string(),
-            n => format!("followers-only {}", fmt_secs(n as u64 * 60)),
+            n if n < 0 => tr("room.followers_off").to_string(),
+            0 => tr("room.followers_on").to_string(),
+            n => trf("room.followers_dur", &[("dur", &fmt_secs(n as u64 * 60))]),
         });
     }
     if was.emote_only != now.emote_only {
-        out.push(on_off("emote-only", now.emote_only));
+        out.push(on_off(
+            "room.emote_only_on",
+            "room.emote_only_off",
+            now.emote_only,
+        ));
     }
     if was.subs_only != now.subs_only {
-        out.push(on_off("sub-only", now.subs_only));
+        out.push(on_off(
+            "room.sub_only_on",
+            "room.sub_only_off",
+            now.subs_only,
+        ));
     }
     out
 }

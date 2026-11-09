@@ -7,6 +7,7 @@ use crate::palette;
 use heatsync_core::edit;
 use heatsync_core::emote::{segments, EmoteSet, Segment};
 use heatsync_core::heat::Tier;
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::scroll;
 use heatsync_core::TabKind;
 use heatsync_core::{Channel, Platform};
@@ -68,9 +69,9 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
     if app.channels.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  no channels — press ", palette::DIM),
+                Span::styled(format!("  {} ", tr("draw.no_channels_press")), palette::DIM),
                 Span::styled("o", palette::HEAD),
-                Span::styled(" to join one", palette::DIM),
+                Span::styled(format!(" {}", tr("draw.to_join_one")), palette::DIM),
             ])),
             main,
         );
@@ -401,8 +402,14 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
     let [head, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" channels ", palette::TAG),
-            Span::styled(format!("  {} open", app.channels.len()), palette::DIM),
+            Span::styled(format!(" {} ", tr("draw.channels")), palette::TAG),
+            Span::styled(
+                format!(
+                    "  {}",
+                    trf("draw.n_open", &[("n", &app.channels.len().to_string())])
+                ),
+                palette::DIM,
+            ),
         ])),
         head,
     );
@@ -410,7 +417,7 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
     if app.channels.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  empty — press a to add a channel",
+                format!("  {}", tr("draw.manage_empty")),
                 palette::DIM,
             ))),
             list,
@@ -441,11 +448,11 @@ fn draw_manage(f: &mut Frame, area: Rect, app: &App) {
             .collect::<Vec<_>>()
             .join("+");
         let label = format!(
-            " {cursor} {active} {}·{}   {:>6.0}   {} msg",
+            " {cursor} {active} {}·{}   {:>6.0}   {}",
             ch.name,
             tags,
             ch.heat,
-            ch.messages.len(),
+            trf("draw.n_msg", &[("n", &ch.messages.len().to_string())]),
         );
         let row = Rect {
             x: list.x,
@@ -476,7 +483,7 @@ fn heat_bar(heat: f64, width: usize) -> Line<'static> {
 fn hint(k: &'static str, d: &'static str) -> [Span<'static>; 2] {
     [
         Span::styled(k, palette::HEAD),
-        Span::styled(format!(" {d}  "), palette::DIM),
+        Span::styled(format!(" {}  ", tr(d)), palette::DIM),
     ]
 }
 
@@ -490,15 +497,18 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     let tag = palette::TAG;
     // Manage mode → rover-style key hints.
     if app.mode == InputMode::Manage {
-        let mut spans = vec![Span::styled(" manage ", tag), Span::raw("  ")];
+        let mut spans = vec![
+            Span::styled(format!(" {} ", tr("draw.mode_manage")), tag),
+            Span::raw("  "),
+        ];
         for pair in [
-            hint("jk", "move"),
-            hint("enter", "open"),
-            hint("a", "add"),
-            hint("e", "edit"),
-            hint("x", "leave"),
-            hint("JK", "reorder"),
-            hint("esc", "back"),
+            hint("jk", "draw.h_move"),
+            hint("enter", "draw.h_open"),
+            hint("a", "draw.h_add"),
+            hint("e", "draw.h_edit"),
+            hint("x", "draw.h_leave"),
+            hint("JK", "draw.h_reorder"),
+            hint("esc", "draw.h_back"),
         ] {
             spans.extend(pair);
         }
@@ -510,7 +520,10 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     }
     // SlotPick → show the cursor row's three slots, pick one with t/k/y.
     if app.mode == InputMode::SlotPick {
-        let mut spans = vec![Span::styled(" edit ", tag), Span::raw("  ")];
+        let mut spans = vec![
+            Span::styled(format!(" {} ", tr("draw.mode_edit")), tag),
+            Span::raw("  "),
+        ];
         if let Some(ch) = app.channels.get(app.manage_cursor) {
             for (key, p) in [
                 ("t", Platform::Twitch),
@@ -528,30 +541,36 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 ));
             }
         }
-        spans.extend(hint("esc", "back"));
+        spans.extend(hint("esc", "draw.h_back"));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
     // SlotEdit → type the slot's new name, join-prompt style.
     if let InputMode::SlotEdit(p) = app.mode {
         let spans = vec![
-            Span::styled(format!(" edit {} ", p.tag()), tag),
+            Span::styled(
+                format!(" {} ", trf("draw.edit_slot", &[("tag", p.tag())])),
+                tag,
+            ),
             Span::styled(" ❯ ", palette::TEXT),
             Span::styled(app.input.clone(), palette::TEXT),
             Span::styled("\u{2588}", palette::TEXT),
-            Span::styled("   enter apply · empty clears · esc back", palette::DIM),
+            Span::styled(format!("   {}", tr("draw.slot_edit_hint")), palette::DIM),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
     if app.mode == InputMode::Pick {
-        let mut spans = vec![Span::styled(" pick ", tag), Span::raw("  ")];
+        let mut spans = vec![
+            Span::styled(format!(" {} ", tr("draw.mode_pick")), tag),
+            Span::raw("  "),
+        ];
         for pair in [
-            hint("type", "filter"),
-            hint("↑↓", "move"),
-            hint("enter", "join"),
-            hint("+", "merge"),
-            hint("esc", "close"),
+            hint("type", "draw.h_filter"),
+            hint("↑↓", "draw.h_move"),
+            hint("enter", "draw.h_join"),
+            hint("+", "draw.h_merge"),
+            hint("esc", "draw.h_close"),
         ] {
             spans.extend(pair);
         }
@@ -584,7 +603,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             format!("{}·{}", ch.name, ch.platform.tag())
         };
         let prompt = if normal {
-            format!(" {target} NORMAL ")
+            format!(" {target} {} ", tr("draw.normal"))
         } else {
             format!(" {target} ")
         };
@@ -600,10 +619,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         // the warning stands in for an empty line only — whatever is typed
         // (a /join, a /w) always stays visible.
         if readonly && app.line.text().is_empty() {
-            spans.push(Span::styled(
-                "read-only — no send token · esc",
-                palette::WARN,
-            ));
+            spans.push(Span::styled(tr("draw.readonly"), palette::WARN));
         } else {
             // draw the line with a block cursor sitting ON a character in normal
             // mode and between characters in insert — the same shape vi has, so
@@ -632,20 +648,17 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
                 spans.push(Span::styled(format!("   {msg}"), palette::WARN));
             } else if app.line.is_empty() && !normal {
                 let hint = match ch.kind {
-                    TabKind::Feed => "   text posts to the feed  ·  /op /re  ·  r on a row replies",
-                    TabKind::Whispers => {
-                        "   /w <user> <msg>  ·  /dm <user> <msg>  ·  r on a row replies"
-                    }
-                    TabKind::Mentions => {
-                        "   commands only  ·  /join /w /dm  ·  esc, enter jumps to the source"
-                    }
-                    TabKind::Channel => {
-                        "   tab completes emotes/@users  ·  /join /open /part /quit  ·  text goes to chat"
-                    }
+                    TabKind::Feed => tr("draw.hint_feed"),
+                    TabKind::Whispers => tr("draw.hint_whispers"),
+                    TabKind::Mentions => tr("draw.hint_mentions"),
+                    TabKind::Channel => tr("draw.hint_channel"),
                 };
-                spans.push(Span::styled(hint, palette::DIM));
+                spans.push(Span::styled(format!("   {hint}"), palette::DIM));
             } else if normal {
-                spans.push(Span::styled("   kj history  esc leave", palette::DIM));
+                spans.push(Span::styled(
+                    format!("   {}", tr("draw.normal_hint")),
+                    palette::DIM,
+                ));
             }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -653,13 +666,13 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     }
 
     let (dot, dot_color, state) = match &app.feed {
-        Feed::Mock(_) => ("\u{25cb} ", palette::DIM, "mock".to_string()),
+        Feed::Mock(_) => ("\u{25cb} ", palette::DIM, tr("draw.state_mock")),
         Feed::Live {
             connected: true, ..
-        } => ("\u{25cf} ", palette::LIVE, "live".to_string()),
+        } => ("\u{25cf} ", palette::LIVE, tr("draw.state_live")),
         Feed::Live {
             connected: false, ..
-        } => ("\u{25cf} ", palette::WARN, "connecting".to_string()),
+        } => ("\u{25cf} ", palette::WARN, tr("draw.state_connecting")),
     };
     let mut spans = vec![Span::styled(" heatsync ", palette::TAG)];
     // message cursor: how much arrived while parked, and the keys that work here.
@@ -667,17 +680,17 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         if let Some(ch) = app.channels.get(app.focus) {
             let newer = scroll::newer(ch.seq, ch.messages.len(), app.cursor);
             spans.push(Span::styled(
-                format!(" -- {newer} new --  "),
+                format!(" {}  ", trf("draw.n_new", &[("n", &newer.to_string())])),
                 palette::DIM_TAG,
             ));
         }
         for pair in [
-            hint("jk", "move"),
-            hint("r", "reply"),
-            hint("y", "yank"),
-            hint("d", "delete"),
-            hint("b", "block emote"),
-            hint("G", "live"),
+            hint("jk", "draw.h_move"),
+            hint("r", "draw.h_reply"),
+            hint("y", "draw.h_yank"),
+            hint("d", "draw.h_delete"),
+            hint("b", "draw.h_block_emote"),
+            hint("G", "draw.h_live"),
         ] {
             spans.extend(pair);
         }
@@ -694,7 +707,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         spans.push(Span::styled(format!("  {msg}"), palette::WARN));
     } else if logged_out_live(app) {
         spans.push(Span::styled(
-            "  not logged in — q then `hs login`",
+            format!("  {}", tr("draw.not_logged_in")),
             palette::DIM,
         ));
     }
@@ -702,22 +715,31 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     // terminal.
     spans.push(Span::raw("  "));
     for pair in [
-        hint("jk", "chan"),
-        hint("i", "say"),
-        hint("o", "pick"),
-        hint("m", "manage"),
+        hint("jk", "draw.h_chan"),
+        hint("i", "draw.h_say"),
+        hint("o", "draw.h_pick"),
+        hint("m", "draw.h_manage"),
     ] {
         spans.extend(pair);
     }
     if app.channels.get(app.focus).is_some_and(|c| c.temp) {
-        spans.extend(hint("s", "keep"));
+        spans.extend(hint("s", "draw.h_keep"));
     }
-    spans.extend(hint("q", "quit"));
+    spans.extend(hint("q", "draw.h_quit"));
     if app.paused {
-        spans.push(Span::styled("PAUSED  ", palette::WARN_BOLD));
+        spans.push(Span::styled(
+            format!("{}  ", tr("draw.paused")),
+            palette::WARN_BOLD,
+        ));
     }
     spans.push(Span::styled(dot, dot_color));
-    spans.push(Span::styled(format!("{state} · {n} ch"), palette::DIM));
+    spans.push(Span::styled(
+        trf(
+            "draw.footer_state",
+            &[("state", &state), ("n", &n.to_string())],
+        ),
+        palette::DIM,
+    ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

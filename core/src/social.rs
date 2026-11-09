@@ -4,6 +4,7 @@
 
 use serde_json::{json, Value};
 
+use crate::i18n::{tr, trf};
 use crate::proto::{field, platform_or_twitch, special_chat, str_or_num, SpecialLine};
 use crate::{Platform, TabKind, Tag, TagKind};
 
@@ -153,10 +154,18 @@ fn color(m: &Value) -> Option<String> {
 
 fn thread_row(m: &Value, other: &Contact, incoming: bool, name: String) -> Row {
     let (tag, user, color) = match (incoming, other.dm) {
-        (true, false) => ("[whisper]".to_string(), name, color(m)),
-        (true, true) => ("[DM]".to_string(), name, color(m)),
-        (false, false) => (format!("[whisper → {}]", other.login), "you".into(), None),
-        (false, true) => (format!("[DM → {}]", other.login), "you".into(), None),
+        (true, false) => (tr("social.whisper_in").to_string(), name, color(m)),
+        (true, true) => (tr("social.dm_in").to_string(), name, color(m)),
+        (false, false) => (
+            trf("social.whisper_out", &[("to", &other.login)]),
+            tr("social.you").into(),
+            None,
+        ),
+        (false, true) => (
+            trf("social.dm_out", &[("to", &other.login)]),
+            tr("social.you").into(),
+            None,
+        ),
     };
     let kind = if other.dm {
         TagKind::Dm

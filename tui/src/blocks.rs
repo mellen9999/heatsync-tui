@@ -7,6 +7,8 @@ use crate::app::App;
 use crate::{config, hsauth, save_state};
 use heatsync_core::block;
 use heatsync_core::emote::{emotes_in, Emote, EmoteSet};
+use heatsync_core::i18n::{tr, trf};
+use unicode_width::UnicodeWidthStr;
 
 /// the emote this name means in the focused tab (its channel set + globals).
 fn resolve(app: &App, name: &str) -> Option<Emote> {
@@ -26,7 +28,7 @@ fn sync(app: &App, key: String, on: bool) {
         } else {
             hsauth::Outcome {
                 ok: false,
-                text: format!("saved here, but your account didn't get it: {}", o.text),
+                text: trf("input.blocks_account_miss", &[("text", &o.text)]),
             }
         }
     });
@@ -35,21 +37,21 @@ fn sync(app: &App, key: String, on: bool) {
 /// block this exact emote; the words to show.
 fn block_one(app: &mut App, e: &Emote) -> String {
     let Some(key) = block::key(e) else {
-        return format!("can't block {} (its address is too long)", e.name);
+        return trf("input.blocks_too_long", &[("name", &e.name)]);
     };
     if !block::block(e) {
-        return format!("{} is already blocked", e.name);
+        return trf("input.blocks_already", &[("name", &e.name)]);
     }
     save_state(app);
     sync(app, key, true);
-    format!("blocked {} — /unblock {} brings it back", e.name, e.name)
+    trf("input.blocks_done", &[("name", &e.name)])
 }
 
 /// `/block <emote>`
 pub(crate) fn block_cmd(app: &mut App, name: &str) {
     app.status = Some(match resolve(app, name) {
         Some(e) => block_one(app, &e),
-        None => format!("no emote called {name} in this tab"),
+        None => trf("input.blocks_no_emote", &[("name", name)]),
     });
 }
 
@@ -65,7 +67,7 @@ pub(crate) fn unblock_cmd(app: &mut App, name: &str) {
         );
     }
     if keys.is_empty() {
-        app.status = Some(format!("{name} isn't blocked — /blocked lists them"));
+        app.status = Some(trf("input.blocks_not_blocked", &[("name", name)]));
         return;
     }
     for k in keys {
@@ -73,7 +75,7 @@ pub(crate) fn unblock_cmd(app: &mut App, name: &str) {
         sync(app, k, false);
     }
     save_state(app);
-    app.status = Some(format!("unblocked {name}"));
+    app.status = Some(trf("input.blocks_unblocked", &[("name", name)]));
 }
 
 /// `/blocked`
@@ -83,7 +85,7 @@ pub(crate) fn list_cmd(app: &mut App) {
 
 pub(crate) fn summary(list: &[(String, String)]) -> String {
     if list.is_empty() {
-        return "nothing blocked — /block <emote>, or b on a message in cursor mode".into();
+        return tr("input.blocks_none").into();
     }
     let names: Vec<String> = list
         .iter()
@@ -95,9 +97,10 @@ pub(crate) fn summary(list: &[(String, String)]) -> String {
             }
         })
         .collect();
-    let mut out = format!("blocked {}: ", list.len());
+    let mut out = trf("input.blocks_list_head", &[("n", &list.len().to_string())]);
+    out.push(' ');
     for (i, n) in names.iter().enumerate() {
-        if out.chars().count() + n.chars().count() > 70 {
+        if out.width() + n.width() > 70 {
             out.push_str(&format!("… +{}", names.len() - i));
             return out;
         }
@@ -121,7 +124,7 @@ pub(crate) fn cursor_block(app: &mut App, text: &str, refs: &EmoteSet) {
         .cloned();
     app.status = Some(match pick {
         Some(e) => block_one(app, &e),
-        None => "no emote left to block on that line".into(),
+        None => tr("input.blocks_none_left").into(),
     });
 }
 

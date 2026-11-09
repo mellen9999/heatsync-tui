@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use heatsync_core::Platform;
 use serde_json::{json, Value};
 
+use heatsync_core::i18n::{tr, trf};
+
 use crate::config;
 
 pub const DEFAULT_BASE: &str = "https://heatsync.org";
@@ -41,17 +43,15 @@ pub fn clean_base(raw: &str) -> Result<String, String> {
     } else if let Some(r) = s.strip_prefix("http://") {
         let host = r.split(['/', ':']).next().unwrap_or("");
         if !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
-            return Err(format!(
-                "{s} is plain http — your login would cross the network unencrypted. use https."
-            ));
+            return Err(trf("hsauth.err_http_plain", &[("s", s)]));
         }
         r
     } else {
-        return Err(format!("{s} is not a web address (start it with https://)"));
+        return Err(trf("hsauth.err_not_web", &[("s", s)]));
     };
     let authority = rest.split('/').next().unwrap_or("");
     if authority.is_empty() || authority.contains('@') || s.contains(char::is_whitespace) {
-        return Err(format!("{s} is not a usable address"));
+        return Err(trf("hsauth.err_bad_addr", &[("s", s)]));
     }
     Ok(s.to_string())
 }
@@ -155,11 +155,8 @@ fn load_session_at(path: &std::path::Path) -> Option<Session> {
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(path).ok()?.permissions().mode();
         if mode & 0o077 != 0 {
-            eprintln!(
-                "heatsync: {} is readable by other users — run: chmod 600 {}  (or log in again)",
-                path.display(),
-                path.display()
-            );
+            let p = path.display().to_string();
+            eprintln!("{}", trf("hsauth.warn_perms", &[("path", &p)]));
             return None;
         }
     }
@@ -216,7 +213,7 @@ impl Transport for UreqTransport {
                 Ok((s, r.into_json().unwrap_or(Value::Null)))
             }
             Err(ureq::Error::Status(c, r)) => Ok((c, r.into_json().unwrap_or(Value::Null))),
-            Err(_) => Err("can't reach heatsync — check your connection and try again".into()),
+            Err(_) => Err(tr("hsauth.err_offline").into()),
         }
     }
 }
@@ -244,8 +241,8 @@ pub fn pair_start(t: &dyn Transport, base: &str) -> Result<Pair, String> {
     }
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     Ok(Pair {
-        device_code: s("device_code").ok_or("heatsync sent an odd answer — try again")?,
-        user_code: s("user_code").ok_or("heatsync sent an odd answer — try again")?,
+        device_code: s("device_code").ok_or(tr("hsauth.err_odd_answer"))?,
+        user_code: s("user_code").ok_or(tr("hsauth.err_odd_answer"))?,
         // built from OUR base, never taken from the reply: the page you are told to
         // type a code into is the server you are talking to.
         url: format!("{base}/cli"),
@@ -307,10 +304,10 @@ pub fn poll_once(t: &dyn Transport, base: &str, device_code: &str) -> Poll {
                     .unwrap_or("")
                     .to_string(),
             )),
-            None => Poll::Failed("heatsync sent an odd answer — try logging in again".into()),
+            None => Poll::Failed(tr("hsauth.err_odd_answer_login").into()),
         },
         (429, _) => Poll::SlowDown,
-        (410, _) => Poll::Failed("that code expired — run the login again".into()),
+        (410, _) => Poll::Failed(tr("hsauth.err_code_expired").into()),
         _ => Poll::Failed(explain(st, &v, base)),
     }
 }
@@ -424,7 +421,7 @@ impl Client {
         if platform != Platform::Twitch {
             return Outcome {
                 ok: false,
-                text: "mod tools aren't on kick yet — use kick.com for that".into(),
+                text: tr("hsauth.err_kick_mod").into(),
             };
         }
         let body = mod_body(channel, target, action);
@@ -504,7 +501,7 @@ impl Client {
         let path = match platform {
             Platform::Twitch => "/api/cli/twitch/send",
             Platform::Kick => "/api/cli/kick/send",
-            Platform::Youtube => return Err("youtube sends need the extension".into()),
+            Platform::Youtube => return Err(tr("hsauth.err_youtube_send").into()),
         };
         match self.call("POST", path, Some(send_body(channel, text, reply))) {
             Ok((200, _)) => Ok(()),
@@ -566,10 +563,13 @@ pub fn mod_body(channel: &str, target: &str, action: &ModAction) -> Value {
 
 fn mod_done(action: &ModAction, target: &str) -> String {
     match action {
-        ModAction::Ban => format!("banned {target}"),
-        ModAction::Unban => format!("unbanned {target}"),
-        ModAction::Timeout(s) => format!("timed out {target} for {}", human_secs(*s)),
-        ModAction::Delete => "deleted that message".into(),
+        ModAction::Ban => trf("hsauth.mod_banned", &[("target", target)]),
+        ModAction::Unban => trf("hsauth.mod_unbanned", &[("target", target)]),
+        ModAction::Timeout(s) => trf(
+            "hsauth.mod_timed_out",
+            &[("target", target), ("dur", &human_secs(*s))],
+        ),
+        ModAction::Delete => tr("hsauth.mod_deleted").into(),
     }
 }
 
@@ -583,10 +583,13 @@ pub fn human_secs(s: u32) -> String {
 }
 
 /// every answer that means "this saved login is dead" starts with this.
-pub const LOGGED_OUT: &str = "logged out:";
+pub fn logged_out_prefix() -> &'static str {
+    tr("hsauth.logged_out_prefix")
+}
 
 pub fn is_logged_out(text: &str) -> bool {
-    text.starts_with(LOGGED_OUT)
+    let p = logged_out_prefix();
+    !p.is_empty() && text.starts_with(p)
 }
 
 /// the server refused for a missing permission on THIS login (not a platform one).
@@ -594,8 +597,8 @@ fn scope_note(v: &Value, what: &str) -> Option<String> {
     (v.get("error_code").and_then(Value::as_str) == Some("scope_missing")
         && v.get("relink_required").and_then(Value::as_bool) != Some(true))
     .then(|| match what {
-        "mod" => "this terminal wasn't given mod permission — run `heatsync-tui login` again and tick mod".to_string(),
-        _ => "this terminal wasn't given chat permission — run `heatsync-tui login` again".to_string(),
+        "mod" => tr("hsauth.scope_mod").to_string(),
+        _ => tr("hsauth.scope_chat").to_string(),
     })
 }
 
@@ -614,15 +617,13 @@ pub fn explain(status: u16, v: &Value, base: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("twitch");
     if code == "cli_token_invalid" {
-        return format!(
-            "{LOGGED_OUT} this login was ended (logged out on the site, expired, or the account was blocked) — run: heatsync-tui login"
-        );
+        return trf("hsauth.err_login_ended", &[("prefix", logged_out_prefix())]);
     }
     if code == "not_mod" {
-        return "you're not a moderator in this channel".into();
+        return tr("hsauth.err_not_mod").into();
     }
     if code == "scope_missing" && !relink {
-        return "this login can't do that — run: heatsync-tui login".into();
+        return tr("hsauth.err_scope").into();
     }
     if relink || code == "not_linked" {
         let url = match (platform, pack) {
@@ -632,18 +633,21 @@ pub fn explain(status: u16, v: &Value, base: &str) -> String {
             (_, None) => format!("{base}/api/auth/login"),
         };
         let what = match pack {
-            Some("mod") => "allow mod tools",
-            Some("chatsend") => "allow chat from the terminal",
-            Some("whispers") => "allow whispers",
-            _ => "link your account",
+            Some("mod") => tr("hsauth.link_mod"),
+            Some("chatsend") => tr("hsauth.link_chat"),
+            Some("whispers") => tr("hsauth.link_whispers"),
+            _ => tr("hsauth.link_account"),
         };
-        return format!("{what} on {platform} first — open {url}");
+        return trf(
+            "hsauth.err_link_first",
+            &[("what", what), ("platform", platform), ("url", &url)],
+        );
     }
     match status {
-        429 => "too fast — wait a moment".into(),
-        s if s >= 500 => "heatsync had a problem — try again in a minute".into(),
+        429 => tr("hsauth.err_too_fast").into(),
+        s if s >= 500 => tr("hsauth.err_server").into(),
         _ if !err.is_empty() => err.chars().take(160).collect(),
-        s => format!("heatsync said no ({s})"),
+        s => trf("hsauth.err_denied", &[("status", &s.to_string())]),
     }
 }
 

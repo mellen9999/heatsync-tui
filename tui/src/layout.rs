@@ -3,6 +3,7 @@ use crate::emote::render::{EmoteStore, EMOTE_H};
 use crate::paints::UserLook;
 use crate::palette;
 use heatsync_core::emote::{segments_with, EmoteSet, Segment};
+use heatsync_core::i18n::tr;
 use heatsync_core::paint::Paint;
 use heatsync_core::{Badge, Message, Platform, Tag, TagKind};
 use ratatui::style::{Color, Modifier, Style};
@@ -560,7 +561,10 @@ fn layout_rows(
     }
     layout_text_in(&mut b, &m.text, set, m.refs(), mode, hue);
     if m.extra.first {
-        b.word("◇ first message", palette::DIM_TAG);
+        b.word(
+            &format!("◇ {}", tr("layout.first_message")),
+            palette::DIM_TAG,
+        );
     }
     let mut rows = match &m.gone {
         Some(g) => {

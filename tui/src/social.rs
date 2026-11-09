@@ -2,6 +2,7 @@
 //! mention hits — over the heatsync login (`/api/cli/*`). everything here is
 //! blocking and runs on its own thread; the answers come back as [`Msg`].
 
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::social::{self, Contact, Hit, Row};
 use serde_json::Value;
 
@@ -34,15 +35,15 @@ pub(crate) enum Msg {
 /// permission), otherwise a read (needs account).
 fn fail(base: &str, st: u16, v: &Value, chat: bool) -> String {
     if v.get("needs_consent").and_then(Value::as_bool) == Some(true) {
-        return format!("accept the terms on {base} first, then try again");
+        return trf("input.social_consent", &[("base", base)]);
     }
     let relink = v.get("relink_required").and_then(Value::as_bool) == Some(true);
     if st == 403 && !relink && v.get("error_code").and_then(Value::as_str) == Some("scope_missing")
     {
         return if chat {
-            "this terminal wasn't given chat permission — run `heatsync-tui login` again".into()
+            tr("input.social_no_chat_scope").into()
         } else {
-            "this terminal can't read dms, whispers or mentions — run `heatsync-tui login` again and tick account".into()
+            tr("input.social_no_read_scope").into()
         };
     }
     explain(st, v, base)

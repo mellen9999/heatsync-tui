@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use heatsync_core::emote::{ref_set, EmoteSet};
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::proto::{ChatLine, SpecialLine};
 use heatsync_core::{Channel, Message, Note, Platform, TabKind, Tag, TagKind};
 
@@ -392,13 +393,12 @@ pub(crate) fn account_changed(app: &mut App) {
 /// permission is refused and stays anonymous: say so once, in plain words.
 pub(crate) fn auth(app: &mut App, ok: bool) {
     if ok {
-        app.status = Some("authenticated".into());
+        app.status = Some(tr("special.authenticated").into());
     } else if !app.special.ws_cli {
-        app.status = Some("auth failed — check HEATSYNC_TOKEN".into());
+        app.status = Some(tr("special.auth_failed").into());
     } else if !app.special.hinted {
         app.special.hinted = true;
-        app.status =
-            Some("run `heatsync-tui login` again to get whispers, dms and mentions".into());
+        app.status = Some(tr("special.relogin").into());
     }
 }
 
@@ -473,7 +473,7 @@ pub(crate) fn event(app: &mut App, ev: ChatEvent) {
                     .iter_mut()
                     .filter(|m| m.id.as_deref() == Some(id.as_str()))
                 {
-                    m.gone = Some("hidden".into());
+                    m.gone = Some(tr("special.hidden").into());
                 }
             }
         }
@@ -491,7 +491,7 @@ pub(crate) fn enter(app: &mut App) {
         return;
     }
     let Some(m) = ch.messages.back() else {
-        app.status = Some("no mentions yet".into());
+        app.status = Some(tr("special.no_mentions").into());
         return;
     };
     let chan = m
@@ -506,7 +506,7 @@ pub(crate) fn enter(app: &mut App) {
         .position(|c| c.matches(m.platform, &chan))
     {
         Some(i) => app.focus = i,
-        None => app.status = Some(format!("not open: {chan}")),
+        None => app.status = Some(trf("special.not_open", &[("chan", &chan)])),
     }
 }
 
@@ -516,16 +516,8 @@ pub(crate) fn enter(app: &mut App) {
 pub(crate) fn send(app: &mut App, kind: TabKind, text: &str, reply: Option<String>) -> bool {
     match kind {
         TabKind::Feed => return talk::post(app, text, reply),
-        TabKind::Whispers => {
-            app.status =
-                Some("say who to: /w <user> <msg> or /dm <user> <msg> — or r on a row".into())
-        }
-        _ => {
-            app.status = Some(format!(
-                "{} is read-only — open a channel to chat",
-                kind.name()
-            ))
-        }
+        TabKind::Whispers => app.status = Some(tr("special.say_who").into()),
+        _ => app.status = Some(trf("special.read_only", &[("tab", kind.name())])),
     }
     false
 }

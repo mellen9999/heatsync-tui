@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
+use heatsync_core::i18n::{tr, trf};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message as WsMsg;
 
@@ -32,25 +33,27 @@ pub struct Note {
 /// (multichat/auth-irc.js), so a rejected send reads the same in both.
 pub fn notice_text(msg_id: &str) -> Option<&'static str> {
     Some(match msg_id {
-        "msg_followersonly" => "followers-only mode — follow the channel to chat",
-        "msg_followersonly_followed" => "follow the channel a bit longer to chat",
-        "msg_followersonly_zero" => "followers-only — you need to follow first",
-        "msg_subsonly" => "subscribers-only — sub to chat here",
-        "msg_emoteonly" => "emote-only mode — message must be all emotes",
-        "msg_slowmode" => "slow mode — please wait a moment",
-        "msg_r9k" => "unique-chat mode — message must be unique",
-        "msg_duplicate" => "duplicate message — twitch rejected it",
-        "msg_banned" => "you are banned from this channel",
-        "msg_timedout" => "you are timed out",
-        "msg_rejected" => "automod is checking your message",
-        "msg_rejected_mandatory" => "automod blocked your message",
-        "msg_channel_suspended" => "channel is suspended",
-        "msg_channel_blocked" => "channel is blocking messages",
-        "msg_verified_email" => "channel requires a verified email to chat",
-        "msg_requires_verified_phone_number" => "channel requires a verified phone to chat",
-        "no_permission" => "no permission to do that here",
-        "unrecognized_cmd" => "twitch did not recognize that command",
-        "tos_ban" => "you are banned from twitch",
+        "msg_followersonly" => tr("input.notice_msg_followersonly"),
+        "msg_followersonly_followed" => tr("input.notice_msg_followersonly_followed"),
+        "msg_followersonly_zero" => tr("input.notice_msg_followersonly_zero"),
+        "msg_subsonly" => tr("input.notice_msg_subsonly"),
+        "msg_emoteonly" => tr("input.notice_msg_emoteonly"),
+        "msg_slowmode" => tr("input.notice_msg_slowmode"),
+        "msg_r9k" => tr("input.notice_msg_r9k"),
+        "msg_duplicate" => tr("input.notice_msg_duplicate"),
+        "msg_banned" => tr("input.notice_msg_banned"),
+        "msg_timedout" => tr("input.notice_msg_timedout"),
+        "msg_rejected" => tr("input.notice_msg_rejected"),
+        "msg_rejected_mandatory" => tr("input.notice_msg_rejected_mandatory"),
+        "msg_channel_suspended" => tr("input.notice_msg_channel_suspended"),
+        "msg_channel_blocked" => tr("input.notice_msg_channel_blocked"),
+        "msg_verified_email" => tr("input.notice_msg_verified_email"),
+        "msg_requires_verified_phone_number" => {
+            tr("input.notice_msg_requires_verified_phone_number")
+        }
+        "no_permission" => tr("input.notice_no_permission"),
+        "unrecognized_cmd" => tr("input.notice_unrecognized_cmd"),
+        "tos_ban" => tr("input.notice_tos_ban"),
         _ => return None,
     })
 }
@@ -73,7 +76,7 @@ pub fn classify_notice(line: &str) -> Option<Note> {
     let text = match id.and_then(notice_text) {
         Some(t) => t.to_string(),
         None if id.is_some_and(|i| i.starts_with("msg_")) && !text.is_empty() => {
-            format!("twitch: {text}")
+            trf("input.twitch_says", &[("text", text)])
         }
         None => return None,
     };
@@ -154,19 +157,19 @@ fn run(user: String, oauth: String, rx: Receiver<Send>, notes: Sender<Note>) {
                 // fail loud: the connection, then every send that never left.
                 let _ = notes.send(Note {
                     channel: None,
-                    text: "twitch auth failed — run: heatsync-tui login".into(),
+                    text: tr("input.twitch_auth_failed").into(),
                 });
                 for (chan, _, _) in gate.fail() {
                     let _ = notes.send(Note {
                         channel: Some(chan.to_lowercase()),
-                        text: "not sent — twitch auth failed".into(),
+                        text: tr("input.twitch_not_sent").into(),
                     });
                 }
                 // anything typed from now on is refused the same way.
                 while let Ok((chan, _, _)) = rx.recv() {
                     let _ = notes.send(Note {
                         channel: Some(chan.to_lowercase()),
-                        text: "not sent — twitch auth failed".into(),
+                        text: tr("input.twitch_not_sent").into(),
                     });
                 }
                 return;
