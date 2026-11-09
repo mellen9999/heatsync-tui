@@ -10,8 +10,6 @@ use heatsync_core::Platform;
 use serde::Deserialize;
 
 pub const BASE: &str = "https://heatsync.org";
-/// staged for the emote image-render layer (next phase).
-#[allow(dead_code)]
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 fn platform_q(p: Platform) -> &'static str {
@@ -134,8 +132,6 @@ fn owner_emotes(channel: &str, platform: Platform) -> Vec<heatsync_core::emote::
 }
 
 /// raw image bytes for an emote, capped so a hostile CDN can't balloon memory.
-/// staged for the emote image-render layer (next phase).
-#[allow(dead_code)]
 pub fn image_bytes(url: &str) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     agent()
@@ -175,10 +171,6 @@ pub struct ArchiveMsg {
 pub struct ArchivePage {
     #[serde(default)]
     pub results: Vec<ArchiveMsg>,
-    /// staged for CLI pagination (--page / follow).
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub next_cursor: Option<String>,
 }
 
 /// full-text search the archive.

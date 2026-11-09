@@ -7,7 +7,6 @@
 
 mod app;
 mod blocks;
-#[allow(dead_code)]
 mod cli;
 mod clock;
 mod config;
