@@ -207,6 +207,54 @@ pub fn load() -> Config {
     cfg
 }
 
+/// sent-line history, one per line, oldest first.
+fn history_path() -> Option<PathBuf> {
+    Some(dir()?.join("history"))
+}
+
+/// whispers and dms are private: they never reach the disk.
+fn private_line(l: &str) -> bool {
+    let w = l.split_whitespace().next().unwrap_or("");
+    matches!(w, "/w" | "/dm" | "/whisper" | "/msg")
+}
+
+pub fn load_history() -> Vec<String> {
+    let text = history_path()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    text.lines()
+        .filter(|l| !l.trim().is_empty() && !private_line(l))
+        .map(String::from)
+        .collect()
+}
+
+/// best-effort, newest `HISTORY_CAP` only, owner-only file.
+pub fn save_history(lines: &[String]) {
+    let Some(p) = history_path() else { return };
+    if let Some(d) = p.parent() {
+        let _ = fs::create_dir_all(d);
+    }
+    let keep: Vec<&str> = lines
+        .iter()
+        .filter(|l| !private_line(l))
+        .map(String::as_str)
+        .collect();
+    let from = keep.len().saturating_sub(heatsync_core::edit::HISTORY_CAP);
+    let mut out = keep[from..].join("\n");
+    out.push('\n');
+    use std::io::Write;
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    if let Ok(mut f) = o.open(&p) {
+        let _ = f.write_all(out.as_bytes());
+    }
+}
+
 /// best-effort persist (creates the dir). failures are non-fatal.
 pub fn save(cfg: &Config) {
     if let Some(p) = path() {
@@ -242,6 +290,14 @@ pub fn save(cfg: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whispers_and_dms_never_reach_history_on_disk() {
+        assert!(private_line("/w bob hi"));
+        assert!(private_line("/dm bob hi"));
+        assert!(!private_line("/me waves"));
+        assert!(!private_line("hello /w"));
+    }
 
     #[test]
     fn special_tabs_parse_sorted_deduped_and_drop_unknowns() {

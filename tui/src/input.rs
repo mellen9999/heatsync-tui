@@ -20,6 +20,15 @@ pub(crate) enum Flow {
 /// channel; j/k are cursor motion, except on a vertical tab bar where (in
 /// normal mode) they walk the channel list the eye is looking at.
 pub(crate) fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
+    let rev = app.line.history_rev();
+    let flow = handle_key_inner(app, k);
+    if app.line.history_rev() != rev {
+        crate::config::save_history(app.line.history());
+    }
+    flow
+}
+
+fn handle_key_inner(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
         return Flow::Quit;
     }
@@ -126,6 +135,12 @@ pub(crate) fn handle_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
 /// Normal mode: switch channels and enter the other modes. j/k and h/l (and
 /// arrows, tab/shift-tab) move between tabs; `v` starts the message cursor.
 fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
+    if let Some(i) = alt_tab_index(&k) {
+        if i < app.channels.len() {
+            app.focus = i;
+        }
+        return Flow::Continue;
+    }
     match k.code {
         KeyCode::Char('q') => Flow::Quit,
         // j/l/down/right/tab → next channel; k/h/up/left/shift-tab → previous.
@@ -208,6 +223,16 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             Flow::Continue
         }
         _ => Flow::Continue,
+    }
+}
+
+/// alt+1..alt+9 → tab index 0..8.
+fn alt_tab_index(k: &crossterm::event::KeyEvent) -> Option<usize> {
+    match k.code {
+        KeyCode::Char(c @ '1'..='9') if k.modifiers.contains(KeyModifiers::ALT) => {
+            Some(c as usize - '1' as usize)
+        }
+        _ => None,
     }
 }
 
@@ -1016,5 +1041,22 @@ fn cursor_delete(app: &mut App) {
             false,
         ),
         None => app.status = Some("can't delete that line".into()),
+    }
+}
+
+#[cfg(test)]
+mod alt_tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+
+    #[test]
+    fn alt_digits_map_to_tab_indexes_and_plain_digits_do_not() {
+        let alt = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+        assert_eq!(alt_tab_index(&alt('1')), Some(0));
+        assert_eq!(alt_tab_index(&alt('9')), Some(8));
+        assert_eq!(alt_tab_index(&alt('0')), None);
+        assert_eq!(alt_tab_index(&alt('a')), None);
+        let plain = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE);
+        assert_eq!(alt_tab_index(&plain), None);
     }
 }

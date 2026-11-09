@@ -213,6 +213,9 @@ fn chat(args: &[String]) -> io::Result<()> {
     };
     // virtual tabs pin left of whatever the channel args / config opened.
     special::restore(&mut app, &cfg.special);
+    if !mock_mode {
+        app.line.set_history(config::load_history());
+    }
 
     // must probe the terminal for graphics BEFORE raw mode / alt screen.
     let had_fb = app.fb.is_some();

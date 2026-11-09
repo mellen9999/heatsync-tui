@@ -48,6 +48,9 @@ fn class(c: char) -> u8 {
     }
 }
 
+/// sent lines kept (in memory and on disk).
+pub const HISTORY_CAP: usize = 200;
+
 pub struct Line {
     text: Vec<char>,
     cursor: usize,
@@ -62,6 +65,8 @@ pub struct Line {
     last_find: Option<(char, bool, bool)>,
     undo: Vec<(Vec<char>, usize)>,
     history: Vec<String>,
+    /// bumps whenever a line lands in history, so the face knows when to persist.
+    hist_rev: u32,
     /// where we are walking history; None means "on the live draft".
     hist: Option<usize>,
     /// the draft we set aside when history walking started.
@@ -81,6 +86,7 @@ impl Default for Line {
             last_find: None,
             undo: Vec::new(),
             history: Vec::new(),
+            hist_rev: 0,
             hist: None,
             stash: Vec::new(),
         }
@@ -133,9 +139,37 @@ impl Line {
         let out: String = self.text.iter().collect();
         if !out.trim().is_empty() && self.history.last().map(String::as_str) != Some(out.as_str()) {
             self.history.push(out.clone());
+            if self.history.len() > HISTORY_CAP {
+                self.history.remove(0);
+            }
+            self.hist_rev = self.hist_rev.wrapping_add(1);
         }
         self.reset();
         out
+    }
+
+    /// sent lines, oldest first — what the face persists.
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// changes every time `accept` records a line.
+    pub fn history_rev(&self) -> u32 {
+        self.hist_rev
+    }
+
+    /// seed history from disk: blanks and repeats dropped, only the newest
+    /// `HISTORY_CAP` kept.
+    pub fn set_history(&mut self, lines: impl IntoIterator<Item = String>) {
+        self.history.clear();
+        for l in lines {
+            if !l.trim().is_empty() && self.history.last() != Some(&l) {
+                self.history.push(l);
+            }
+        }
+        let extra = self.history.len().saturating_sub(HISTORY_CAP);
+        self.history.drain(..extra);
+        self.hist = None;
     }
 
     /// throw the draft away and return to insert mode.
@@ -962,6 +996,29 @@ mod tests {
         assert_eq!(l.text(), "same");
         run(&mut l, "k");
         assert_eq!(l.text(), "same", "only one entry, nothing older");
+    }
+
+    #[test]
+    fn history_is_bounded_seedable_and_reports_changes() {
+        let mut l = Line::default();
+        let r0 = l.history_rev();
+        run(&mut l, "a");
+        l.accept();
+        assert_ne!(l.history_rev(), r0);
+        let r1 = l.history_rev();
+        l.accept(); // blank: nothing recorded
+        assert_eq!(l.history_rev(), r1);
+        l.set_history((0..HISTORY_CAP + 50).map(|i| format!("m{i}")));
+        assert_eq!(l.history().len(), HISTORY_CAP);
+        assert_eq!(l.history()[0], "m50", "oldest dropped");
+        run(&mut l, "new");
+        l.accept();
+        assert_eq!(l.history().len(), HISTORY_CAP);
+        assert_eq!(l.history().last().unwrap(), "new");
+        run(&mut l, "<esc>k");
+        assert_eq!(l.text(), "new", "seeded history walks like live history");
+        l.set_history(["x".into(), "".into(), "x".into(), "y".into()]);
+        assert_eq!(l.history(), ["x", "y"]);
     }
 
     // ---- guards ----------------------------------------------------------
