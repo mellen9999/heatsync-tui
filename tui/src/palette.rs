@@ -1,7 +1,9 @@
 //! the one place colors live: the 8 ansi names (so the user's terminal palette
 //! rules) plus vt320 attributes. nothing else in the tui names a color.
-//! non-ansi colors allowed: the twitch marker, the read-tab gray, and a future
-//! [H] marker.
+//! non-ansi colors allowed, exactly these and no others (a test pins the list):
+//! the twitch marker, the read-tab gray, a future [H] marker, and the brand's
+//! five dim row fills (olive, purple, navy, teal, dim red) — solid backgrounds
+//! for notification rows, never text colors.
 
 use heatsync_core::heat::{Hue, Look, Tier};
 use heatsync_core::{Badge, BadgeKind, NoteKind, Platform, Tint, Unread};
@@ -45,6 +47,36 @@ pub fn tab(u: Unread) -> Style {
         Unread::Chat => TEXT,
         Unread::Event => Style::new().fg(Color::Yellow),
         Unread::Ping => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+    }
+}
+
+/// a notification row's solid fill: the dim twin of the row's meaning.
+/// olive = stream events, purple = new people, navy = support, teal = channel
+/// points + announcements, red = aimed at you.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fill {
+    Olive,
+    Purple,
+    Navy,
+    Teal,
+    Red,
+}
+
+pub const FILL_OLIVE: Color = Color::Rgb(128, 128, 0);
+pub const FILL_PURPLE: Color = Color::Rgb(128, 0, 128);
+pub const FILL_NAVY: Color = Color::Rgb(0, 0, 128);
+pub const FILL_TEAL: Color = Color::Rgb(0, 128, 128);
+pub const FILL_RED: Color = Color::Rgb(95, 0, 0);
+
+impl Fill {
+    pub fn bg(self) -> Color {
+        match self {
+            Fill::Olive => FILL_OLIVE,
+            Fill::Purple => FILL_PURPLE,
+            Fill::Navy => FILL_NAVY,
+            Fill::Teal => FILL_TEAL,
+            Fill::Red => FILL_RED,
+        }
     }
 }
 
@@ -125,6 +157,11 @@ pub fn badge(b: Badge) -> Style {
     }
 }
 
+/// a picked heatsync badge: its glyph in its ansi hue.
+pub fn hs_badge(b: &heatsync_core::hsbadge::HsBadge) -> Style {
+    Style::new().fg(color(b.hue))
+}
+
 /// glyph + style per event kind. green=live, red=mod/danger, yellow=money+hype,
 /// magenta=social, cyan=info, white=gone.
 pub fn note(k: NoteKind) -> (&'static str, Style) {
@@ -163,6 +200,33 @@ pub fn note(k: NoteKind) -> (&'static str, Style) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sanctioned_rgb_set_is_exactly_this() {
+        // the doctrine: ansi 0-7 plus these. adding a colour means editing this
+        // list on purpose — and the count below catches one slipping in unlisted.
+        let allowed = [
+            (128, 128, 128), // read gray
+            (200, 168, 255), // twitch
+            (128, 128, 0),   // olive
+            (128, 0, 128),   // purple
+            (0, 0, 128),     // navy
+            (0, 128, 128),   // teal
+            (95, 0, 0),      // dim red
+        ];
+        for c in [
+            READ, TWITCH, FILL_OLIVE, FILL_PURPLE, FILL_NAVY, FILL_TEAL, FILL_RED,
+        ] {
+            let Color::Rgb(r, g, b) = c else { panic!("{c:?}") };
+            assert!(allowed.contains(&(r, g, b)), "{c:?}");
+        }
+        let src = include_str!("palette.rs");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert_eq!(code.matches("Color::Rgb(").count(), allowed.len());
+        for f in [Fill::Olive, Fill::Purple, Fill::Navy, Fill::Teal, Fill::Red] {
+            assert!(matches!(f.bg(), Color::Rgb(..)));
+        }
+    }
 
     #[test]
     fn gone_is_gray_and_crossed_out_but_its_tag_is_not() {

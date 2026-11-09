@@ -136,6 +136,7 @@ pub(crate) fn look(m: &Message, paints: &Paints, follow: &FollowLog, seen: &Seen
             seen.color(m.platform, &m.user),
             prof.color.as_deref(),
         ),
+        badge: None,
     }
 }
 
@@ -385,7 +386,7 @@ mod tests {
             paint: heatsync_core::paint::Paint::from_heatsync(&serde_json::json!({"base": {
                 "type": "linear", "angle": 90,
                 "stops": [{"color": hex, "pos": 0}, {"color": hex, "pos": 100}]}})),
-            color: None,
+            ..Default::default()
         };
         paints.insert_for_test("777", paint("#ff0000"));
         paints.insert_for_test("kick_9", paint("#00ff00"));

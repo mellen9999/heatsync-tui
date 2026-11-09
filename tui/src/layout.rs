@@ -166,6 +166,8 @@ pub(crate) struct Rows {
     pub(crate) row_start: u16, // col where content on this row begins (prefix or indent)
     pub(crate) has_stack: bool,
     pub(crate) full: bool, // hit MAX_MSG_ROWS — stop consuming
+    /// the row wears a fill: names sit on a black cutout.
+    pub(crate) cut: bool,
 }
 
 impl Rows {
@@ -180,6 +182,7 @@ impl Rows {
             row_start: 0,
             has_stack: false,
             full: false,
+            cut: false,
         }
     }
 
@@ -365,7 +368,10 @@ fn layout_text_in(
 /// the bold username prefix. a paint colors it per character where the
 /// terminal can show 24-bit color; anywhere else the plain name color stands.
 fn name(b: &mut Rows, user: &str, color: Color, paint: Option<&Paint>) {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut bold = Style::default().add_modifier(Modifier::BOLD);
+    if b.cut {
+        bold = crate::fill::cutout(bold);
+    }
     let Some(p) = paint.filter(|_| truecolor()) else {
         let uw = UnicodeWidthStr::width(user) as u16;
         b.prefix(Span::styled(user.to_string(), bold.fg(color)), uw);
@@ -432,6 +438,24 @@ pub(crate) fn layout_message(
     maxw: u16,
     look: &Look,
 ) -> Vec<RowPlan> {
+    let pinged = mentions_any(&m.text, look.me) || replies_to_me(m.reply_to.as_deref(), look.me);
+    let fill = crate::fill::of(m, pinged);
+    let mut rows = layout_rows(m, set, mode, maxw, look, pinged, fill.is_some());
+    if let Some(f) = fill {
+        crate::fill::paint(&mut rows, f);
+    }
+    rows
+}
+
+fn layout_rows(
+    m: &Message,
+    set: &EmoteSet,
+    mode: EmoteMode,
+    maxw: u16,
+    look: &Look,
+    pinged: bool,
+    cut: bool,
+) -> Vec<RowPlan> {
     // the chat color wins; a heatsync-picked one fills in for a user with none.
     let user_color = m
         .color
@@ -441,6 +465,7 @@ pub(crate) fn layout_message(
         .unwrap_or(Color::White);
     let paint = look.user.and_then(|l| l.paint.as_ref());
     let mut b = Rows::new(maxw);
+    b.cut = cut;
     for t in &m.tags {
         let (text, style) = tag_look(t, m);
         let w = UnicodeWidthStr::width(text.as_str()) as u16;
@@ -509,8 +534,12 @@ pub(crate) fn layout_message(
         b.prefix(Span::raw(" "), 1);
     }
     name(&mut b, &m.user, user_color, paint);
+    // the heatsync badge they picked, right after the name.
+    if let Some(hb) = look.user.and_then(|l| l.badge) {
+        b.prefix(Span::raw(" "), 1);
+        b.prefix(Span::styled(hb.glyph.to_string(), palette::hs_badge(hb)), 1);
+    }
     // a line that pings you swaps its ": " for a blue bar — semantic, not decor.
-    let pinged = mentions_any(&m.text, look.me) || replies_to_me(m.reply_to.as_deref(), look.me);
     b.prefix(
         if pinged {
             Span::styled("▌ ", palette::PING)
@@ -920,6 +949,7 @@ mod wrap_tests {
         let look = UserLook {
             paint: None,
             color: Some("#ff0000".into()),
+            ..Default::default()
         };
         let mut m = msg("hi");
         assert_ne!(first_span(&m, Some(&look))[0].style.fg, Some(Color::White));
@@ -931,10 +961,64 @@ mod wrap_tests {
     }
 
     #[test]
+    fn a_filled_row_paints_every_row_and_cuts_the_name_out() {
+        let set = EmoteSet::new();
+        let mut m = msg("welcome to chat, a long first message that wraps onto a second row");
+        m.user = "bob".into();
+        m.extra.first = true;
+        let rows = layout_message(&m, &set, EmoteMode::Text, 24, &Look::default());
+        assert!(rows.len() > 1);
+        for r in &rows {
+            assert_eq!(r.line.style.bg, Some(palette::FILL_PURPLE));
+        }
+        let name = &rows[0].line.spans.iter().find(|s| s.content == "bob").unwrap();
+        assert_eq!(name.style.bg, Some(Color::Black), "name on a black cutout");
+        // body text is white, the gray first-message tag lifts to white too
+        for r in &rows {
+            assert!(r.line.spans.iter().all(|s| s.style.fg != Some(palette::READ)));
+        }
+        // plain chat: no fill, no cutout
+        let plain = layout_message(&msg("hi"), &set, EmoteMode::Text, 40, &Look::default());
+        assert_eq!(plain[0].line.style.bg, None);
+        assert!(plain[0].line.spans.iter().all(|s| s.style.bg.is_none()));
+    }
+
+    #[test]
+    fn a_line_aimed_at_you_is_dim_red() {
+        let set = EmoteSet::new();
+        let me = vec!["mellen".to_string()];
+        let look = Look {
+            me: &me,
+            ..Look::default()
+        };
+        let rows = layout_message(&msg("hey @mellen"), &set, EmoteMode::Text, 40, &look);
+        assert_eq!(rows[0].line.style.bg, Some(palette::FILL_RED));
+    }
+
+    #[test]
+    fn a_picked_badge_trails_the_name_and_unpicked_shows_nothing() {
+        let mut m = msg("hi");
+        m.user = "bob".into();
+        let flat = |u: Option<&UserLook>| -> String {
+            first_span(&m, u).iter().map(|s| s.content.as_ref()).collect()
+        };
+        let badged = UserLook {
+            badge: heatsync_core::hsbadge::by_id("ember"),
+            ..Default::default()
+        };
+        assert!(flat(Some(&badged)).starts_with("bob ▲: "), "{}", flat(Some(&badged)));
+        assert!(flat(None).starts_with("bob: "));
+        assert!(flat(Some(&UserLook::default())).starts_with("bob: "));
+    }
+
+    #[test]
     fn a_paint_colors_the_name_per_character_on_truecolor_only() {
         let paint = Paint::from_heatsync(&serde_json::json!({"base": {"type": "linear",
             "angle": 90, "stops": [{"color": "#000000", "pos": 0}, {"color": "#ffffff", "pos": 100}]}}));
-        let look = UserLook { paint, color: None };
+        let look = UserLook {
+            paint,
+            ..Default::default()
+        };
         let mut m = msg("hi");
         m.user = "abcdef".into();
         let spans = first_span(&m, Some(&look));

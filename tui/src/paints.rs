@@ -32,6 +32,8 @@ pub(crate) struct UserLook {
     pub(crate) paint: Option<Paint>,
     /// the heatsync-picked `#rrggbb` name color.
     pub(crate) color: Option<String>,
+    /// the heatsync badge they picked to show (draws nothing for an unknown id).
+    pub(crate) badge: Option<&'static heatsync_core::hsbadge::HsBadge>,
 }
 
 type Batch = (Vec<String>, Option<HashMap<String, UserLook>>);
@@ -107,8 +109,8 @@ impl Paints {
         }
         let color = self.names.get(&user.to_lowercase())?;
         Some(Cow::Owned(UserLook {
-            paint: None,
             color: Some(color.clone()),
+            ..Default::default()
         }))
     }
 
@@ -122,8 +124,8 @@ impl Paints {
                 self.store(
                     id.to_string(),
                     UserLook {
-                        paint: None,
                         color: Some(color.to_string()),
+                        ..Default::default()
                     },
                 );
             }
@@ -249,7 +251,12 @@ fn resolve(ids: &[String], hs: &Value, stv: &Value) -> HashMap<String, UserLook>
                         && c[1..].bytes().all(|b| b.is_ascii_hexdigit())
                 })
                 .map(str::to_string);
-            (id.clone(), UserLook { paint, color })
+            let badge = hs
+                .get("badges")
+                .and_then(|b| b.get(id))
+                .and_then(Value::as_str)
+                .and_then(heatsync_core::hsbadge::by_id);
+            (id.clone(), UserLook { paint, color, badge })
         })
         .collect()
 }
@@ -276,6 +283,19 @@ mod tests {
         assert_eq!(got["2"].paint.as_ref().unwrap().sample(0.0), [0, 255, 0]);
         assert_eq!(got["2"].color, None, "malformed color dropped");
         assert_eq!(got["3"], UserLook::default());
+    }
+
+    #[test]
+    fn a_picked_badge_rides_the_batch_and_unknown_ids_draw_nothing() {
+        let hs = json!({"paints": {}, "badges": {"1": "ember", "2": "from_the_future", "3": 7}});
+        let got = resolve(&ids(&["1", "2", "3", "4"]), &hs, &Value::Null);
+        assert_eq!(got["1"].badge.map(|b| b.id), Some("ember"));
+        for k in ["2", "3", "4"] {
+            assert!(got[k].badge.is_none(), "{k}");
+        }
+        // a server that predates badges sends no map at all
+        let old = resolve(&ids(&["1"]), &json!({"paints": {}}), &Value::Null);
+        assert!(old["1"].badge.is_none());
     }
 
     #[test]
@@ -316,7 +336,7 @@ mod tests {
             "1".into(),
             UserLook {
                 paint: paint.clone(),
-                color: None,
+                ..Default::default()
             },
         );
         p.set_color(Some("1"), &[], "#112233");

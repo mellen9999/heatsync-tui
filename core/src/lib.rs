@@ -13,6 +13,7 @@ pub mod dupe;
 pub mod edit;
 pub mod emote;
 pub mod heat;
+pub mod hsbadge;
 pub mod iso;
 pub mod key;
 pub mod layout;
