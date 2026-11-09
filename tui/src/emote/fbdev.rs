@@ -183,4 +183,20 @@ mod tests {
         // a regular file answers neither ioctl
         assert!(Framebuffer::new("/dev/null").is_err());
     }
+
+    // a real device when this machine has one we may open; otherwise nothing to check
+    #[test]
+    fn a_real_framebuffer_maps_to_its_geometry() {
+        let Ok(fb) = Framebuffer::new("/dev/fb0") else {
+            return;
+        };
+        let (v, f) = (&fb.var_screen_info, &fb.fix_screen_info);
+        assert!(v.xres > 0 && v.yres > 0 && v.bits_per_pixel >= 8);
+        assert_eq!(
+            fb.frame.len(),
+            f.line_length as usize * v.yres_virtual as usize
+        );
+        assert!(f.line_length >= v.xres * v.bits_per_pixel / 8);
+        let _ = fb.frame[0]; // the mapping is readable
+    }
 }
