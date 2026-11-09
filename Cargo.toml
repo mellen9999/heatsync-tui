@@ -7,6 +7,6 @@ lto = true
 opt-level = "z"
 strip = true
 codegen-units = 1
-# abort, not unwind: unwinding (to catch a bad emote decode) measured +373KB (+9%).
-# the panic hook still restores the terminal before the abort.
-panic = "abort"
+# unwind (+373KB): emote decode runs under catch_unwind so a hostile image becomes
+# text instead of killing the app. other worker panics still abort (decode::install_hook).
+panic = "unwind"

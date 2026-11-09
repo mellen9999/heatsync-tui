@@ -39,6 +39,39 @@ impl Decoded {
 /// is a single frame. a zero-delay animation frame is floored to 20ms so a
 /// malformed emote can't spin the animator at infinite fps (bulletproof).
 pub fn decode(bytes: &[u8]) -> Result<Decoded, BoxErr> {
+    guard(|| decode_inner(bytes))
+}
+
+thread_local!(static DECODING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+
+/// run a decode so a panic inside it (untrusted bytes from strangers) becomes an
+/// error — the emote shows as text — instead of taking the app down.
+fn guard<T>(f: impl FnOnce() -> Result<T, BoxErr>) -> Result<T, BoxErr> {
+    DECODING.with(|d| d.set(true));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    DECODING.with(|d| d.set(false));
+    r.unwrap_or_else(|_| Err("decoder panicked".into()))
+}
+
+/// call once after the terminal hook is installed. a panic inside `guard` is
+/// swallowed (no terminal restore, no stderr noise on the live screen); any
+/// other panic runs the previous hook and, off the main thread, aborts as the
+/// release profile used to — a dead worker must not leave a half-alive app on a
+/// restored terminal.
+pub fn install_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if DECODING.with(|d| d.get()) {
+            return;
+        }
+        prev(info);
+        if std::thread::current().name() != Some("main") {
+            std::process::abort();
+        }
+    }));
+}
+
+fn decode_inner(bytes: &[u8]) -> Result<Decoded, BoxErr> {
     let fmt = image::guess_format(bytes)?;
     let frames = match fmt {
         ImageFormat::Gif => {
@@ -122,6 +155,15 @@ mod tests {
         assert_eq!(d.frames.len(), 3);
         assert!(d.animated());
         assert!(d.frames.iter().all(|f| f.delay_ms >= 20));
+    }
+
+    #[test]
+    fn a_panicking_decode_is_an_error_and_the_app_lives() {
+        let r: Result<(), BoxErr> = guard(|| panic!("hostile image"));
+        assert_eq!(r.unwrap_err().to_string(), "decoder panicked");
+        // the flag is cleared and the next decode works
+        assert!(!DECODING.with(|d| d.get()));
+        assert!(guard(|| Ok(7)).unwrap() == 7);
     }
 
     #[test]

@@ -200,6 +200,7 @@ fn chat(args: &[String]) -> io::Result<()> {
     // init() for raw mode, the alternate screen and the panic hook; the terminal
     // itself runs on the held backend (see held.rs).
     drop(ratatui::init());
+    emote::decode::install_hook();
     let mut terminal = Terminal::new(held::HeldBackend::new())?;
     intr::tui_phase();
     let res = run(&mut terminal, app);
