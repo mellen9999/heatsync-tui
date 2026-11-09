@@ -79,14 +79,51 @@ pub fn cosmetics(ids: &[String]) -> Option<serde_json::Value> {
     agent().get(&url).call().ok()?.into_json().ok()
 }
 
-/// channel emote set (the server sends each name's winner last: ffz > 7tv > bttv).
+/// channel emote set (the server sends each name's winner last: ffz > 7tv > bttv)
+/// plus the streamer's own heatsync emotes, which win their names in their own
+/// channel. fetched side by side; a failed owner lookup just leaves them out.
 pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
+    let owner = std::thread::scope(|s| {
+        let h = s.spawn(|| owner_emotes(channel, platform));
+        let chan = channel_emotes(channel, platform);
+        (chan, h.join().unwrap_or_default())
+    });
+    let (chan, owner) = owner;
+    if chan.is_none() && owner.is_empty() {
+        return None;
+    }
+    Some(EmoteSet::from_list(chan.unwrap_or_default().into_iter().chain(owner)))
+}
+
+fn channel_emotes(channel: &str, platform: Platform) -> Option<Vec<heatsync_core::emote::Emote>> {
     let url = format!(
         "{BASE}/api/channel/{channel}/emotes?platform={}",
         platform_q(platform)
     );
     let resp: EmoteSetResponse = agent().get(&url).call().ok()?.into_json().ok()?;
-    Some(EmoteSet::from_list(resp.emotes))
+    Some(resp.emotes)
+}
+
+/// `/api/emotes/user/<channel>?platform=` — the same login is a different
+/// person on each platform, so the route is always told which one. youtube
+/// tabs are named by video id, not a channel: no owner there.
+fn owner_emotes(channel: &str, platform: Platform) -> Vec<heatsync_core::emote::Emote> {
+    let plain = !channel.is_empty()
+        && channel
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.');
+    if platform == Platform::Youtube || !plain {
+        return Vec::new();
+    }
+    let url = format!(
+        "{BASE}/api/emotes/user/{channel}?platform={}",
+        platform_q(platform)
+    );
+    let v: serde_json::Value = match agent().get(&url).call().ok().and_then(|r| r.into_json().ok()) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    heatsync_core::emote::owner_list(&v, BASE)
 }
 
 /// raw image bytes for an emote, capped so a hostile CDN can't balloon memory.

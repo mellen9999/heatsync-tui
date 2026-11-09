@@ -39,6 +39,38 @@ pub struct EmoteSet {
     map: HashMap<String, Emote>,
 }
 
+/// the channel owner's own heatsync emotes (`/api/emotes/user/<channel>`) →
+/// emotes. lenient per row: a row with no name or url is dropped, a missing
+/// provider is an upload, a root-relative url is anchored on `base`.
+pub fn owner_list(v: &serde_json::Value, base: &str) -> Vec<Emote> {
+    let Some(rows) = v.get("emotes").and_then(|e| e.as_array()) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|r| {
+            let s = |k: &str| r.get(k).and_then(|x| x.as_str()).filter(|x| !x.is_empty());
+            let name = s("name")?;
+            let url = s("url")?;
+            let url = if url.starts_with('/') && !url.starts_with("//") {
+                format!("{base}{url}")
+            } else if url.starts_with("https://") {
+                url.to_string()
+            } else {
+                return None;
+            };
+            Some(Emote {
+                name: name.to_string(),
+                url,
+                provider: s("provider").unwrap_or("upload").to_string(),
+                id: s("hash").unwrap_or_default().to_string(),
+                animated: false,
+                zero_width: false,
+                global: false,
+            })
+        })
+        .collect()
+}
+
 impl EmoteSet {
     pub fn new() -> EmoteSet {
         EmoteSet::default()
@@ -1424,5 +1456,35 @@ mod tests {
         let resp: EmoteSetResponse = serde_json::from_str(json).unwrap();
         let set = EmoteSet::from_list(resp.emotes);
         assert!(set.get("GAMBA").unwrap().animated);
+    }
+
+    #[test]
+    fn owner_emotes_are_lenient_per_row_and_https_only() {
+        let v = serde_json::json!({"emotes": [
+            {"name": "A", "url": "https://cdn.heatsync.org/a.webp", "provider": "upload", "hash": "h1"},
+            {"name": "B", "url": "/emotes/b.webp"},
+            {"name": "C", "url": "http://x/c.webp"},
+            {"name": "D", "url": "//evil/d.webp"},
+            {"url": "https://x/e.webp"},
+            {"name": "F", "url": ""},
+            "junk"]});
+        let got = owner_list(&v, "https://heatsync.org");
+        let names: Vec<_> = got.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["A", "B"]);
+        assert_eq!(got[0].id, "h1");
+        assert_eq!(got[1].url, "https://heatsync.org/emotes/b.webp");
+        assert_eq!(got[1].provider, "upload");
+        assert!(owner_list(&serde_json::json!({}), "x").is_empty());
+        assert!(owner_list(&serde_json::json!({"emotes": 5}), "x").is_empty());
+    }
+
+    #[test]
+    fn owner_emotes_listed_last_win_a_name() {
+        let chan = vec![e("W")];
+        let mut mine = e("W");
+        mine.provider = "upload".into();
+        mine.url = "https://heatsync.org/w.webp".into();
+        let set = EmoteSet::from_list(chan.into_iter().chain([mine]));
+        assert_eq!(set.get("W").unwrap().provider, "upload");
     }
 }
