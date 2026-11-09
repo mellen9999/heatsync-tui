@@ -1,7 +1,8 @@
-//! emote resolution. mirrors the server: /api/channel/:c/emotes returns a
-//! precedence-ordered (7tv > bttv > ffz > twitch > kick) deduped list, so we
-//! insert first-wins into a name→emote map and word-match message text against
-//! it. modifiers (BTTV `w!`-style prefixes / FFZ `ffzX`-style effect words) are
+//! emote resolution. same order as the extension: a channel's set is
+//! ffz > 7tv > bttv (the server's /api/channel/:c/emotes list puts the winner
+//! LAST, so from_list is last-wins), globals are 7tv > bttv > ffz > twitch
+//! (from_global_list ranks them), and a twitch/kick token always beats a
+//! same-name set emote. message text is word-matched against the result. modifiers (BTTV `w!`-style prefixes / FFZ `ffzX`-style effect words) are
 //! parsed here into per-layer [`Effect`] lists; the pixel work happens at render.
 
 use std::collections::HashMap;
