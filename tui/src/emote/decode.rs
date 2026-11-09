@@ -1,4 +1,4 @@
-//! emote frame decode — webp/gif/png/jpeg → a flat list of rgba frames + delays.
+//! emote frame decode — webp/gif/png → a flat list of rgba frames + delays.
 //! pure-Rust (`image` crate), no libwebp/libgif C deps. static images decode to a
 //! single frame; animated webp/gif expand to their real frames. the render layer
 //! resizes to cell-pixel dims — decode stays terminal-agnostic and testable.
