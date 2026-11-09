@@ -26,7 +26,7 @@ heatsync-core = { path = "../core", version = "0.3.1" }
 ratatui = "0.29"
 crossterm = "0.28"
 # animated emote decode — pure-Rust, no libwebp/libgif C deps. lean feature set.
-image = { version = "0.25", default-features = false, features = ["gif", "webp", "png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["gif", "webp", "png"] }
 # one shared palette per animated emote. without it every sixel frame is dithered
 # independently and static regions shimmer between frames — that IS the flashing.
 # already in the tree via image's gif codec; pure-Rust, no transitive deps.
