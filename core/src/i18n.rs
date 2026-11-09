@@ -86,7 +86,8 @@ fn cat(i: usize) -> &'static Map {
     CATS[i].get_or_init(|| parse(FILES[i]))
 }
 
-/// every key + raw value of a locale (tests).
+/// every key + raw value of a locale (tests in both crates; not public api).
+#[doc(hidden)]
 pub fn entries(code: &str) -> Vec<(&'static str, &'static str)> {
     let Some(i) = LOCALES.iter().position(|l| *l == code) else {
         return Vec::new();
@@ -156,8 +157,9 @@ fn fill(s: &str, args: &[(&str, &str)]) -> String {
     out
 }
 
-/// the placeholder names in `s`, in order (tests).
-pub fn placeholders(s: &str) -> Vec<&str> {
+/// the placeholder names in `s`, in order.
+#[cfg(test)]
+fn placeholders(s: &str) -> Vec<&str> {
     let mut v = Vec::new();
     let mut rest = s;
     while let Some(a) = rest.find('{') {

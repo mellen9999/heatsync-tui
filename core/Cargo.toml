@@ -1,6 +1,6 @@
 [package]
 name = "heatsync-core"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "protocol types, heat ranking and emote resolution for heatsync — no terminal, async or io deps"
 license = "MIT"

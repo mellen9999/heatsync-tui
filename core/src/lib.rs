@@ -29,7 +29,6 @@ pub mod scroll;
 pub mod slash;
 pub mod social;
 pub mod streamev;
-pub mod vi;
 
 use std::collections::VecDeque;
 
