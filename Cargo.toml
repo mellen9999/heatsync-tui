@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "tui", "gui"]
+members = ["core", "tui"]
 
 [profile.release]
 lto = true
