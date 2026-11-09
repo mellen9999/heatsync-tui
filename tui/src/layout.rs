@@ -63,13 +63,24 @@ pub(crate) fn each_stack(text: &str, set: &EmoteSet, refs: &EmoteSet, mut f: imp
     }
 }
 
-/// truncate a label to `w` display columns (approximate; ASCII-dominant labels).
+/// truncate a label to fit `w` display columns (one spare cell, as before).
 pub(crate) fn fit(s: String, w: u16) -> String {
     let w = w as usize;
     if UnicodeWidthStr::width(s.as_str()) <= w {
         s
     } else {
-        s.chars().take(w.saturating_sub(1)).collect()
+        // cut by display columns, not chars: a wide (cjk) char is 2 cells.
+        let mut out = String::new();
+        let mut used = 0usize;
+        for c in s.chars() {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if used + cw > w.saturating_sub(1) {
+                break;
+            }
+            out.push(c);
+            used += cw;
+        }
+        out
     }
 }
 
@@ -674,7 +685,7 @@ fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
 
 #[cfg(test)]
 mod placeholder_tests {
-    use super::fit_exact;
+    use super::{fit, fit_exact};
     use unicode_width::UnicodeWidthStr;
 
     /// the loading placeholder MUST occupy exactly the cells the image will, or
@@ -1211,5 +1222,35 @@ mod stack_tests {
             keys.push(k.to_string())
         });
         assert_eq!(keys, vec!["u/A\nu/h1\nu/h2"]);
+    }
+
+    #[test]
+    fn translated_wide_text_fits_by_display_width() {
+        use heatsync_core::i18n;
+        // a real translated string from each wide/combining script
+        for lc in ["ja", "zh_CN", "ko", "th", "hi"] {
+            let text = i18n::entries(lc)
+                .into_iter()
+                .find(|(k, _)| *k == "draw.manage_empty")
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_else(|| "チャンネルがありません".into());
+            for w in [4u16, 9, 15, 30] {
+                let cut = fit(text.clone(), w);
+                assert!(
+                    UnicodeWidthStr::width(cut.as_str()) <= w as usize,
+                    "{lc} {w}"
+                );
+                let exact = fit_exact(&text, w);
+                assert_eq!(
+                    UnicodeWidthStr::width(exact.as_str()),
+                    w as usize,
+                    "{lc} {w}"
+                );
+            }
+        }
+        assert_eq!(
+            UnicodeWidthStr::width(fit("日本語日本語".to_string(), 7).as_str()),
+            6
+        );
     }
 }

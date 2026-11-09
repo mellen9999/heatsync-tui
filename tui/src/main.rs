@@ -259,7 +259,7 @@ fn build_live(
     };
     eprintln!("{}", trf("input.main_emotes_tier", &[("tier", tier)]));
     if store.is_none() && fb.is_none() {
-        eprintln!("{}", tr("input.main_emote_hint"));
+        eprintln!("  {}", tr("input.main_emote_hint"));
     }
     // channels open immediately with empty emote sets; each set is fetched on a
     // background thread and merged in via emote_rx once it lands (no UI stall).

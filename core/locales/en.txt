@@ -120,7 +120,7 @@ input.blocks_not_blocked={name} isn't blocked — /blocked lists them
 input.blocks_too_long=can't block {name} (its address is too long)
 input.blocks_unblocked=unblocked {name}
 input.main_connecting=heatsync: fetching emotes + connecting to {n} channels…
-input.main_emote_hint=  → for image emotes, run in a graphics terminal: foot (linux), windows terminal (win), wezterm (any) — else names show as text
+input.main_emote_hint=→ for image emotes, run in a graphics terminal: foot (linux), windows terminal (win), wezterm (any) — else names show as text
 input.main_emotes_tier=heatsync: emotes = {tier}
 input.main_no_tty=heatsync-tui: not a terminal — the chat UI needs an interactive tty.\nRun it directly, or use a subcommand that writes to stdout:\n\n{usage}
 input.main_tier_fb=framebuffer

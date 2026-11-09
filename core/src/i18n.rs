@@ -99,15 +99,20 @@ pub fn current() -> &'static str {
     LOCALES[CUR.load(Ordering::Relaxed)]
 }
 
-/// pick a locale by code, os-locale string or "auto"/"" (= `detect`'s answer).
-/// unknown → english.
-pub fn set(code: &str, detected: &str) {
-    let want = if code.trim().is_empty() || code.trim().eq_ignore_ascii_case("auto") {
+/// the locale a setting picks: an explicit code/locale string wins, "auto"/""
+/// uses `detected` (the os locale). unknown → english.
+pub fn pick(setting: &str, detected: &str) -> &'static str {
+    let want = if setting.trim().is_empty() || setting.trim().eq_ignore_ascii_case("auto") {
         detected
     } else {
-        code
+        setting
     };
-    let lc = resolve(want);
+    resolve(want)
+}
+
+/// make `pick(setting, detected)` the active locale.
+pub fn set(setting: &str, detected: &str) {
+    let lc = pick(setting, detected);
     let i = LOCALES.iter().position(|l| *l == lc).unwrap_or(EN);
     CUR.store(i, Ordering::Relaxed);
 }
@@ -210,4 +215,171 @@ pub fn detect(get: impl Fn(&str) -> Option<String>) -> String {
         .filter_map(|k| get(k))
         .find(|v| !v.trim().is_empty())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn en() -> Vec<(&'static str, &'static str)> {
+        entries("en")
+    }
+
+    #[test]
+    fn every_locale_has_every_key() {
+        let keys: BTreeSet<&str> = en().into_iter().map(|(k, _)| k).collect();
+        assert!(keys.len() > 200);
+        for lc in LOCALES {
+            let got: BTreeSet<&str> = entries(lc).into_iter().map(|(k, _)| k).collect();
+            let missing: Vec<_> = keys.difference(&got).collect();
+            let extra: Vec<_> = got.difference(&keys).collect();
+            assert!(missing.is_empty(), "{lc} missing {missing:?}");
+            assert!(extra.is_empty(), "{lc} extra {extra:?}");
+        }
+    }
+
+    #[test]
+    fn placeholder_sets_match_english() {
+        let base: HashMap<&str, &str> = en().into_iter().collect();
+        for lc in LOCALES {
+            for (k, v) in entries(lc) {
+                let mut a = placeholders(base[k]);
+                let mut b = placeholders(v);
+                a.sort_unstable();
+                b.sort_unstable();
+                assert_eq!(a, b, "{lc} {k}: {v}");
+                assert!(!v.trim().is_empty(), "{lc} {k} empty");
+            }
+        }
+    }
+
+    #[test]
+    fn translations_are_not_raw_keys_or_wrapped() {
+        for lc in LOCALES {
+            for (k, v) in entries(lc) {
+                assert_ne!(v, k, "{lc} {k} renders raw");
+                assert_eq!(v, v.trim(), "{lc} {k} has edge spaces");
+            }
+        }
+    }
+
+    #[test]
+    fn every_key_used_in_source_exists() {
+        // scan both crates' sources for tr("…") / trf("…") literals
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let known: BTreeSet<&str> = en().into_iter().map(|(k, _)| k).collect();
+        let areas: BTreeSet<&str> = known.iter().filter_map(|k| k.split('.').next()).collect();
+        let mut used = BTreeSet::new();
+        for dir in ["core/src", "tui/src"] {
+            for f in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
+                let p = f.path();
+                if p.extension().is_none_or(|e| e != "rs") || p.ends_with("i18n.rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&p).unwrap();
+                // every quoted `area.name` literal whose area is a catalog area —
+                // catches keys passed bare to helpers (`hint("jk", "draw.h_move")`)
+                for part in src.split('"').skip(1).step_by(2) {
+                    let Some((area, name)) = part.split_once('.') else {
+                        continue;
+                    };
+                    if areas.contains(area)
+                        && !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        used.insert(part.to_string());
+                    }
+                }
+            }
+        }
+        assert!(used.len() > 100, "scan found {}", used.len());
+        for k in &used {
+            assert!(known.contains(k.as_str()), "key {k} not in en.txt");
+        }
+        // and nothing in the catalog is dead
+        let unused: Vec<_> = known.iter().filter(|k| !used.contains(**k)).collect();
+        assert!(unused.is_empty(), "dead keys: {unused:?}");
+    }
+
+    #[test]
+    fn unknown_key_is_empty_not_the_key() {
+        assert_eq!(tr("no.such.key"), "");
+        assert_eq!(trf("no.such.key", &[]), "");
+    }
+
+    #[test]
+    fn locale_mapping() {
+        for (raw, want) in [
+            ("pt_BR.UTF-8", "pt_BR"),
+            ("pt", "pt_BR"),
+            ("pt_PT", "pt_PT"),
+            ("pt-PT", "pt_PT"),
+            ("zh_TW.UTF-8", "zh_TW"),
+            ("zh_Hant", "zh_TW"),
+            ("zh-Hant-HK", "zh_TW"),
+            ("zh_CN", "zh_CN"),
+            ("zh-Hans-CN", "zh_CN"),
+            ("zh", "zh_CN"),
+            ("nb_NO.UTF-8", "no"),
+            ("nn", "no"),
+            ("fil_PH", "tl"),
+            ("iw", "he"),
+            ("de_DE@euro", "de"),
+            ("ja-JP", "ja"),
+            ("C", "en"),
+            ("POSIX", "en"),
+            ("", "en"),
+            ("xx_YY", "en"),
+        ] {
+            assert_eq!(resolve(raw), want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn detect_follows_posix_precedence() {
+        let env = |pairs: &'static [(&str, &str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(detect(env(&[("LANG", "de_DE.UTF-8")])), "de_DE.UTF-8");
+        assert_eq!(
+            detect(env(&[("LC_ALL", "fr_FR"), ("LANG", "de_DE")])),
+            "fr_FR"
+        );
+        assert_eq!(
+            detect(env(&[("LC_MESSAGES", "ja_JP"), ("LANG", "de_DE")])),
+            "ja_JP"
+        );
+        assert_eq!(detect(env(&[("LC_ALL", ""), ("LANG", "es_ES")])), "es_ES");
+        assert_eq!(
+            resolve(&detect(env(&[("LC_ALL", "C"), ("LANG", "de")]))),
+            "en"
+        );
+        assert_eq!(detect(env(&[])), "");
+    }
+
+    #[test]
+    fn override_wins_and_auto_uses_detected() {
+        assert_eq!(pick("de", "ja_JP"), "de");
+        assert_eq!(pick("auto", "ja_JP.UTF-8"), "ja");
+        assert_eq!(pick("AUTO", "ja"), "ja");
+        assert_eq!(pick("", "zh_TW"), "zh_TW");
+        assert_eq!(pick("pt_PT", "pt_BR"), "pt_PT");
+        assert_eq!(pick("klingon", "ja"), "en");
+        assert_eq!(pick("auto", ""), "en");
+    }
+
+    #[test]
+    fn fill_substitutes_and_keeps_unknown() {
+        assert_eq!(fill("a {x} b {y}", &[("x", "1")]), "a 1 b {y}");
+        assert_eq!(fill("{x}{x}", &[("x", "é")]), "éé");
+        assert_eq!(fill("open { brace", &[]), "open { brace");
+    }
 }

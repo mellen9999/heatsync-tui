@@ -54,6 +54,17 @@ keys: `j`/`k` scroll · `h`/`l` (or `j`/`k` with a side tab bar) switch channel 
 `i` compose · `o` pick a live channel (opens a temp tab, underlined) · `s` keep the temp tab · `m` manage · `x` close · `T` move tab bar · `v` message cursor (`j`/`k` `ctrl-d`/`ctrl-u` `g`/`G` move · `r` reply · `y` yank · `d` delete · `b` block an emote on the line · `esc` back) · `t` timestamps · `P` hide the pinned message · `space` pause · `q` quit.
 open channels + tab-bar position persist in `~/.config/heatsync/config`.
 
+## language
+
+speaks the same 34 languages as the browser extension. it follows your system language (`LC_ALL`, `LC_MESSAGES`, `LANG`; the user locale on windows), english when yours isn't there. pick one yourself:
+
+```
+heatsync-tui lang          # what it is now + the list
+heatsync-tui lang de       # force german (also: ja, pt_BR, zh_TW, … or auto)
+```
+
+it's the `lang=` line in `~/.config/heatsync/config`. right-to-left scripts (arabic, hebrew) are shown as text, the layout isn't mirrored.
+
 ## login
 
 `heatsync-tui login` pairs this terminal with your heatsync account: it shows a
