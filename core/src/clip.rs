@@ -40,7 +40,7 @@ fn pipe_to(bin: &str, args: &[&str], text: &str) -> Result<bool, String> {
     child
         .stdin
         .take()
-        .ok_or_else(|| trf("clip.no_stdin", &[("bin", &bin)]))?
+        .ok_or_else(|| trf("clip.no_stdin", &[("bin", bin)]))?
         .write_all(text.as_bytes())
         .map_err(|e| format!("{bin}: {e}"))?;
     // wl-copy forks a server that holds the selection; don't block on it.

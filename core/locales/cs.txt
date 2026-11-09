@@ -120,7 +120,7 @@ input.blocks_not_blocked={name} není blokován — /blocked je vypíše
 input.blocks_too_long={name} nejde blokovat (adresa je moc dlouhá)
 input.blocks_unblocked=odblokováno {name}
 input.main_connecting=heatsync: stahuji emotes + připojuji {n} kanálů…
-input.main_emote_hint=  → pro obrázkové emotes spusť v grafickém terminálu: foot (linux), windows terminal (win), wezterm (kdekoli) — jinak se názvy zobrazí jako text
+input.main_emote_hint=→ pro obrázkové emotes spusť v grafickém terminálu: foot (linux), windows terminal (win), wezterm (kdekoli) — jinak se názvy zobrazí jako text
 input.main_emotes_tier=heatsync: emotes = {tier}
 input.main_no_tty=heatsync-tui: není terminál — chat UI potřebuje interaktivní tty.\nSpusť ho přímo, nebo použij podpříkaz, který píše na stdout:\n\n{usage}
 input.main_tier_fb=framebuffer
@@ -213,7 +213,7 @@ proto.connected=připojeno
 proto.connected_name=připojeno — {name}
 proto.connection_error=chyba připojení
 proto.deleted=smazáno
-proto.gifted_kicks=darovaly kicks
+proto.gifted_kicks=daroval kicks
 proto.gifted_kicks_n=daroval {n} kicks
 proto.gifted_memberships=daroval členství
 proto.gifted_sub=daroval sub

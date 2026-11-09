@@ -120,7 +120,7 @@ input.blocks_not_blocked={name} غير محظور — /blocked يعرضها
 input.blocks_too_long=لا يمكن حظر {name} (عنوانه طويل جدًا)
 input.blocks_unblocked=تم رفع الحظر عن {name}
 input.main_connecting=heatsync: جارٍ جلب emotes + الاتصال بـ {n} قناة…
-input.main_emote_hint=  → لعرض emotes كصور، شغّل في طرفية رسومية: foot (linux)، windows terminal (win)، wezterm (أي نظام) — وإلا تظهر الأسماء نصًا
+input.main_emote_hint=→ لعرض emotes كصور، شغّل في طرفية رسومية: foot (linux)، windows terminal (win)، wezterm (أي نظام) — وإلا تظهر الأسماء نصًا
 input.main_emotes_tier=heatsync: emotes = {tier}
 input.main_no_tty=heatsync-tui: ليست طرفية — واجهة الدردشة تحتاج tty تفاعليًا.\nشغّله مباشرة، أو استخدم أمرًا فرعيًا يكتب إلى stdout:\n\n{usage}
 input.main_tier_fb=framebuffer

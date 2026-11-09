@@ -120,7 +120,7 @@ input.blocks_not_blocked={name} er ikke blokeret — /blocked viser dem
 input.blocks_too_long=kan ikke blokere {name} (adressen er for lang)
 input.blocks_unblocked=fjernede blokering af {name}
 input.main_connecting=heatsync: henter emotes + forbinder til {n} kanaler…
-input.main_emote_hint=  → for billed-emotes, kør i en grafikterminal: foot (linux), windows terminal (win), wezterm (alle) — ellers vises navne som tekst
+input.main_emote_hint=→ for billed-emotes, kør i en grafikterminal: foot (linux), windows terminal (win), wezterm (alle) — ellers vises navne som tekst
 input.main_emotes_tier=heatsync: emotes = {tier}
 input.main_no_tty=heatsync-tui: ikke en terminal — chat-UI'et kræver en interaktiv tty.\nKør det direkte, eller brug en underkommando, der skriver til stdout:\n\n{usage}
 input.main_tier_fb=framebuffer

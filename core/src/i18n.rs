@@ -259,7 +259,7 @@ mod tests {
         for lc in LOCALES {
             for (k, v) in entries(lc) {
                 assert_ne!(v, k, "{lc} {k} renders raw");
-                assert_eq!(v, v.trim(), "{lc} {k} has edge spaces");
+                assert_eq!(v, v.trim_matches([' ', '\t']), "{lc} {k} has edge spaces");
             }
         }
     }

@@ -736,7 +736,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     spans.push(Span::styled(
         trf(
             "draw.footer_state",
-            &[("state", &state), ("n", &n.to_string())],
+            &[("state", state), ("n", &n.to_string())],
         ),
         palette::DIM,
     ));

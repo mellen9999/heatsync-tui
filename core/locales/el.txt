@@ -120,9 +120,9 @@ input.blocks_not_blocked=το {name} δεν είναι μπλοκαρισμέν�
 input.blocks_too_long=δεν μπλοκάρεται το {name} (η διεύθυνσή του είναι πολύ μεγάλη)
 input.blocks_unblocked=ξεμπλοκαρίστηκε το {name}
 input.main_connecting=heatsync: λήψη emotes + σύνδεση σε {n} κανάλια…
-input.main_emote_hint=  → για emotes-εικόνες, τρέξε σε τερματικό γραφικών: foot (linux), windows terminal (win), wezterm (όλα) — αλλιώς τα ονόματα φαίνονται ως κείμενο
+input.main_emote_hint=→ για emotes-εικόνες, τρέξε σε τερματικό γραφικών: foot (linux), windows terminal (win), wezterm (όλα) — αλλιώς τα ονόματα φαίνονται ως κείμενο
 input.main_emotes_tier=heatsync: emotes = {tier}
-input.main_no_tty=heatsync-tui: δεν είναι τερματικό — το περιβάλλον συνομιλίας θέλει διαδραστικό tty.\nΤρέξ' το απευθείας, ή χρησιμοποίησε υποεντολή που γράφει στο stdout:\n\n{usage}
+input.main_no_tty=heatsync-tui: δεν είναι τερματικό — το περιβάλλον συνομιλίας θέλει διαδραστικό tty.\nτρέξ' το απευθείας, ή χρησιμοποίησε υποεντολή που γράφει στο stdout:\n\n{usage}
 input.main_tier_fb=framebuffer
 input.main_tier_text=κείμενο (χωρίς γραφικά τερματικού)
 input.main_usage=heatsync-tui — multichat live ταξινομημένο κατά ζέστη, στο τερματικό\n\nΧΡΗΣΗ:\n    heatsync-tui [CHANNEL...]        ανοίγει τη συνομιλία στα κανάλια\n                                     (όνομα, kick:όνομα, yt:videoid ή url youtube)\n    heatsync-tui <SUBCOMMAND>\n\nΥΠΟΕΝΤΟΛΕΣ:\n    log        εκτύπωση πρόσφατων μηνυμάτων\n    search     αναζήτηση στο αρχείο συνομιλιών\n    hot, top   τα πιο πολυσύχναστα κανάλια τώρα\n    login      σύνδεση με heatsync (chat + mod, twitch και kick)\n    login kick ίδια σύνδεση, με οδηγίες για το kick\n    logout     αποσύνδεση και διαγραφή της σύνδεσης\n    lang       εμφάνιση ή ορισμός γλώσσας (auto, de, ja, …)\n    status     ποιος είναι συνδεδεμένος και τι μπορεί\n    probe      έλεγχος ότι το κανάλι είναι προσβάσιμο\n    diag       εκτύπωση διαγνωστικών\n    render-test  σχεδίαση δοκιμαστικού μοτίβου emote/paint\n\nΕΠΙΛΟΓΕΣ:\n    --mock     τρέξιμο σε τεχνητό feed, χωρίς δίκτυο\n    -h, --help\n    -V, --version\n

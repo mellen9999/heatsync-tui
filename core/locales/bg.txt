@@ -120,7 +120,7 @@ input.blocks_not_blocked={name} не е блокиран — /blocked ги по�
 input.blocks_too_long={name} не може да се блокира (адресът му е твърде дълъг)
 input.blocks_unblocked=отблокиран {name}
 input.main_connecting=heatsync: взимам емоути + свързвам {n} канала…
-input.main_emote_hint=  → за картинни емоути пусни в графичен терминал: foot (linux), windows terminal (win), wezterm (всички) — иначе имената са текст
+input.main_emote_hint=→ за картинни емоути пусни в графичен терминал: foot (linux), windows terminal (win), wezterm (всички) — иначе имената са текст
 input.main_emotes_tier=heatsync: емоути = {tier}
 input.main_no_tty=heatsync-tui: не е терминал — чат интерфейсът иска интерактивен tty.\nПусни го директно или ползвай подкоманда, която пише в stdout:\n\n{usage}
 input.main_tier_fb=framebuffer

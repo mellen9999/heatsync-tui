@@ -419,7 +419,7 @@ fn share_layout(app: &mut App) {
     }
     let link = format!("https://heatsync.org/m/{l}");
     app.status = Some(match clip::copy(&link) {
-        Ok(via) => trf("input.status_copied", &[("via", &via), ("link", &link)]),
+        Ok(via) => trf("input.status_copied", &[("via", via), ("link", &link)]),
         Err(e) => format!("{e} — {link}"),
     });
 }
@@ -1075,7 +1075,7 @@ fn cursor_yank(app: &mut App) {
         m.text.clone()
     };
     app.status = Some(match clip::copy(&text) {
-        Ok(via) => trf("input.status_yanked", &[("via", &via)]),
+        Ok(via) => trf("input.status_yanked", &[("via", via)]),
         Err(e) => e,
     });
 }
