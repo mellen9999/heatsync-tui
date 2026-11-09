@@ -4,5 +4,7 @@
 pub mod blit;
 pub mod decode;
 pub mod fb;
+#[cfg(target_os = "linux")]
+pub mod fbdev;
 pub mod fx;
 pub mod render;

@@ -876,7 +876,7 @@ pub fn diag(_args: &[String]) -> std::io::Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        match framebuffer::Framebuffer::new("/dev/fb0") {
+        match crate::emote::fbdev::Framebuffer::new("/dev/fb0") {
             Err(e) => reasons.push(format!("/dev/fb0 open failed: {e:?}")),
             Ok(fb) => {
                 let v = fb.var_screen_info.clone();
@@ -936,7 +936,13 @@ pub fn diag(_args: &[String]) -> std::io::Result<()> {
 /// paint an orange 200x100 block at (100,100) straight to the framebuffer and
 /// hold it, so "did anything reach the screen" is answered by looking.
 #[cfg(target_os = "linux")]
-fn paint_test(mut fb: framebuffer::Framebuffer, xres: u32, yres: u32, line_len: u32, bpp: u32) {
+fn paint_test(
+    mut fb: crate::emote::fbdev::Framebuffer,
+    xres: u32,
+    yres: u32,
+    line_len: u32,
+    bpp: u32,
+) {
     let (w, h) = (200u32.min(xres), 100u32.min(yres));
     let buf = &mut fb.frame;
     for y in 100..(100 + h) {

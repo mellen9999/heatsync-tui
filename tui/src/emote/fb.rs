@@ -6,7 +6,7 @@
 //!
 //! the whole thing is linux-only; on other platforms `open` returns None and the
 //! methods are no-ops, so the caller needs no cfg and the windows/mac .exe is
-//! unaffected (the `framebuffer` dep is itself gated to linux in Cargo.toml).
+//! unaffected (the framebuffer binding is itself gated to linux).
 
 use std::cell::RefCell;
 
@@ -116,7 +116,7 @@ mod linux {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use framebuffer::Framebuffer;
+    use crate::emote::fbdev::Framebuffer;
     use image::RgbaImage;
 
     use super::Placement;

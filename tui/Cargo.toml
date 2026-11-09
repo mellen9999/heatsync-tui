@@ -42,12 +42,7 @@ unicode-width = "0.2"
 # no image-defaults codecs; we hand it already-decoded frames from `image`).
 ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
 
-# bare Linux console (TTY) pixel emotes — write straight to /dev/fb0, the same
-# mechanism notcurses' NCPIXEL_LINUXFB uses, but pure-Rust + linux-only so the
-# windows/mac .exe is unaffected.
-[target.'cfg(target_os = "linux")'.dependencies]
-framebuffer = "0.3"
-
-# ctrl-c outside the chat ui (loading, login, one-shot commands) exits clean.
+# ctrl-c outside the chat ui (loading, login, one-shot commands) exits clean; on
+# linux also the bare-console framebuffer ioctl/mmap (emote/fbdev.rs).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
