@@ -2,6 +2,12 @@
 
 what changed in each release, newest first. the release workflow copies the section for a tag into the github release notes, so every `## x.y.z` heading needs a matching tag.
 
+## 0.3.1 - 2026-11-09
+
+### chat
+
+- mod anniversaries get their own green row, including twitch's `modiversary` notice
+
 ## 0.3.0 - 2026-11-08
 
 ### chat
