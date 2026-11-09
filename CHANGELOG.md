@@ -2,6 +2,21 @@
 
 what changed in each release, newest first. the release workflow copies the section for a tag into the github release notes, so every `## x.y.z` heading needs a matching tag.
 
+## 0.3.0 - 2026-11-08
+
+### chat
+
+- emote order fixed: the channel's emote wins a name clash, and platform tokens beat same-name set emotes
+- the streamer's own heatsync emotes render for everyone in their channel
+- `/block <emote>` hides one exact emote, `/unblock` brings it back, `/blocked` lists them. `b` does it from the message cursor
+- notification rows are filled, and your picked heatsync badge shows
+
+### composer and keys
+
+- tab-complete keeps case twins (both spellings stay, the one you typed leads, order is stable)
+- `alt+1` to `alt+9` jump to a tab
+- lines you sent are remembered across restarts
+
 ## 0.2.0 - 2026-11-08
 
 everything since 0.1.1, the last version on crates.io. `heatsync-core` moves to 0.2.0 with it (the tui needs the new core). 0.1.2 was never published; its fixes are in here.
