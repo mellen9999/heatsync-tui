@@ -59,19 +59,19 @@ impl Completion {
         };
         let mut items: Vec<String> = Vec::new();
         let mut push = |s: String| {
-            if !items.iter().any(|i| i.eq_ignore_ascii_case(&s)) {
+            if !items.contains(&s) {
                 items.push(s);
             }
         };
         if !at {
             let mut hits: Vec<&str> = emotes.filter(|e| matches(e)).collect();
-            hits.sort_unstable_by_key(|a| a.to_ascii_lowercase());
+            hits.sort_unstable_by_key(|a| twin_key(a, prefix));
             for e in hits {
                 push(e.to_string());
             }
         }
         let mut hits: Vec<&str> = users.filter(|u| matches(u)).collect();
-        hits.sort_unstable_by_key(|a| a.to_ascii_lowercase());
+        hits.sort_unstable_by_key(|a| twin_key(a, prefix));
         for u in hits {
             push(if at { format!("@{u}") } else { u.to_string() });
         }
@@ -100,6 +100,13 @@ impl Completion {
         self.len = self.items[next].chars().count();
         (lo, hi, &self.items[next])
     }
+}
+
+/// stable order: by lowercase name; case twins both stay, the one spelled
+/// like the typed word leads, then plain byte order (HashMap order never leaks).
+fn twin_key(name: &str, typed: &str) -> (String, bool, String) {
+    let exact = name.get(..typed.len()).is_some_and(|h| h == typed);
+    (name.to_ascii_lowercase(), !exact, name.to_string())
 }
 
 #[cfg(test)]
@@ -162,5 +169,21 @@ mod tests {
         // multibyte text before the word must not break the span indices
         let mut c = build("キツネ kek", 7).unwrap();
         assert_eq!(c.advance(1), (4, 7, "kekHeim"));
+    }
+
+    #[test]
+    fn case_twins_both_stay_and_the_typed_spelling_leads() {
+        let emotes = ["sadge", "Sadge", "SADGE"];
+        let run = |t: &str| {
+            let mut c = Completion::build(t, t.len(), emotes.iter().copied(), [].into_iter())
+                .unwrap();
+            (0..3).map(|_| c.advance(1).2.to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(run("Sad"), ["Sadge", "SADGE", "sadge"]);
+        assert_eq!(run("sad"), ["sadge", "SADGE", "Sadge"]);
+        let rev = ["Sadge", "SADGE", "sadge"];
+        let mut c =
+            Completion::build("sad", 3, rev.iter().copied(), [].into_iter()).unwrap();
+        assert_eq!(c.advance(1).2, "sadge", "input order never matters");
     }
 }
