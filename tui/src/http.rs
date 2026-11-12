@@ -376,6 +376,20 @@ pub struct HotMsg {
 pub struct HotPage {
     #[serde(default)]
     pub messages: Vec<HotMsg>,
+    /// nothing ranked hot, so the server sent its newest posts instead (heat 0)
+    #[serde(default)]
+    pub fallback: bool,
+}
+
+impl HotPage {
+    /// the posts that are actually hot: none when the server fell back to newest
+    pub fn hot(&self) -> &[HotMsg] {
+        if self.fallback {
+            &[]
+        } else {
+            &self.messages
+        }
+    }
 }
 
 pub fn hot(limit: u32, hours: u32) -> Option<HotPage> {
@@ -539,6 +553,25 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn newest_posts_sent_in_place_of_hot_ones_are_not_called_hot() {
+        let page = |fallback: bool| -> super::HotPage {
+            serde_json::from_value(serde_json::json!({"fallback": fallback,
+                "messages": [{"content": "hi", "heat": 0, "max_heat": 0, "username": "a"}]}))
+            .unwrap()
+        };
+        assert!(page(true).hot().is_empty());
+        assert_eq!(page(false).hot().len(), 1);
+        let old: super::HotPage = serde_json::from_value(serde_json::json!({"messages": [
+            {"content": "hi", "heat": 9, "max_heat": 9, "username": "a"}]}))
+        .unwrap();
+        assert_eq!(
+            old.hot().len(),
+            1,
+            "a server that never says fallback is read as before"
+        );
+    }
+
     #[test]
     fn the_gql_answer_gives_a_live_streams_start_and_game() {
         let live = serde_json::json!({"data": {"user": {"stream": {"type": "live",

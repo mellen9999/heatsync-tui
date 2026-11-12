@@ -91,8 +91,8 @@ pub fn hot(args: &[String]) -> std::io::Result<()> {
     // decay) decides what's hot, so a narrow default would just hide live heat.
     let hours: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(720);
     match http::hot(25, hours) {
-        Some(page) if !page.messages.is_empty() => {
-            for m in &page.messages {
+        Some(page) if !page.hot().is_empty() => {
+            for m in page.hot() {
                 let who = m.display_name.as_deref().unwrap_or(&m.username);
                 let subj = m.subject.as_deref().unwrap_or("");
                 println!(
