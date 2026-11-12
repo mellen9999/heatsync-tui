@@ -238,6 +238,7 @@ pub fn parse(raw: &str) -> Event {
             Event::Backfill(lines)
         }
         "youtube:delete" => youtube_delete_event(&v),
+        "kick-moderation" => kick_moderation_event(&v),
         "mention:rule-match" => mention_event(&v),
         "whisper:new" => whisper_event(&v, TabKind::Whispers),
         "dm:new" => whisper_event(&v, TabKind::Whispers),
@@ -892,16 +893,23 @@ fn id_of(m: &Value) -> Option<String> {
 
 /// twitch CLEARMSG → one message struck through.
 fn clearmsg_event(v: &Value) -> Event {
-    let m = &v["message"];
-    let id = field(m, "targetMsgId");
+    line_gone(
+        Platform::Twitch,
+        field(v, "channel"),
+        field(&v["message"], "targetMsgId"),
+    )
+}
+
+/// one line a mod removed, by the id it arrived with.
+fn line_gone(platform: Platform, channel: String, id: String) -> Event {
     if id.is_empty() {
         return Event::Ignore;
     }
     Event::Delete {
         line: None,
         del: Delete {
-            platform: Platform::Twitch,
-            channel: field(v, "channel"),
+            platform,
+            channel,
             target: Target::Msg(id),
             label: tr("proto.deleted").into(),
         },
@@ -912,19 +920,50 @@ fn clearmsg_event(v: &Value) -> Event {
 /// target's lines struck through.
 fn clearchat_event(v: &Value) -> Event {
     let m = &v["message"];
-    let target = field(m, "targetUsername");
+    removal(
+        Platform::Twitch,
+        field(v, "channel"),
+        field(m, "targetUsername"),
+        m.get("banDuration").and_then(Value::as_u64),
+    )
+}
+
+/// kick's ban, timeout or one deleted line, in the shapes twitch's
+/// CLEARCHAT and CLEARMSG take. a kick removal always names someone or a
+/// line: it never clears the whole chat.
+fn kick_moderation_event(v: &Value) -> Event {
+    let channel = field(v, "channel");
+    match v.get("action").and_then(Value::as_str) {
+        Some("delete") => line_gone(Platform::Kick, channel, field(v, "messageId")),
+        Some(a @ ("ban" | "timeout")) => {
+            let who = field(v, "username");
+            if who.is_empty() {
+                return Event::Ignore;
+            }
+            let secs = (a == "timeout")
+                .then(|| v.get("durationSec").and_then(Value::as_u64))
+                .flatten()
+                .filter(|&s| s > 0);
+            removal(Platform::Kick, channel, who, secs)
+        }
+        _ => Event::Ignore,
+    }
+}
+
+/// a person removed (timed out for `secs`, or banned), or the whole chat
+/// cleared when no one is named: a mod-log note, and the lines struck through.
+fn removal(platform: Platform, channel: String, target: String, secs: Option<u64>) -> Event {
     let (label, t) = if target.is_empty() {
         (tr("proto.cleared").to_string(), Target::All)
     } else {
-        let label = match m.get("banDuration").and_then(Value::as_u64) {
+        let label = match secs {
             Some(s) => trf("proto.timed_out", &[("dur", &fmt_secs(s))]),
             None => tr("proto.banned").to_string(),
         };
         (label, Target::User(target.clone()))
     };
-    let channel = field(v, "channel");
     let line = note_line(
-        Platform::Twitch,
+        platform,
         channel.clone(),
         target,
         None,
@@ -939,7 +978,7 @@ fn clearchat_event(v: &Value) -> Event {
     Event::Delete {
         line,
         del: Delete {
-            platform: Platform::Twitch,
+            platform,
             channel,
             target: t,
             label,
@@ -2276,6 +2315,42 @@ mod tests {
         assert_eq!(d.target, Target::Msg("abc-123".into()));
         assert_eq!(d.platform, Platform::Twitch);
         assert_eq!(d.label, "deleted");
+    }
+
+    #[test]
+    fn kick_removals_read_like_twitchs() {
+        let (l, d) = del(
+            r#"{"type":"kick-moderation","platform":"kick","channel":"xqc",
+            "action":"timeout","username":"Troll","durationSec":600,"timestamp":1}"#,
+        );
+        let l = l.unwrap();
+        assert_eq!((l.platform, l.user.as_str()), (Platform::Kick, "Troll"));
+        assert_eq!(l.note.unwrap().what, "timed out 10m");
+        assert_eq!((d.platform, d.channel.as_str()), (Platform::Kick, "xqc"));
+        assert_eq!(d.target, Target::User("Troll".into()));
+
+        let (_, d) = del(
+            r#"{"type":"kick-moderation","channel":"xqc","action":"ban","username":"troll","durationSec":0}"#,
+        );
+        assert_eq!(d.label, "banned");
+
+        let (l, d) = del(
+            r#"{"type":"kick-moderation","channel":"xqc","action":"delete","messageId":"k-1"}"#,
+        );
+        assert!(l.is_none(), "a single delete adds no mod-log line");
+        assert_eq!(
+            (d.platform, d.target),
+            (Platform::Kick, Target::Msg("k-1".into()))
+        );
+
+        // a kick removal names someone or a line: never the whole chat
+        for raw in [
+            r#"{"type":"kick-moderation","channel":"xqc","action":"ban"}"#,
+            r#"{"type":"kick-moderation","channel":"xqc","action":"delete"}"#,
+            r#"{"type":"kick-moderation","channel":"xqc","action":"unban","username":"troll"}"#,
+        ] {
+            assert!(matches!(parse(raw), Event::Ignore), "{raw}");
+        }
     }
 
     #[test]
