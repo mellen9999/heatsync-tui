@@ -83,16 +83,32 @@ pub fn classify_notice(line: &str) -> Option<Note> {
     Some(Note { channel, text })
 }
 
-/// the login was refused — no point reconnecting with the same token.
+/// a line twitch itself sent (`:tmi.twitch.tv <rest>`), tags dropped: never a
+/// chatter's PRIVMSG, whose words would otherwise read as the server's.
+fn from_server(line: &str) -> Option<&str> {
+    let line = match line.strip_prefix('@') {
+        Some(tagged) => tagged.split_once(' ')?.1,
+        None => line,
+    };
+    line.strip_prefix(":tmi.twitch.tv ")
+}
+
+/// the login was refused — no point reconnecting with the same token. only
+/// twitch's own NOTICE: a chatter typing these words must not end your sends.
 fn is_auth_failure(line: &str) -> bool {
-    line.contains("Login authentication failed")
-        || line.contains("Improperly formatted auth")
-        || line.contains("Login unsuccessful")
+    from_server(line)
+        .and_then(|r| r.strip_prefix("NOTICE "))
+        .and_then(|r| r.split_once(" :"))
+        .is_some_and(|(_, msg)| {
+            msg.starts_with("Login authentication failed")
+                || msg.starts_with("Improperly formatted auth")
+                || msg.starts_with("Login unsuccessful")
+        })
 }
 
 /// the 001 welcome: the server accepted us and will now keep our PRIVMSGs.
 fn is_welcome(line: &str) -> bool {
-    line.contains(" 001 ")
+    from_server(line).is_some_and(|r| r.starts_with("001 "))
 }
 
 /// holds sends until the connection is authenticated — a PRIVMSG that races
@@ -395,6 +411,19 @@ mod tests {
         ));
         assert!(is_welcome(":tmi.twitch.tv 001 me :Welcome, GLHF!"));
         assert!(!is_welcome("PING :tmi.twitch.tv"));
+    }
+
+    // the send socket joins channels, so other people's lines reach it too
+    #[test]
+    fn a_chatter_saying_the_words_is_neither_a_refusal_nor_a_welcome() {
+        let said =
+            |t: &str| format!("@badges=;color= :amy!amy@amy.tmi.twitch.tv PRIVMSG #forsen :{t}");
+        assert!(!is_auth_failure(&said("Login authentication failed")));
+        assert!(!is_auth_failure(&said("Improperly formatted auth lol")));
+        assert!(!is_welcome(&said("room 001 is open")));
+        assert!(is_auth_failure(
+            "@msg-id=x :tmi.twitch.tv NOTICE * :Login unsuccessful"
+        ));
     }
 
     fn s(c: &str, t: &str) -> Send {
