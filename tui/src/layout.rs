@@ -685,7 +685,7 @@ fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
 
 #[cfg(test)]
 mod placeholder_tests {
-    use super::{fit, fit_exact};
+    use super::fit_exact;
     use unicode_width::UnicodeWidthStr;
 
     /// the loading placeholder MUST occupy exactly the cells the image will, or
