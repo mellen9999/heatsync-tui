@@ -641,7 +641,10 @@ fn usernotice_line(m: &Value, channel: Option<&Value>) -> Option<ChatLine> {
     }
     let channel = channel.and_then(Value::as_str).unwrap_or("").to_string();
     let color = color_of(m);
+    // the notice's own id: the relay sends a usernotice once from irc and once
+    // from eventsub, and this is how a tab knows the two are one.
     note_line(Platform::Twitch, channel, user, color, kind, what, text)
+        .map(|l| ChatLine { id: id_of(m), ..l })
 }
 
 /// a pin object (`pin:set`'s `pin`, or `/api/pin`'s) → [`Pin`]; none without text.
@@ -2120,6 +2123,23 @@ mod tests {
             }
             _ => panic!("expected chat"),
         }
+    }
+
+    #[test]
+    fn a_usernotice_carries_its_own_id_so_the_relays_second_copy_can_be_told() {
+        let frame = |id: &str| {
+            format!(
+                r##"{{"type":"irc:message","channel":"c","message":{{"type":"usernotice",
+                "subType":"sub","username":"a","displayName":"A","systemMessage":"A subscribed.",
+                "id":"{id}"}}}}"##
+            )
+        };
+        let id = |raw: &str| match parse(raw) {
+            Event::Chat(l) => l.id,
+            e => panic!("{e:?}"),
+        };
+        assert_eq!(id(&frame("n-1")).as_deref(), Some("n-1"));
+        assert_eq!(id(&frame("")), None, "an empty id is no id");
     }
 
     #[test]

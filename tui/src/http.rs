@@ -162,6 +162,10 @@ pub struct ArchiveMsg {
     pub message: String,
     #[serde(default)]
     pub timestamp: String,
+    /// the platform's own message id (null on rows archived before it was kept) —
+    /// what lets history and the live line of one message be told as one.
+    #[serde(default)]
+    pub message_id: Option<String>,
     /// `[{name, version}]` — same shape the kick ws frames use.
     #[serde(default)]
     pub badges: Option<serde_json::Value>,
@@ -222,7 +226,6 @@ pub fn channel_log(channel: &str, from: &str, to: &str, limit: u32) -> Option<Ar
 /// sanitized here — archive content crosses the same trust boundary live chat
 /// does.
 pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_core::Message> {
-    use heatsync_core::{proto::badges_from, sanitize};
     let mut best: Vec<ArchiveMsg> = Vec::new();
     for mins in [10u64, 60, 480] {
         let from = iso_from_unix(unix_now().saturating_sub(mins * 60));
@@ -244,36 +247,42 @@ pub fn recent(channel: &str, platform: Platform, want: usize) -> Vec<heatsync_co
     let skip = best.len().saturating_sub(want);
     best.drain(..skip);
     best.into_iter()
-        .map(|r| {
-            let user = sanitize::clean(r.display_name.as_deref().unwrap_or(&r.username));
-            heatsync_core::Message {
-                platform,
-                user: if user.is_empty() {
-                    sanitize::clean(&r.username)
-                } else {
-                    user
-                },
-                text: sanitize::clean(&r.message),
-                color: None,
-                badges: badges_from(r.badges.as_ref()),
-                id: None,
-                gone: None,
-                reply_to: None,
-                note: None,
-                // its own time: stamps show, and a stream-start row can tell
-                // whether this history reaches back that far.
-                extra: heatsync_core::Extra {
-                    ts: heatsync_core::iso::parse(&r.timestamp).map_or(0, |t| t.max(0) as u64),
-                    ..Default::default()
-                },
-                emotes: None,
-                tags: Vec::new(),
-                heat: 0.0,
-                uid: None,
-            }
-        })
+        .map(|r| archived(platform, r))
         .filter(|m| !m.user.is_empty() || !m.text.is_empty())
         .collect()
+}
+
+/// one archive row as a scrollback line. it keeps the platform's own message id
+/// (when the row has one): that id is how history and the live copy of one
+/// message are told apart from two messages with the same words.
+fn archived(platform: Platform, r: ArchiveMsg) -> heatsync_core::Message {
+    use heatsync_core::{proto::badges_from, sanitize};
+    let user = sanitize::clean(r.display_name.as_deref().unwrap_or(&r.username));
+    heatsync_core::Message {
+        platform,
+        user: if user.is_empty() {
+            sanitize::clean(&r.username)
+        } else {
+            user
+        },
+        text: sanitize::clean(&r.message),
+        color: None,
+        badges: badges_from(r.badges.as_ref()),
+        id: r.message_id.filter(|i| !i.is_empty() && i.len() <= 128),
+        gone: None,
+        reply_to: None,
+        note: None,
+        // its own time: stamps show, and a stream-start row can tell
+        // whether this history reaches back that far.
+        extra: heatsync_core::Extra {
+            ts: heatsync_core::iso::parse(&r.timestamp).map_or(0, |t| t.max(0) as u64),
+            ..Default::default()
+        },
+        emotes: None,
+        tags: Vec::new(),
+        heat: 0.0,
+        uid: None,
+    }
 }
 
 /// twitch's public web gql, the same one the heatsync desktop app's /status
@@ -557,7 +566,26 @@ mod tests {
         );
     }
 
-    use super::{iso_from_unix, parse_live, twitch_live};
+    use super::{archived, iso_from_unix, parse_live, twitch_live, ArchiveMsg};
+    use heatsync_core::Platform;
+
+    #[test]
+    fn an_archive_row_keeps_the_platforms_message_id_for_the_dedup() {
+        let row = |extra: &str| -> ArchiveMsg {
+            serde_json::from_str(&format!(
+                r#"{{"platform":"kick","username":"a","message":"hi","timestamp":"2026-11-03T10:00:00Z"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        let id = |extra: &str| archived(Platform::Kick, row(extra)).id;
+        assert_eq!(id(r#","message_id":"abc-1""#).as_deref(), Some("abc-1"));
+        // legacy rows (null / missing / blank / absurd) have none: never dedup-able, never dropped
+        assert_eq!(id(r#","message_id":null"#), None);
+        assert_eq!(id(""), None);
+        assert_eq!(id(r#","message_id":"""#), None);
+        let long = format!(r#","message_id":"{}""#, "x".repeat(129));
+        assert_eq!(id(&long), None);
+    }
 
     #[test]
     fn iso_conversion_hits_known_instants() {

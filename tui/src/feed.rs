@@ -125,7 +125,7 @@ pub(crate) fn drain_history(app: &mut App) {
                 .filter(|t| *t > 0)
                 .min()
                 .unwrap_or(0);
-            channels[i].backfill(msgs);
+            channels[i].backfill(&name, msgs);
             if let Some((start, game)) = live {
                 crate::streamrow::start_row(
                     &mut channels[i],
@@ -253,26 +253,18 @@ fn deliver_at(app: &mut App, i: usize, l: ChatLine, now: u64, own: bool) {
         seen,
         ..
     } = app;
+    // one platform message is one row: the server replays a joined room's backlog
+    // on every (re)subscribe, and the relay double-broadcasts some event frames
+    // (a usernotice arrives twice with the same id). a seen id is dropped here,
+    // before it can count as heat, unread, or a ping.
+    if !channels[i].first_sight(l.platform, &l.channel, l.id.as_deref()) {
+        return;
+    }
     // fetch starts the instant the line lands — but only for
     // the channel on screen. prefetching every background
     // channel's emotes burned network + decode for images
     // that might never be looked at; a switched-to channel is
     // filled by the tick sweep within 200ms instead.
-    // the relay double-broadcasts some event frames (usernotice
-    // arrives twice with the same id) — drop a note identical
-    // to one already in the recent tail.
-    // 16 covers a spam-speed channel filling the gap between
-    // the two broadcasts (~200ms apart).
-    if l.note.is_some()
-        && channels[i].messages.iter().rev().take(16).any(|e| {
-            e.platform == l.platform
-                && e.user == l.user
-                && e.text == l.content
-                && e.note.as_ref() == l.note.as_ref()
-        })
-    {
-        return;
-    }
     if let Some(u) = &l.uid {
         paints.want(u);
     }
@@ -576,5 +568,203 @@ pub(crate) fn tick_advance(app: &mut App) {
         for m in ch.messages.iter().skip(from) {
             request_stacks(store, fb, &emotes[*focus], m.refs(), &m.text);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::{forward, ChatEvent};
+    use heatsync_core::{proto, Unread};
+    use std::sync::mpsc::{channel, Sender};
+    use std::time::Instant;
+
+    /// a live-mode app (xqc twitch, kripp kick, vid1 youtube): frames pushed into
+    /// the sender reach the tabs through the real drain, as net.rs hands them over.
+    fn live() -> (App, Sender<ChatEvent>) {
+        let mut a = crate::special::tests::app();
+        let (tx, rx) = channel();
+        a.feed = Feed::Live {
+            rx,
+            start: Instant::now(),
+            connected: true,
+        };
+        a.channels
+            .push(heatsync_core::Channel::new("vid1", Platform::Youtube, 50));
+        a.emotes.push(EmoteSet::new());
+        (a, tx)
+    }
+
+    /// one raw ws frame in, drained into the tabs.
+    fn frame(a: &mut App, tx: &Sender<ChatEvent>, raw: &str) {
+        assert!(forward(proto::parse(raw), tx));
+        drain_feed(a);
+    }
+
+    fn texts(a: &App, tab: usize) -> Vec<&str> {
+        a.channels[tab]
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect()
+    }
+
+    const KICK_TAB: usize = 1;
+    const YT_TAB: usize = 2;
+
+    fn kick_live(id: &str, user: &str, text: &str) -> String {
+        format!(
+            r#"{{"type":"kick-chat-message","data":{{"channel":"kripp","id":"{id}","username":"{user}","content":"{text}"}}}}"#
+        )
+    }
+
+    const KICK_BACKFILL: &str = r#"{"type":"kick-chat-backfill","channel":"kripp","replay":true,"messages":[
+        {"channel":"kripp","id":"k1","username":"a","content":"one"},
+        {"channel":"kripp","id":"k2","username":"b","content":"two"},
+        {"channel":"kripp","id":"k3","username":"a","content":"one"}]}"#;
+
+    #[test]
+    fn a_resubscribes_replayed_kick_backlog_is_not_drawn_twice() {
+        let (mut a, tx) = live();
+        frame(&mut a, &tx, &kick_live("k1", "a", "one"));
+        // the server resends the whole backlog on every join (reconnect, a second tab)
+        frame(&mut a, &tx, KICK_BACKFILL);
+        assert_eq!(
+            texts(&a, KICK_TAB),
+            ["one", "two", "one"],
+            "k3 is a new line with old words"
+        );
+        let before = (a.channels[KICK_TAB].seq, a.channels[KICK_TAB].heat);
+        for _ in 0..3 {
+            frame(&mut a, &tx, KICK_BACKFILL);
+        }
+        assert_eq!(texts(&a, KICK_TAB).len(), 3);
+        assert_eq!(
+            (a.channels[KICK_TAB].seq, a.channels[KICK_TAB].heat),
+            before,
+            "a replay is not news: no heat, no new line"
+        );
+        // and a live copy of something the replay already drew
+        frame(&mut a, &tx, &kick_live("k2", "b", "two"));
+        assert_eq!(texts(&a, KICK_TAB).len(), 3);
+    }
+
+    #[test]
+    fn a_youtube_backlog_replayed_on_every_subscribe_is_drawn_once() {
+        let (mut a, tx) = live();
+        let batch = r#"{"type":"youtube:chat","videoId":"vid1","replay":true,"messages":[
+            {"id":"y1","user":"u","text":"hi"},{"id":"y2","user":"v","text":"yo"}]}"#;
+        frame(&mut a, &tx, batch);
+        frame(&mut a, &tx, batch); // resubscribe after a reconnect
+        let live = r#"{"type":"youtube:chat","videoId":"vid1","messages":[
+            {"id":"y2","user":"v","text":"yo"},{"id":"y3","user":"v","text":"yo"}]}"#;
+        frame(&mut a, &tx, live);
+        assert_eq!(
+            texts(&a, YT_TAB),
+            ["hi", "yo", "yo"],
+            "y3 is a new line with old words"
+        );
+    }
+
+    #[test]
+    fn two_people_saying_the_same_words_are_two_lines() {
+        let (mut a, tx) = live();
+        frame(&mut a, &tx, &kick_live("m1", "amy", "LUL"));
+        frame(&mut a, &tx, &kick_live("m2", "bob", "LUL"));
+        frame(&mut a, &tx, &kick_live("m3", "amy", "LUL"));
+        assert_eq!(texts(&a, KICK_TAB), ["LUL", "LUL", "LUL"]);
+    }
+
+    #[test]
+    fn a_replayed_ping_does_not_light_a_tab_that_was_already_read() {
+        let (mut a, tx) = live();
+        a.me = vec!["me".into()];
+        let ping = r#"{"type":"irc:message","channel":"xqc","message":{"type":"privmsg","id":"p1","username":"amy","content":"hey me"}}"#;
+        frame(&mut a, &tx, ping);
+        assert_eq!(a.channels[0].unread(), Unread::Ping);
+        a.channels[0].mark_seen();
+        frame(&mut a, &tx, ping);
+        assert_eq!(a.channels[0].unread(), Unread::None);
+        assert_eq!(texts(&a, 0).len(), 1);
+    }
+
+    #[test]
+    fn the_relays_second_usernotice_is_dropped_by_id_but_a_repeat_of_the_words_is_not() {
+        let (mut a, tx) = live();
+        let gift = |id: &str| {
+            format!(
+                r##"{{"type":"irc:message","channel":"xqc","message":{{"type":"usernotice","id":"{id}",
+                "subType":"submysterygift","username":"g","displayName":"G","systemMessage":"G is gifting 5 Tier 1 Subs."}}}}"##
+            )
+        };
+        frame(&mut a, &tx, &gift("n1"));
+        frame(&mut a, &tx, &gift("n1")); // irc + eventsub both broadcast it
+        assert_eq!(a.channels[0].messages.len(), 1);
+        frame(&mut a, &tx, &gift("n2")); // a second, real gift, same words
+        assert_eq!(a.channels[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn a_channel_open_in_two_tabs_draws_each_line_in_one_of_them_not_both() {
+        let (mut a, tx) = live();
+        let mut second = heatsync_core::Channel::new("vid1", Platform::Youtube, 50);
+        second.extra = vec![(Platform::Kick, "kripp".into())];
+        a.channels.push(second);
+        a.emotes.push(EmoteSet::new());
+        frame(&mut a, &tx, &kick_live("t1", "a", "once"));
+        frame(&mut a, &tx, KICK_BACKFILL);
+        let drawn: usize = a
+            .channels
+            .iter()
+            .map(|c| {
+                c.messages
+                    .iter()
+                    .filter(|m| m.id.as_deref() == Some("t1"))
+                    .count()
+            })
+            .sum();
+        assert_eq!(
+            drawn, 1,
+            "routing hands a line to the first tab that has the source"
+        );
+    }
+
+    fn archived(id: &str, text: &str) -> Message {
+        Message {
+            platform: Platform::Kick,
+            user: "u".into(),
+            text: text.into(),
+            color: None,
+            badges: Vec::new(),
+            id: Some(id.into()),
+            gone: None,
+            reply_to: None,
+            note: None,
+            extra: Default::default(),
+            emotes: None,
+            tags: Vec::new(),
+            heat: 0.0,
+            uid: None,
+        }
+    }
+
+    #[test]
+    fn history_and_live_in_either_order_draw_a_message_once() {
+        let (mut a, tx) = live();
+        // live first, then the history answer that overlaps it
+        frame(&mut a, &tx, &kick_live("h2", "u", "two"));
+        a.hist_tx
+            .send(Hist {
+                platform: Platform::Kick,
+                name: "kripp".into(),
+                msgs: vec![archived("h1", "one"), archived("h2", "two")],
+                live: None,
+            })
+            .unwrap();
+        drain_history(&mut a);
+        assert_eq!(texts(&a, KICK_TAB), ["one", "two"]);
+        // history first, then a late live copy of one of its lines
+        frame(&mut a, &tx, &kick_live("h1", "u", "one"));
+        assert_eq!(texts(&a, KICK_TAB), ["one", "two"]);
     }
 }

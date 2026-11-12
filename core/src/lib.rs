@@ -30,7 +30,7 @@ pub mod slash;
 pub mod social;
 pub mod streamev;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 /// where a channel's chat comes from.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -372,6 +372,40 @@ impl Message {
     }
 }
 
+/// the platform message ids a tab has already drawn, so one message is one row
+/// however many times it is handed over: the server replays a joined room's
+/// backlog on every (re)subscribe, history overlaps the live tail, a second tab
+/// joins the same room. keyed by platform + channel + id, never by text (two
+/// people saying the same words are two lines). bounded: the oldest id is
+/// forgotten first, and it reaches back past what the ring itself still holds.
+#[derive(Clone, Debug, Default)]
+struct Shown {
+    ids: HashSet<(Platform, String)>,
+    order: VecDeque<(Platform, String)>,
+    cap: usize,
+}
+
+impl Shown {
+    /// true the first time `(platform, channel, id)` is seen, false after.
+    fn first(&mut self, platform: Platform, channel: &str, id: &str) -> bool {
+        let key = (
+            platform,
+            format!("{}\u{1}{id}", channel.to_ascii_lowercase()),
+        );
+        if self.ids.contains(&key) {
+            return false;
+        }
+        if self.order.len() >= self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.ids.remove(&old);
+            }
+        }
+        self.ids.insert(key.clone());
+        self.order.push_back(key);
+        true
+    }
+}
+
 /// live state for a single channel. bounded ring buffer — a raid can flood
 /// forever and we never grow past `cap` (mele is 8GB; resource-conscious).
 /// heat is a decaying counter driven by message arrivals.
@@ -406,6 +440,8 @@ pub struct Channel {
     /// arrived since", unaffected by the ring evicting old ones.
     pub seq: u64,
     cap: usize,
+    /// ids of the lines already drawn here — see [`Shown`].
+    shown: Shown,
 }
 
 /// what a tab has waiting, for its color: nothing, chat, a stream event, or a ping.
@@ -436,6 +472,10 @@ impl Channel {
             pin_dismissed: None,
             seq: 0,
             cap,
+            shown: Shown {
+                cap: cap.saturating_mul(4),
+                ..Shown::default()
+            },
         }
     }
 
@@ -595,20 +635,27 @@ impl Channel {
         self.last_ms = now_ms;
     }
 
-    /// seed scrollback with archived history: prepended oldest-outward, deduped
-    /// against lines already buffered (the live feed may overlap the archive's
-    /// tail), heat untouched — history is cold by definition. `msgs` is
-    /// chronological (oldest first); the cap still bounds the buffer.
-    pub fn backfill(&mut self, msgs: Vec<Message>) {
+    /// is this the first time this tab sees the platform message `id` of
+    /// `channel`? false = it was already drawn: drop the copy. a line with no id
+    /// can't be told apart from a repeat, so it always counts as new.
+    pub fn first_sight(&mut self, platform: Platform, channel: &str, id: Option<&str>) -> bool {
+        match id.filter(|i| !i.is_empty()) {
+            Some(id) => self.shown.first(platform, channel, id),
+            None => true,
+        }
+    }
+
+    /// seed scrollback with archived history of `channel`: prepended
+    /// oldest-outward, skipping any message id already drawn (the live feed may
+    /// overlap the archive's tail), heat untouched — history is cold by
+    /// definition. `msgs` is chronological (oldest first); the cap still bounds
+    /// the buffer.
+    pub fn backfill(&mut self, channel: &str, msgs: Vec<Message>) {
         for m in msgs.into_iter().rev() {
             if self.messages.len() == self.cap {
                 break;
             }
-            if self
-                .messages
-                .iter()
-                .any(|e| e.user == m.user && e.text == m.text)
-            {
+            if !self.first_sight(m.platform, channel, m.id.as_deref()) {
                 continue;
             }
             self.messages.push_front(m);
@@ -762,7 +809,7 @@ mod channel_tests {
     #[test]
     fn backfill_is_not_unread() {
         let mut c = Channel::new("x", Platform::Twitch, 8);
-        c.backfill(vec![msg("a", "old")]);
+        c.backfill("x", vec![msg("a", "old")]);
         assert_eq!(c.unread(), Unread::None);
     }
 
@@ -812,24 +859,118 @@ mod channel_tests {
         assert_eq!(texts(&ch), ["mid", "c", "new"]);
     }
 
+    fn with_id(user: &str, text: &str, id: &str) -> Message {
+        Message {
+            id: Some(id.into()),
+            ..msg(user, text)
+        }
+    }
+
+    /// what the feed does with a line: drop a seen id, else record it.
+    fn live(ch: &mut Channel, m: Message) -> bool {
+        let fresh = ch.first_sight(m.platform, "c", m.id.as_deref());
+        if fresh {
+            ch.record(m, 1);
+        }
+        fresh
+    }
+
     #[test]
-    fn backfill_prepends_in_order_and_dedupes_against_live() {
+    fn backfill_prepends_in_order_and_dedupes_against_live_by_id() {
         let mut ch = Channel::new("c", Platform::Twitch, 10);
-        ch.record(msg("live", "already here"), 1);
-        ch.backfill(vec![
-            msg("a", "one"),
-            msg("live", "already here"), // overlap with the live tail
-            msg("b", "two"),
-        ]);
+        assert!(live(&mut ch, with_id("live", "already here", "L")));
+        ch.backfill(
+            "c",
+            vec![
+                with_id("a", "one", "1"),
+                with_id("live", "already here", "L"), // overlap with the live tail
+                with_id("b", "two", "2"),
+            ],
+        );
         let got: Vec<&str> = ch.messages.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(got, vec!["one", "two", "already here"]);
+    }
+
+    #[test]
+    fn backfill_never_dedupes_by_text() {
+        // the same words from the same person, twice, are two lines; only an id
+        // says "that is the one already drawn". rows with no id are never dropped.
+        let mut ch = Channel::new("c", Platform::Twitch, 10);
+        assert!(live(&mut ch, with_id("amy", "LUL", "L1")));
+        ch.backfill(
+            "c",
+            vec![
+                with_id("amy", "LUL", "H1"),
+                with_id("amy", "LUL", "H2"),
+                msg("amy", "LUL"),
+                msg("amy", "LUL"),
+            ],
+        );
+        assert_eq!(ch.messages.len(), 5);
+    }
+
+    #[test]
+    fn history_is_remembered_so_the_live_copy_is_dropped() {
+        let mut ch = Channel::new("c", Platform::Twitch, 10);
+        ch.backfill("c", vec![with_id("a", "one", "1")]);
+        assert!(
+            !live(&mut ch, with_id("a", "one", "1")),
+            "history, then live"
+        );
+        assert_eq!(ch.messages.len(), 1);
+    }
+
+    #[test]
+    fn first_sight_is_once_per_platform_channel_and_id() {
+        let mut c = Channel::new("x", Platform::Twitch, 8);
+        assert!(c.first_sight(Platform::Twitch, "x", Some("a")));
+        assert!(!c.first_sight(Platform::Twitch, "x", Some("a")), "a replay");
+        assert!(
+            !c.first_sight(Platform::Twitch, "X", Some("a")),
+            "case is not a channel"
+        );
+        assert!(
+            c.first_sight(Platform::Twitch, "y", Some("a")),
+            "shared chat: another channel's copy"
+        );
+        assert!(
+            c.first_sight(Platform::Kick, "x", Some("a")),
+            "another platform"
+        );
+        assert!(c.first_sight(Platform::Twitch, "x", Some("b")));
+        // no id (or an empty one) can't be told from a repeat: always new
+        assert!(c.first_sight(Platform::Twitch, "x", None));
+        assert!(c.first_sight(Platform::Twitch, "x", None));
+        assert!(c.first_sight(Platform::Twitch, "x", Some("")));
+        assert!(c.first_sight(Platform::Twitch, "x", Some("")));
+    }
+
+    #[test]
+    fn the_id_memory_outlives_the_ring_and_forgets_oldest_first() {
+        // a 2-line ring remembers 8 ids: a replay of a line that already scrolled
+        // out of the ring is still a repeat, and the memory itself stays bounded
+        let mut ch = Channel::new("c", Platform::Twitch, 2);
+        for i in 0..20 {
+            assert!(live(&mut ch, with_id("u", "x", &i.to_string())));
+        }
+        assert_eq!(ch.messages.len(), 2);
+        assert!(!live(&mut ch, with_id("u", "x", "19")), "in the ring");
+        assert!(
+            !live(&mut ch, with_id("u", "x", "14")),
+            "out of the ring, still remembered"
+        );
+        assert!(
+            live(&mut ch, with_id("u", "x", "0")),
+            "forgotten: the memory is bounded"
+        );
+        assert!(ch.shown.ids.len() <= 8 && ch.shown.order.len() <= 8);
     }
 
     #[test]
     fn backfill_respects_the_cap_keeping_the_newest_history() {
         let mut ch = Channel::new("c", Platform::Twitch, 3);
         ch.record(msg("live", "now"), 1);
-        ch.backfill((0..5).map(|i| msg("u", &format!("h{i}"))).collect());
+        ch.backfill("c", (0..5).map(|i| msg("u", &format!("h{i}"))).collect());
         assert_eq!(ch.messages.len(), 3);
         let got: Vec<&str> = ch.messages.iter().map(|m| m.text.as_str()).collect();
         // newest history survives, oldest is dropped
@@ -855,7 +996,7 @@ mod channel_tests {
     #[test]
     fn backfill_leaves_heat_alone() {
         let mut ch = Channel::new("c", Platform::Kick, 10);
-        ch.backfill(vec![msg("a", "x")]);
+        ch.backfill("c", vec![msg("a", "x")]);
         assert_eq!(ch.heat, 0.0);
         assert_eq!(ch.messages[0].heat, 0.0);
     }

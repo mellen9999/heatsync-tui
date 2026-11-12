@@ -427,6 +427,20 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_send_is_released_once_however_often_the_welcome_is_seen() {
+        let mut g = Gate::default();
+        assert_eq!(g.submit(s("a", "1")), None);
+        assert_eq!(g.open(), vec![s("a", "1")]);
+        assert_eq!(
+            g.open(),
+            vec![],
+            "a repeated welcome has nothing left to flush"
+        );
+        g.close(); // reconnect
+        assert_eq!(g.open(), vec![], "and neither does the next connection");
+    }
+
+    #[test]
     fn gate_keeps_queue_across_a_reconnect_and_fails_loud() {
         let mut g = Gate::default();
         g.open();

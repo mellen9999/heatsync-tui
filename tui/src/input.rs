@@ -1108,3 +1108,116 @@ mod alt_tests {
         assert_eq!(alt_tab_index(&plain), None);
     }
 }
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+    use crate::hsauth::testkit::{client, Fake};
+    use serde_json::json;
+    use std::sync::mpsc::{channel, Receiver};
+    use std::time::{Duration, Instant};
+
+    /// a live-mode app: tab 0 twitch xqc, 1 kick kripp, 2 youtube vid1, with the
+    /// relay's outbound queue in hand to count what leaves.
+    fn app() -> (App, Receiver<net::Outbound>) {
+        let mut a = crate::special::tests::app();
+        a.feed = Feed::Live {
+            rx: channel().1,
+            start: Instant::now(),
+            connected: true,
+        };
+        a.channels
+            .push(heatsync_core::Channel::new("vid1", Platform::Youtube, 50));
+        a.emotes.push(heatsync_core::emote::EmoteSet::new());
+        let (tx, rx) = channel();
+        a.out = Some(tx);
+        (a, rx)
+    }
+
+    /// the user types `text` and hits enter `n` times (a held or double-tapped key).
+    fn enter(a: &mut App, text: &str, n: usize) {
+        a.line.replace_range(0, 0, text);
+        for _ in 0..n {
+            send_focused(a);
+        }
+    }
+
+    fn chats(rx: &Receiver<net::Outbound>) -> Vec<(Platform, String, String)> {
+        rx.try_iter()
+            .filter_map(|o| match o {
+                net::Outbound::Chat {
+                    platform,
+                    channel,
+                    text,
+                } => Some((platform, channel, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_relay_send_goes_out_once_however_many_times_enter_lands() {
+        let (mut a, rx) = app();
+        a.focus = 1; // kick
+        enter(&mut a, "hello", 3);
+        assert_eq!(
+            chats(&rx),
+            [(Platform::Kick, "kripp".to_string(), "hello".to_string())]
+        );
+        assert!(a.line.is_empty(), "the line went; nothing left to resend");
+        a.focus = 2; // youtube
+        enter(&mut a, "yo", 2);
+        assert_eq!(
+            chats(&rx),
+            [(Platform::Youtube, "vid1".to_string(), "yo".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_twitch_and_a_direct_kick_send_go_out_once() {
+        let (mut a, _rx) = app();
+        let (ttx, trx) = channel();
+        a.twitch_tx = Some(ttx);
+        a.focus = 0;
+        enter(&mut a, "hi twitch", 2);
+        assert_eq!(trx.try_iter().count(), 1);
+        let (ktx, krx) = channel();
+        a.kick_tx = Some(ktx);
+        a.focus = 1;
+        enter(&mut a, "hi kick", 2);
+        assert_eq!(krx.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn a_merged_tab_sends_to_its_primary_platform_only() {
+        let (mut a, rx) = app();
+        let (ttx, trx) = channel();
+        a.twitch_tx = Some(ttx);
+        a.channels[0].extra = vec![(Platform::Kick, "xqc".into())];
+        a.focus = 0;
+        enter(&mut a, "one line", 1);
+        assert_eq!(trx.try_iter().count(), 1);
+        assert!(
+            chats(&rx).is_empty(),
+            "no second copy to the merged kick leg"
+        );
+    }
+
+    #[test]
+    fn a_heatsync_send_is_one_request_and_no_local_echo_waits_for_the_platforms() {
+        let (mut a, _rx) = app();
+        let f = Fake::new(vec![Ok((200, json!({}))), Ok((200, json!({})))]);
+        a.hs = Some(client(&f));
+        a.focus = 1;
+        let rows = a.channels[1].messages.len();
+        enter(&mut a, "via heatsync", 2);
+        let note = a.hs_notes.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(note.sent);
+        assert_eq!(f.seen.lock().unwrap().len(), 1);
+        assert_eq!(
+            a.channels[1].messages.len(),
+            rows,
+            "the line is drawn when the platform echoes it, not by us as well"
+        );
+    }
+}

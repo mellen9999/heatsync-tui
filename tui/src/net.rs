@@ -119,7 +119,7 @@ pub enum ChatEvent {
 }
 
 /// hand one parsed frame upward. false = the receiver is gone.
-fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
+pub(crate) fn forward(ev: Event, tx: &Sender<ChatEvent>) -> bool {
     match ev {
         Event::Chat(l) => tx.send(ChatEvent::Line(l)).is_ok(),
         // a went-live never replays from a backfill (it was shown when it happened).
