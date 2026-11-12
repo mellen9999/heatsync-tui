@@ -2,6 +2,27 @@
 
 what changed in each release, newest first. the release workflow copies the section for a tag into the github release notes, so every `## x.y.z` heading needs a matching tag.
 
+## 0.4.0 - 2026-11-12
+
+`heatsync-core` moves to 0.4.0 with it (its unused vi module is gone).
+
+### language
+
+- speaks the same 34 languages as the browser extension. it follows your system language, english when yours isn't there. `heatsync-tui lang` shows the list, `heatsync-tui lang de` picks one, `auto` goes back
+- long text in wide scripts (chinese, japanese, korean) is cut by its width on screen, not its letter count
+
+### chat
+
+- one platform message is one row: a reconnect no longer draws a kick or youtube room's recent lines (and their pings) a second time, and a line from the history never repeats live. a real second gift with the same words still shows
+- a chatter typing "Login authentication failed" (or twitch's welcome words) no longer ends your sends. only twitch's own lines count
+- a broken or hostile emote image shows as its name instead of closing the app
+- `heatsync-tui hot` says "nothing hot" when nothing is, instead of listing the newest posts with a heat of 0
+- `/block` files a block the way the extension, desktop and chatterino do, so a block made in one hides the emote in all of them. blocks made by older versions still work
+
+### smaller
+
+- 21 fewer crates and no jpeg decoder (emotes are gif, webp and png). the linux framebuffer is drawn with two kernel calls instead of two crates
+
 ## 0.3.1 - 2026-11-09
 
 ### chat
