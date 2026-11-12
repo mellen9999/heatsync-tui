@@ -2,6 +2,14 @@
 
 what changed in each release, newest first. the release workflow copies the section for a tag into the github release notes, so every `## x.y.z` heading needs a matching tag.
 
+## 0.4.1 - 2026-11-12
+
+`heatsync-core` moves to 0.4.1 with it.
+
+### chat
+
+- kick bans, timeouts and deleted lines now show, the way twitch's do: the line is struck through and a ban or timeout gets its own row. before, kick removals never reached the terminal
+
 ## 0.4.0 - 2026-11-12
 
 `heatsync-core` moves to 0.4.0 with it (its unused vi module is gone).
