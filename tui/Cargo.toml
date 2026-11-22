@@ -33,7 +33,7 @@ image = { version = "0.25", default-features = false, features = ["gif", "webp",
 color_quant = "1.1"
 # live relay (blocking WS thread) + http (emote sets, corpus, image bytes). both
 # rustls, no async runtime, no native-tls C dep — keeps the .exe clean.
-tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "2", default-features = false, features = ["tls", "json", "gzip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

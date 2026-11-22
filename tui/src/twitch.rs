@@ -226,7 +226,7 @@ fn session(
         format!("PASS oauth:{oauth}"),
         format!("NICK {}", user.to_lowercase()),
     ] {
-        if ws.send(WsMsg::Text(format!("{cmd}\r\n"))).is_err() {
+        if ws.send(WsMsg::Text(format!("{cmd}\r\n").into())).is_err() {
             return End::Dropped;
         }
     }
@@ -318,11 +318,15 @@ fn post(
     reply: Option<&str>,
 ) -> Result<(), ()> {
     let chan = channel.to_lowercase();
-    if joined.insert(chan.clone()) && ws.send(WsMsg::Text(format!("JOIN #{chan}\r\n"))).is_err() {
+    if joined.insert(chan.clone())
+        && ws
+            .send(WsMsg::Text(format!("JOIN #{chan}\r\n").into()))
+            .is_err()
+    {
         return Err(());
     }
     let wire = heatsync_core::dupe::bypass(text, last_wire.get(&chan).map(String::as_str));
-    ws.send(WsMsg::Text(privmsg(&chan, &wire, reply)))
+    ws.send(WsMsg::Text(privmsg(&chan, &wire, reply).into()))
         .map_err(|_| ())?;
     last_wire.insert(chan, wire);
     Ok(())

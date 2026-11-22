@@ -205,7 +205,7 @@ fn session(
     let cli = token.as_deref().is_some_and(|t| t.starts_with("hscli_"));
     // authenticate first (required before any send is accepted).
     if let Some(t) = token {
-        if ws.send(WsMsg::Text(proto::authenticate(t))).is_err() {
+        if ws.send(WsMsg::Text(proto::authenticate(t).into())).is_err() {
             return SessionEnd::Dropped;
         }
     }
@@ -275,7 +275,7 @@ fn session(
                 } => {
                     *req += 1;
                     if ws
-                        .send(WsMsg::Text(proto::send_kick(&channel, &text, *req)))
+                        .send(WsMsg::Text(proto::send_kick(&channel, &text, *req).into()))
                         .is_err()
                     {
                         return SessionEnd::Dropped;
@@ -289,7 +289,9 @@ fn session(
                 } => {
                     *req += 1;
                     if ws
-                        .send(WsMsg::Text(proto::send_youtube(&channel, &text, *req)))
+                        .send(WsMsg::Text(
+                            proto::send_youtube(&channel, &text, *req).into(),
+                        ))
                         .is_err()
                     {
                         return SessionEnd::Dropped;
@@ -325,7 +327,7 @@ fn session(
 
         if last_frame.elapsed() >= FRAME_GAP {
             if let Some(f) = queue.pop_front() {
-                if ws.send(WsMsg::Text(f)).is_err() {
+                if ws.send(WsMsg::Text(f.into())).is_err() {
                     return SessionEnd::Dropped;
                 }
                 last_frame = Instant::now();
@@ -333,7 +335,7 @@ fn session(
         }
 
         if last_hb.elapsed() >= HEARTBEAT {
-            if ws.send(WsMsg::Text(proto::heartbeat())).is_err() {
+            if ws.send(WsMsg::Text(proto::heartbeat().into())).is_err() {
                 return SessionEnd::Dropped;
             }
             last_hb = Instant::now();
