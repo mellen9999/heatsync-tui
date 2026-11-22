@@ -22,9 +22,10 @@ pub fn spawn(token: String) -> Sender<Send> {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(12))
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(12)))
         .build()
+        .into()
 }
 
 fn run(token: String, rx: Receiver<Send>) {
@@ -49,10 +50,11 @@ fn resolve(token: &str, slug: &str) -> Option<u64> {
     let url = format!("{API}/channels?slug={slug}");
     let v: Value = agent()
         .get(&url)
-        .set("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", &format!("Bearer {token}"))
         .call()
         .ok()?
-        .into_json()
+        .body_mut()
+        .read_json()
         .ok()?;
     let d = v.get("data")?;
     let obj = if d.is_array() { d.get(0)? } else { d };
@@ -64,7 +66,7 @@ fn resolve(token: &str, slug: &str) -> Option<u64> {
 fn post(token: &str, id: u64, text: &str, reply: Option<&str>) -> Result<(), Box<ureq::Error>> {
     agent()
         .post(&format!("{API}/chat"))
-        .set("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", &format!("Bearer {token}"))
         .send_json(body(id, text, reply))
         .map_err(Box::new)?;
     Ok(())

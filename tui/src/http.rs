@@ -26,13 +26,14 @@ fn platform_q(p: Platform) -> &'static str {
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(12))
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(12)))
             // the archive search endpoint gates non-browser UAs (anti-scrape); we're
             // first-party, so identify as heatsync-tui behind a Mozilla token so the
             // guard passes. proper fix later: server-side allowlist this UA.
             .user_agent("Mozilla/5.0 (heatsync-tui/0.1; +https://heatsync.org)")
             .build()
+            .into()
     })
 }
 
@@ -44,10 +45,11 @@ pub fn pin(platform: Platform, channel: &str) -> Option<heatsync_core::Pin> {
     let v: serde_json::Value = agent()
         .get(&format!("{BASE}/api/pin"))
         .query("platform", platform_q(platform))
-        .query("channel", &channel.to_lowercase())
+        .query("channel", channel.to_lowercase())
         .call()
         .ok()?
-        .into_json()
+        .body_mut()
+        .read_json()
         .ok()?;
     heatsync_core::proto::pin_from(v.get("pin")?)
 }
@@ -59,7 +61,8 @@ pub fn global_emotes() -> Option<EmoteSet> {
         .get(&format!("{BASE}/api/emotes"))
         .call()
         .ok()?
-        .into_json()
+        .body_mut()
+        .read_json()
         .ok()?;
     Some(EmoteSet::from_global_list(resp.emotes))
 }
@@ -68,13 +71,13 @@ pub fn global_emotes() -> Option<EmoteSet> {
 /// and picked name colors. `None` on any failure so the caller retries.
 pub fn paints(ids: &[String]) -> Option<serde_json::Value> {
     let url = format!("{BASE}/api/paints?ids={}", ids.join(","));
-    agent().get(&url).call().ok()?.into_json().ok()
+    agent().get(&url).call().ok()?.body_mut().read_json().ok()
 }
 
 /// `/api/cosmetics/batch`: 7tv paints for twitch ids and `kick_<id>`s (<=50).
 pub fn cosmetics(ids: &[String]) -> Option<serde_json::Value> {
     let url = format!("{BASE}/api/cosmetics/batch?ids={}", ids.join(","));
-    agent().get(&url).call().ok()?.into_json().ok()
+    agent().get(&url).call().ok()?.body_mut().read_json().ok()
 }
 
 /// channel emote set (the server sends each name's winner last: ffz > 7tv > bttv)
@@ -100,7 +103,7 @@ fn channel_emotes(channel: &str, platform: Platform) -> Option<Vec<heatsync_core
         "{BASE}/api/channel/{channel}/emotes?platform={}",
         platform_q(platform)
     );
-    let resp: EmoteSetResponse = agent().get(&url).call().ok()?.into_json().ok()?;
+    let resp: EmoteSetResponse = agent().get(&url).call().ok()?.body_mut().read_json().ok()?;
     Some(resp.emotes)
 }
 
@@ -123,7 +126,7 @@ fn owner_emotes(channel: &str, platform: Platform) -> Vec<heatsync_core::emote::
         .get(&url)
         .call()
         .ok()
-        .and_then(|r| r.into_json().ok())
+        .and_then(|mut r| r.body_mut().read_json().ok())
     {
         Some(v) => v,
         None => return Vec::new(),
@@ -138,6 +141,7 @@ pub fn image_bytes(url: &str) -> Option<Vec<u8>> {
         .get(url)
         .call()
         .ok()?
+        .into_body()
         .into_reader()
         .take(MAX_IMAGE_BYTES)
         .read_to_end(&mut buf)
@@ -183,7 +187,7 @@ pub fn search(q: &str, channel: Option<&str>, limit: u32) -> Option<ArchivePage>
     if let Some(c) = channel {
         url.push_str(&format!("&channel={}", urlencode(c)));
     }
-    agent().get(&url).call().ok()?.into_json().ok()
+    agent().get(&url).call().ok()?.body_mut().read_json().ok()
 }
 
 /// the site feed's latest `want` rows, oldest first — the feed tab's backlog.
@@ -195,7 +199,7 @@ pub fn feed_recent(want: usize) -> Vec<heatsync_core::proto::SpecialLine> {
         .get(&url)
         .call()
         .ok()
-        .and_then(|r| r.into_json::<serde_json::Value>().ok())
+        .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
     else {
         return Vec::new();
     };
@@ -217,7 +221,7 @@ pub fn feed_recent(want: usize) -> Vec<heatsync_core::proto::SpecialLine> {
 pub fn channel_log(channel: &str, from: &str, to: &str, limit: u32) -> Option<ArchivePage> {
     let url =
         format!("{BASE}/api/archive/channel/{channel}/messages?from={from}&to={to}&limit={limit}");
-    agent().get(&url).call().ok()?.into_json().ok()
+    agent().get(&url).call().ok()?.body_mut().read_json().ok()
 }
 
 /// the last messages a channel saw, oldest first — scrollback seed for a fresh
@@ -308,11 +312,14 @@ pub fn twitch_live(login: &str) -> Option<(u64, String)> {
     });
     let resp = agent()
         .post(GQL)
-        .set("Client-Id", GQL_CLIENT_ID)
-        .timeout(Duration::from_secs(3))
+        .header("Client-Id", GQL_CLIENT_ID)
+        .config()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .build()
         .send_json(body)
         .ok()?;
-    let v: serde_json::Value = serde_json::from_reader(resp.into_reader().take(MAX_GQL)).ok()?;
+    let v: serde_json::Value =
+        serde_json::from_reader(resp.into_body().into_reader().take(MAX_GQL)).ok()?;
     parse_live(&v)
 }
 
@@ -394,7 +401,7 @@ impl HotPage {
 
 pub fn hot(limit: u32, hours: u32) -> Option<HotPage> {
     let url = format!("{BASE}/api/messages/hot?limit={limit}&hours={hours}");
-    agent().get(&url).call().ok()?.into_json().ok()
+    agent().get(&url).call().ok()?.body_mut().read_json().ok()
 }
 
 // ---- live lists (the channel picker) ---------------------------------------
@@ -427,7 +434,7 @@ struct LivePage {
 /// `/api/live/top` — the busiest live streams across twitch/kick/youtube.
 pub fn live_top(limit: u32) -> Option<Vec<LiveStream>> {
     let url = format!("{BASE}/api/live/top?limit={limit}&sort=viewers");
-    let page: LivePage = agent().get(&url).call().ok()?.into_json().ok()?;
+    let page: LivePage = agent().get(&url).call().ok()?.body_mut().read_json().ok()?;
     Some(page.streams)
 }
 
@@ -450,7 +457,7 @@ pub fn live_status(twitch: &[String], kick: &[String]) -> Option<(Vec<String>, V
         urlencode(&twitch.join(",")),
         urlencode(&kick.join(","))
     );
-    let st: LiveStatus = agent().get(&url).call().ok()?.into_json().ok()?;
+    let st: LiveStatus = agent().get(&url).call().ok()?.body_mut().read_json().ok()?;
     Some((st.live, st.kick_live))
 }
 
@@ -498,10 +505,11 @@ pub struct NcmecPage {
 fn admin_get<T: for<'de> Deserialize<'de>>(path: &str, token: &str) -> Option<T> {
     agent()
         .get(&format!("{BASE}{path}"))
-        .set("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", &format!("Bearer {token}"))
         .call()
         .ok()?
-        .into_json()
+        .body_mut()
+        .read_json()
         .ok()
 }
 
@@ -515,9 +523,9 @@ pub fn admin_token_rejected(base: &str, token: &str) -> bool {
     matches!(
         agent()
             .get(&format!("{base}/api/admin/health"))
-            .set("Authorization", &format!("Bearer {token}"))
+            .header("Authorization", &format!("Bearer {token}"))
             .call(),
-        Err(ureq::Error::Status(401 | 403, _))
+        Err(ureq::Error::StatusCode(401 | 403))
     )
 }
 

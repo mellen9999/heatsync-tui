@@ -194,26 +194,34 @@ impl Transport for UreqTransport {
     ) -> Result<(u16, Value), String> {
         // no redirects: an api answer that bounces elsewhere is wrong, and the
         // token must never follow it to another host.
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(15))
-            .redirects(0)
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(15)))
+            .max_redirects(0)
+            .max_redirects_will_error(false)
+            .http_status_as_error(false)
             .user_agent("Mozilla/5.0 (heatsync-tui/0.1; +https://heatsync.org)")
-            .build();
-        let mut req = agent.request(method, url).set("Accept", "application/json");
+            .build()
+            .into();
+        let mut req = ureq::http::Request::builder()
+            .method(method)
+            .uri(url)
+            .header("Accept", "application/json");
         if let Some(t) = bearer {
-            req = req.set("Authorization", &format!("Bearer {t}"));
+            req = req.header("Authorization", &format!("Bearer {t}"));
         }
         let res = match body {
-            Some(b) => req.send_json(b.clone()),
-            None => req.call(),
+            Some(b) => req
+                .header("Content-Type", "application/json")
+                .body(b.to_string())
+                .map(|r| agent.run(r)),
+            None => req.body(()).map(|r| agent.run(r)),
         };
         match res {
-            Ok(r) => {
-                let s = r.status();
-                Ok((s, r.into_json().unwrap_or(Value::Null)))
+            Ok(Ok(mut r)) => {
+                let s = r.status().as_u16();
+                Ok((s, r.body_mut().read_json().unwrap_or(Value::Null)))
             }
-            Err(ureq::Error::Status(c, r)) => Ok((c, r.into_json().unwrap_or(Value::Null))),
-            Err(_) => Err(tr("hsauth.err_offline").into()),
+            Ok(Err(_)) | Err(_) => Err(tr("hsauth.err_offline").into()),
         }
     }
 }
