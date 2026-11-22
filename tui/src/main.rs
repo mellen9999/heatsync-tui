@@ -13,6 +13,7 @@ mod config;
 mod draw;
 mod drawlog;
 mod emote;
+mod emotelist;
 mod feed;
 mod fill;
 mod followlog;
@@ -21,6 +22,7 @@ mod hsauth;
 mod http;
 mod input;
 mod intr;
+mod inventory;
 mod key;
 mod kick;
 mod lang;
@@ -162,6 +164,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             hist_tx,
             hist_rx,
             picker: None,
+            emote_list: emotelist::State::new(),
             pick_cache: picker::Cache(None),
             streams: StreamEvents::new(),
             seen: Default::default(),
@@ -355,6 +358,7 @@ fn build_live(
         hist_tx,
         hist_rx,
         picker: None,
+        emote_list: emotelist::State::new(),
         pick_cache: picker::Cache(None),
         streams: StreamEvents::new(),
         seen: Default::default(),
@@ -491,6 +495,7 @@ fn run(terminal: &mut Terminal<held::HeldBackend>, mut app: App) -> io::Result<(
         drain_twitch(&mut app);
         drain_hs(&mut app);
         drain_picker(&mut app);
+        app.emote_list.drain();
         // the focused tab is on screen — whatever it holds is now seen.
         if let Some(ch) = app.channels.get_mut(app.focus) {
             ch.mark_seen();

@@ -67,6 +67,7 @@ fn handle_key_inner(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             }
         }
         InputMode::Pick => pick_key(app, k),
+        InputMode::Emotes => emotes_key(app, k),
         InputMode::Cursor => return cursor_key(app, k),
         // rover-style channel manager: j/k move, enter open, a add, x leave,
         // e edit slots, K/J reorder, esc back.
@@ -266,6 +267,30 @@ fn next_tab(app: &mut App) {
 fn prev_tab(app: &mut App) {
     if app.focus > 0 {
         app.focus -= 1;
+    }
+}
+
+/// `/emotes`: the list opens at once (loading) and fills when the fetch lands.
+/// signed out, it says so instead of opening an empty box.
+fn open_emotes(app: &mut App) {
+    let Some(c) = crate::inventory::client(app) else {
+        app.status = Some(tr("input.talk_no_login").into());
+        return;
+    };
+    app.status = None;
+    app.mode = InputMode::Emotes;
+    app.emote_list.start(move || c.emotes());
+}
+
+fn emotes_key(app: &mut App, k: crossterm::event::KeyEvent) {
+    let half = (app.view_h.get() as usize / 2).max(1);
+    let Some(l) = &mut app.emote_list.open else {
+        app.mode = InputMode::Normal;
+        return;
+    };
+    if let crate::emotelist::Action::Close = l.key(k, half) {
+        app.emote_list.open = None;
+        app.mode = InputMode::Normal;
     }
 }
 
@@ -745,6 +770,16 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
         slash::Cmd::Blocked => {
             app.line.accept();
             crate::blocks::list_cmd(app);
+            return Flow::Continue;
+        }
+        slash::Cmd::Emote(op) => {
+            app.line.accept();
+            crate::inventory::emote_cmd(app, op);
+            return Flow::Continue;
+        }
+        slash::Cmd::Emotes => {
+            app.line.accept();
+            open_emotes(app);
             return Flow::Continue;
         }
         slash::Cmd::Share => {

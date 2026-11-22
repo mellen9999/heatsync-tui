@@ -57,6 +57,12 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
         return;
     }
 
+    if let (InputMode::Emotes, Some(l)) = (app.mode, &app.emote_list.open) {
+        f.render_widget(Paragraph::new(l.lines(main.width, main.height)), main);
+        draw_footer(f, footer, app, app.channels.len());
+        return;
+    }
+
     if matches!(
         app.mode,
         InputMode::Manage | InputMode::SlotPick | InputMode::SlotEdit(_)
@@ -557,6 +563,21 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
             Span::styled("\u{2588}", palette::TEXT),
             Span::styled(format!("   {}", tr("draw.slot_edit_hint")), palette::DIM),
         ];
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+    if app.mode == InputMode::Emotes {
+        let mut spans = vec![
+            Span::styled(format!(" {} ", tr("draw.mode_emotes")), tag),
+            Span::raw("  "),
+        ];
+        for pair in [
+            hint("jk", "draw.h_move"),
+            hint("/", "draw.h_filter"),
+            hint("esc", "draw.h_close"),
+        ] {
+            spans.extend(pair);
+        }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }

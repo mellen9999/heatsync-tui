@@ -628,6 +628,7 @@ pub(crate) mod tests {
             hist_tx,
             hist_rx,
             picker: None,
+            emote_list: crate::emotelist::State::new(),
             pick_cache: picker::Cache(None),
             pick_tx,
             pick_rx,

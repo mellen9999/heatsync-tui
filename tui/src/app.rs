@@ -39,6 +39,8 @@ pub(crate) enum InputMode {
     Pick,
     /// the message cursor (`v`): move through scrollback, reply, yank, delete.
     Cursor,
+    /// `/emotes`: your own heatsync emotes, a scrollable list.
+    Emotes,
 }
 
 /// a fetched pin for (platform, channel); `None` = the channel has none.
@@ -97,6 +99,8 @@ pub(crate) struct App {
     pub(crate) pick_tx: Sender<picker::Fetched>,
     pub(crate) pick_rx: Receiver<picker::Fetched>,
     pub(crate) pick_inflight: bool,
+    /// `/emotes`: the open list and its fetch.
+    pub(crate) emote_list: crate::emotelist::State,
     /// name paints + heatsync name colors, by sender id.
     pub(crate) paints: Paints,
     /// pins fetched on join arrive here from their own threads.
