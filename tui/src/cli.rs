@@ -575,6 +575,8 @@ pub fn render_test(args: &[String]) -> std::io::Result<()> {
     // the sixel payload churns between consecutive frames. that churn IS the
     // flashing — a shared palette should leave only real motion changing.
     let (cw, ch) = (8u16, 16u16);
+    // from_fontsize is deprecated but the only stdin-free constructor with a known cell size
+    #[allow(deprecated)]
     let mut picker = ratatui_image::picker::Picker::from_fontsize((cw, ch));
     picker.set_protocol_type(ProtocolType::Sixel);
     let block_h = crate::emote::render::EMOTE_H as u32 * ch as u32;

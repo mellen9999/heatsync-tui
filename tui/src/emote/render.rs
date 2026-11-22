@@ -158,6 +158,8 @@ impl EmoteStore {
         // reaches the outer terminal intact.
         let picker = if std::env::var_os("TMUX").is_some() {
             let (proto, _) = tmux_outer_protocol()?;
+            // deprecated upstream, but the only constructor that never queries stdin (see above)
+            #[allow(deprecated)]
             let mut p = Picker::from_fontsize(cell_pixels()?);
             p.set_protocol_type(proto);
             p
@@ -579,6 +581,18 @@ enum SixelWrap {
     Native,
 }
 
+/// the plain sixel (`ESC P ... ESC \\`) inside the crate's tmux wrapper. the crate
+/// writes `ESC Ptmux;` + its own escape-doubled cell clear + the sixel + `ESC \\`;
+/// the clear is dropped here (its cursor-down/up clamps at the bottom row and drops
+/// the image a row high), callers put `erase_block` in its place. None for any
+/// other shape, so a future encoder change leaves the sixel untouched.
+fn peel_tmux(data: &str) -> Option<String> {
+    let body = data.strip_prefix("\x1bPtmux;")?.strip_suffix("\x1b\\")?;
+    let at = body.find("\x1b\x1bP")?;
+    let sixel = format!("\x1b{}", &body[at + 2..]);
+    (sixel.starts_with("\x1bP") && sixel.ends_with("\x1b\\")).then_some(sixel)
+}
+
 /// peel the crate's passthrough wrapper off a sixel so tmux sees the plain
 /// sixel and keeps it in its own grid (redrawn with the pane, never torn by a
 /// repaint). cleared cells first, same as the passthrough path, so a loading
@@ -587,12 +601,7 @@ fn unwrap_tmux_passthrough(proto: &mut Protocol) {
     let Protocol::Sixel(s) = proto else {
         return;
     };
-    let Some(sixel) = s
-        .data
-        .strip_prefix("\x1bPtmux;\x1b\x1b")
-        .and_then(|d| d.strip_suffix("\x1b\\"))
-        .filter(|d| d.starts_with("\x1bP") && d.ends_with("\x1b\\"))
-    else {
+    let Some(sixel) = peel_tmux(&s.data) else {
         return;
     };
     s.data = format!("{}{sixel}", erase_block(s.area.width, s.area.height));
@@ -633,11 +642,7 @@ fn fix_tmux_passthrough(proto: &mut Protocol) {
     if !s.is_tmux {
         return;
     }
-    let Some(sixel) = s
-        .data
-        .strip_prefix("\x1bPtmux;\x1b\x1b")
-        .and_then(|d| d.strip_suffix("\x1b\\"))
-    else {
+    let Some(sixel) = peel_tmux(&s.data) else {
         return;
     };
     s.data = format!(
@@ -1171,6 +1176,11 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
 
+    /// a crate-encoded sixel without the cell clear it prefixes.
+    fn bare_sixel(data: &str) -> &str {
+        &data[data.find("\x1bP").expect("sixel start")..]
+    }
+
     /// what tmux forwards to the outer terminal: strip the wrapper, halve every
     /// doubled ESC, and stop at the first ESC that ISN'T doubled (that one ends
     /// the passthrough). this is tmux's own rule — the test asserts against it
@@ -1211,7 +1221,10 @@ mod tests {
         };
         assert!(!s.is_tmux);
         assert!(!s.data.contains("tmux;"));
-        assert_eq!(s.data, format!("{}{}", erase_block(2, 2), plain.data));
+        assert_eq!(
+            s.data,
+            format!("{}{}", erase_block(2, 2), bare_sixel(&plain.data))
+        );
     }
 
     /// the whole bug in one assertion: what tmux hands the outer terminal must
@@ -1235,7 +1248,7 @@ mod tests {
         let Protocol::Sixel(s) = &fixed else {
             unreachable!()
         };
-        assert_eq!(tmux_forwards(&s.data), plain.data);
+        assert_eq!(tmux_forwards(&s.data), bare_sixel(&plain.data));
         assert!(s.is_tmux, "still passthrough — tmux stays blind by design");
 
         // and the pixels must land on cells we cleared first, or tmux keeps
