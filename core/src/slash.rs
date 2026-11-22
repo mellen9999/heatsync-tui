@@ -52,6 +52,8 @@ pub enum Cmd {
     Emote(EmoteOp),
     /// `/emotes` — list your own heatsync emotes.
     Emotes,
+    /// `/emotes refresh` — re-read this tab's channel emotes now.
+    EmotesRefresh,
     /// `/sharelayout` (`/sl`, `/share`) — copy the open channels as a heatsync.org/m/ link.
     Share,
     /// `/layout <link>` — open the channels in a share link.
@@ -114,7 +116,11 @@ pub fn parse(input: &str) -> Cmd {
         },
         "blocked" | "blocks" => Cmd::Blocked,
         "emote" => emote_op(arg),
-        "emotes" => Cmd::Emotes,
+        "emotes" => match arg.map(str::to_lowercase).as_deref() {
+            None => Cmd::Emotes,
+            Some("refresh") => Cmd::EmotesRefresh,
+            Some(_) => Cmd::Usage(crate::i18n::tr("slash.usage_emotes")),
+        },
         "sharelayout" | "sl" | "share" => Cmd::Share,
         "layout" => match arg {
             Some(a) => Cmd::Layout(a.to_string()),
@@ -197,6 +203,9 @@ mod tests {
         assert_eq!(parse("/emote undo"), Cmd::Emote(EmoteOp::Undo));
         assert_eq!(parse("/EMOTE Undo"), Cmd::Emote(EmoteOp::Undo));
         assert_eq!(parse("/emotes"), Cmd::Emotes);
+        assert_eq!(parse("/emotes refresh"), Cmd::EmotesRefresh);
+        assert_eq!(parse("/Emotes  REFRESH "), Cmd::EmotesRefresh);
+        assert!(matches!(parse("/emotes now"), Cmd::Usage(_)));
         // each one is explained when typed short or with extras
         for bad in [
             "/emote",

@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use crate::refresh::Outcome;
 use heatsync_core::emote::{EmoteSet, EmoteSetResponse};
 use heatsync_core::Platform;
 use serde::Deserialize;
@@ -98,6 +99,46 @@ pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
     ))
 }
 
+/// re-read a channel's set for the refresh timer: the channel route is asked
+/// conditionally (`If-None-Match`, the server's weak ETag over the whole body),
+/// so an unchanged set costs a header. a failed or odd answer is `Failed`, never
+/// an empty set, so the caller keeps what it has. the owner's own emotes are
+/// re-read only when the channel body changed (their route sends no validator).
+pub fn emote_refresh(channel: &str, platform: Platform, etag: Option<&str>) -> Outcome {
+    let url = format!(
+        "{BASE}/api/channel/{channel}/emotes?platform={}",
+        platform_q(platform)
+    );
+    let mut req = agent().get(&url);
+    if let Some(e) = etag.filter(|e| e.len() <= 80 && e.is_ascii()) {
+        req = req.header("If-None-Match", e);
+    }
+    let mut resp = match req.call() {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(304)) => return Outcome::NotModified,
+        Err(_) => return Outcome::Failed,
+    };
+    if resp.status().as_u16() == 304 {
+        return Outcome::NotModified;
+    }
+    let tag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| v.len() <= 80)
+        .map(str::to_string);
+    let Some(body) = resp.body_mut().read_json::<EmoteSetResponse>().ok() else {
+        return Outcome::Failed;
+    };
+    let Some(owner) = owner_fetch(channel, platform) else {
+        return Outcome::Failed;
+    };
+    Outcome::Changed(
+        EmoteSet::from_list(body.emotes.into_iter().chain(owner)),
+        tag,
+    )
+}
+
 fn channel_emotes(channel: &str, platform: Platform) -> Option<Vec<heatsync_core::emote::Emote>> {
     let url = format!(
         "{BASE}/api/channel/{channel}/emotes?platform={}",
@@ -111,27 +152,25 @@ fn channel_emotes(channel: &str, platform: Platform) -> Option<Vec<heatsync_core
 /// person on each platform, so the route is always told which one. youtube
 /// tabs are named by video id, not a channel: no owner there.
 fn owner_emotes(channel: &str, platform: Platform) -> Vec<heatsync_core::emote::Emote> {
+    owner_fetch(channel, platform).unwrap_or_default()
+}
+
+/// the same, but `None` says the request itself failed (an empty list is a
+/// real answer: the streamer has none).
+fn owner_fetch(channel: &str, platform: Platform) -> Option<Vec<heatsync_core::emote::Emote>> {
     let plain = !channel.is_empty()
         && channel
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.');
     if platform == Platform::Youtube || !plain {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let url = format!(
         "{BASE}/api/emotes/user/{channel}?platform={}",
         platform_q(platform)
     );
-    let v: serde_json::Value = match agent()
-        .get(&url)
-        .call()
-        .ok()
-        .and_then(|mut r| r.body_mut().read_json().ok())
-    {
-        Some(v) => v,
-        None => return Vec::new(),
-    };
-    heatsync_core::emote::owner_list(&v, BASE)
+    let v: serde_json::Value = agent().get(&url).call().ok()?.body_mut().read_json().ok()?;
+    Some(heatsync_core::emote::owner_list(&v, BASE))
 }
 
 /// raw image bytes for an emote, capped so a hostile CDN can't balloon memory.

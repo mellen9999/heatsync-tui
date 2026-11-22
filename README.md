@@ -93,6 +93,7 @@ open with `/mentions`, `/feed`, `/whispers` — they pin left and stay open next
 - `/layout <heatsync.org/m/ link>` load a shared layout · `/sharelayout` (`/sl`) share yours
 - `/block <emote>` hide that exact emote (not every emote with the name) · `/unblock <emote>` · `/blocked` lists them. kept in `~/.config/heatsync/config`; logged in, your heatsync account gets them too, so the extension agrees
 - `/emote add <name>` add the emote `<name>` draws as in this tab to your heatsync emotes · `/emote rm <name>` · `/emote mv <old> <new>` · `/emote undo` takes back the last change · `/emotes` lists yours (`j`/`k` `ctrl-d`/`ctrl-u` `g`/`G` move · `/` filters · `esc` closes). needs a login with the account box ticked: run `heatsync-tui login` again if it says so
+- a tab's emotes re-read from heatsync.org on a reconnect and about every 5 minutes while it's open; `/emotes refresh` does it now. if heatsync can't be reached the old set stays and it says so once
 - `alt+1`..`alt+9` jump to that tab · what you've sent is remembered across restarts (last 200, `~/.config/heatsync/history`; whispers and dms are never saved)
 - `/w <user> <msg>` twitch whisper · `/dm <user> <msg>` heatsync dm — works from any tab
 - `/op <text>` post to the feed · `/re <text>` reply to the newest OP in the feed tab

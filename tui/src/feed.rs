@@ -160,6 +160,7 @@ pub(crate) fn drain_emotes(app: &mut App) {
         fb,
         emote_rx,
         focus,
+        refresh,
         ..
     } = app;
     let mut dirty = false;
@@ -174,6 +175,12 @@ pub(crate) fn drain_emotes(app: &mut App) {
             dirty = true;
             continue;
         }
+        // the refresh keeps this as the room's last good set
+        refresh.seed(
+            crate::refresh::key(platform, &name),
+            &set,
+            std::time::Instant::now(),
+        );
         if let Some(i) = channels.iter().position(|c| c.matches(platform, &name)) {
             // merge — a merged tab pools its sources' sets; channel emotes
             // replace any global of the same name whichever landed first.
@@ -418,6 +425,11 @@ pub(crate) fn drain_feed(app: &mut App) -> bool {
                 if let Feed::Live { connected, .. } = &mut app.feed {
                     *connected = matches!(ev, ChatEvent::Connected);
                 }
+                // a reconnect re-reads every open room (spread out, see refresh.rs)
+                app.refresh.socket(
+                    matches!(ev, ChatEvent::Connected),
+                    std::time::Instant::now(),
+                );
             }
             ChatEvent::Auth(ok) => special::auth(app, ok),
             ChatEvent::SendResult { ok, error } => {

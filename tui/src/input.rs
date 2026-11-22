@@ -782,6 +782,11 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
             open_emotes(app);
             return Flow::Continue;
         }
+        slash::Cmd::EmotesRefresh => {
+            app.line.accept();
+            crate::emotesync::manual(app);
+            return Flow::Continue;
+        }
         slash::Cmd::Share => {
             app.line.accept();
             share_layout(app);

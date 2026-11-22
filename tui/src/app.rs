@@ -101,6 +101,8 @@ pub(crate) struct App {
     pub(crate) pick_inflight: bool,
     /// `/emotes`: the open list and its fetch.
     pub(crate) emote_list: crate::emotelist::State,
+    /// keeps open rooms' channel emotes current (reconnect, timer, `/emotes refresh`).
+    pub(crate) refresh: crate::refresh::State,
     /// name paints + heatsync name colors, by sender id.
     pub(crate) paints: Paints,
     /// pins fetched on join arrive here from their own threads.

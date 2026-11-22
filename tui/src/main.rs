@@ -14,6 +14,7 @@ mod draw;
 mod drawlog;
 mod emote;
 mod emotelist;
+mod emotesync;
 mod feed;
 mod fill;
 mod followlog;
@@ -33,6 +34,7 @@ mod net;
 mod paints;
 mod palette;
 mod picker;
+mod refresh;
 mod sched;
 mod scroll;
 mod social;
@@ -165,6 +167,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             hist_rx,
             picker: None,
             emote_list: emotelist::State::new(),
+            refresh: refresh::State::new(),
             pick_cache: picker::Cache(None),
             streams: StreamEvents::new(),
             seen: Default::default(),
@@ -359,6 +362,7 @@ fn build_live(
         hist_rx,
         picker: None,
         emote_list: emotelist::State::new(),
+        refresh: refresh::State::new(),
         pick_cache: picker::Cache(None),
         streams: StreamEvents::new(),
         seen: Default::default(),
@@ -618,6 +622,7 @@ fn run(terminal: &mut Terminal<held::HeldBackend>, mut app: App) -> io::Result<(
         }
 
         if last.elapsed() >= tick {
+            emotesync::pump(&mut app);
             if !app.paused {
                 tick_advance(&mut app);
             }
