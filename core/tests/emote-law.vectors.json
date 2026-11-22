@@ -1,0 +1,327 @@
+{
+  "version": 1,
+  "about": "the emote law as data. every client runs every case against its own code. offsets ('cp') count characters (code points), end exclusive. every list in a world is shuffled by the runner: an answer may never depend on load order. a runner that meets a kind or a field it does not know must fail, never skip.",
+  "emotes": {
+    "a_ffz_kekw": { "p": "ffz", "id": "101", "name": "KEKW" },
+    "a_7tv_kekw": { "p": "7tv", "id": "a1", "name": "KEKW" },
+    "a_bttv_kekw": { "p": "bttv", "id": "b1", "name": "KEKW" },
+    "a_pog": { "p": "7tv", "id": "a2", "name": "Pog" },
+    "a_pogu": { "p": "7tv", "id": "a3", "name": "PogU" },
+    "a_rain": { "p": "7tv", "id": "a4", "name": "RainTime", "zw": true },
+    "a_catjam": { "p": "7tv", "id": "a5", "name": "catJAM" },
+    "a_catkiss": { "p": "bttv", "id": "a6", "name": "catKiss" },
+    "a_sadcat": { "p": "ffz", "id": "107", "name": "SadCat" },
+    "a_scatter": { "p": "7tv", "id": "a8", "name": "SCATTER" },
+    "a_copycat": { "p": "7tv", "id": "a9", "name": "CopyCat" },
+    "b_kekw": { "p": "7tv", "id": "b2", "name": "KEKW" },
+    "b_kekw_lc": { "p": "7tv", "id": "b3", "name": "kekw" },
+    "c_owner_kekw": { "p": "hs", "id": "o1", "name": "KEKW" },
+    "c_7tv_kekw": { "p": "7tv", "id": "c1", "name": "KEKW" },
+    "x_kekw": { "p": "7tv", "id": "x1", "name": "KEKW" },
+    "x_kick_kekw": { "p": "kick", "id": "900", "name": "KEKW" },
+    "x_kick_free": { "p": "kick", "id": "901", "name": "kickFree" },
+    "k_hype": { "p": "kick", "id": "77", "name": "hypeE" },
+    "y_kekw": { "p": "7tv", "id": "y1", "name": "KEKW" },
+    "t_abx_1": { "p": "7tv", "id": "t1", "name": "abX" },
+    "t_abx_2": { "p": "7tv", "id": "t2", "name": "aBx" },
+    "t_abx_3": { "p": "7tv", "id": "t3", "name": "ABx" },
+    "me_kekw": { "p": "hs", "id": "m1", "name": "KEKW" },
+    "me_megapog": { "p": "hs", "id": "m2", "name": "MegaPog" },
+    "me_catjam": { "p": "hs", "id": "m3", "name": "catJAM" },
+    "me_mine": { "p": "hs", "id": "m4", "name": "myEmote" },
+    "me_pog": { "p": "7tv", "id": "p1", "name": "Pog" },
+    "me_twin_a": { "p": "hs", "id": "m8", "name": "twin" },
+    "me_twin_b": { "p": "7tv", "id": "m9", "name": "twin" },
+    "g_kekw": { "p": "7tv", "id": "g1", "name": "KEKW" },
+    "g_bttv_kekw": { "p": "bttv", "id": "g2", "name": "KEKW" },
+    "g_kekw0": { "p": "bttv", "id": "g3", "name": "KEKW0" },
+    "g_kappa": { "p": "7tv", "id": "g4", "name": "Kappa" },
+    "g_poggers": { "p": "7tv", "id": "g5", "name": "POGGERS" },
+    "g_hs_wave": { "p": "hs", "id": "g6", "name": "heatWave" },
+    "tw_kappa": { "p": "twitch", "id": "25", "name": "Kappa" },
+    "tw_sub": { "p": "twitch", "id": "s1", "name": "streamerLove" },
+    "oth_kekw": { "p": "hs", "id": "t1", "name": "KEKW" },
+    "oth_wave": { "p": "hs", "id": "t2", "name": "waveHi" },
+    "oth_dance": { "p": "7tv", "id": "t3x", "name": "Dance" },
+    "cat_dance": { "p": "7tv", "id": "k1", "name": "catDance", "pop": 50 },
+    "cat_dance_dup": { "p": "bttv", "id": "k4", "name": "catDance", "pop": 10 },
+    "cat_catjam": { "p": "7tv", "id": "k2", "name": "catJAM", "pop": 9000 },
+    "cat_meow": { "p": "7tv", "id": "k3", "name": "meow", "pop": 9999 },
+    "cat_catkiss": { "p": "7tv", "id": "k5", "name": "catKiss", "pop": 5 },
+    "odd_proto": { "p": "7tv", "id": "o1x", "name": "__proto__" },
+    "odd_ctor": { "p": "bttv", "id": "o2x", "name": "constructor" },
+    "odd_tostr": { "p": "ffz", "id": "203", "name": "toString" },
+    "emoji_cat": { "p": "emoji", "id": "1f431", "name": "cat" }
+  },
+  "worlds": {
+    "main": {
+      "rooms": {
+        "twitch:a": { "third": ["a_ffz_kekw", "a_7tv_kekw", "a_bttv_kekw", "a_pog", "a_pogu", "a_rain", "a_catjam", "a_catkiss", "a_sadcat", "a_scatter", "a_copycat"] },
+        "twitch:b": { "third": ["b_kekw", "b_kekw_lc"] },
+        "twitch:c": { "owner": ["c_owner_kekw"], "third": ["c_7tv_kekw"] },
+        "twitch:t": { "third": ["t_abx_1", "t_abx_2", "t_abx_3"] },
+        "twitch:odd": { "third": ["odd_proto", "odd_ctor", "odd_tostr"] },
+        "twitch:loading": { "loaded": false },
+        "kick:x": { "third": ["x_kekw"], "native": ["x_kick_kekw", "x_kick_free"] },
+        "youtube:y": { "third": ["y_kekw"] }
+      },
+      "globals": ["g_kekw", "g_bttv_kekw", "g_kekw0", "g_kappa", "tw_kappa", "g_poggers", "g_hs_wave"],
+      "people": {
+        "me": {
+          "inventory": ["me_kekw", "me_megapog", "me_catjam", "me_mine", "me_twin_a", "me_twin_b"],
+          "personal": ["me_pog"],
+          "native": { "twitch": ["tw_kappa", "tw_sub"], "kick": ["k_hype"] }
+        },
+        "other": { "inventory": ["oth_kekw", "oth_wave"], "personal": ["oth_dance"] },
+        "kicker": { "inventory": ["oth_kekw"], "native": { "kick": ["x_kick_kekw"] } },
+        "nobody": {}
+      }
+    }
+  },
+  "cases": [
+    { "kind": "read", "name": "an emote may be named anything: __proto__, constructor and toString are names like any other", "world": "main", "room": "twitch:odd", "sender": "other", "text": "__proto__ constructor toString hasOwnProperty",
+      "expect": [{ "word": "__proto__", "emote": "odd_proto", "from": "room", "overlay": false }, { "word": "constructor", "emote": "odd_ctor", "from": "room", "overlay": false }, { "word": "toString", "emote": "odd_tostr", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "a pick filed under __proto__ is read like any other pick", "world": "main", "room": "twitch:odd", "sender": "other", "text": "__proto__", "refs": { "__proto__": "a_7tv_kekw" },
+      "expect": [{ "word": "__proto__", "emote": "a_7tv_kekw", "from": "pick", "overlay": false }] },
+    { "kind": "session", "name": "a word named __proto__ ships its ref like any other word", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:odd", "text": "__proto__ constructor",
+        "expect": { "refs": { "__proto__": "odd_proto", "constructor": "odd_ctor" }, "tokens": [], "wire": { "twitch": "__proto__ constructor" },
+          "chips": [{ "word": "__proto__", "emote": "odd_proto", "overlay": false }, { "word": "constructor", "emote": "odd_ctor", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "an edit keeps a picture stored under __proto__, and files a new word of that name", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:odd", "stored": { "__proto__": "a_7tv_kekw" }, "text": "__proto__ toString",
+        "expect": { "refs": { "__proto__": "a_7tv_kekw", "toString": "odd_tostr" }, "tokens": [], "wire": { "twitch": "__proto__ toString" },
+          "chips": [{ "word": "__proto__", "emote": "a_7tv_kekw", "overlay": false }, { "word": "toString", "emote": "odd_tostr", "overlay": false }] } },
+      { "room": "twitch:odd", "stored": { "toString": "a_7tv_kekw" }, "text": "toString __proto__",
+        "expect": { "refs": { "__proto__": "odd_proto", "toString": "a_7tv_kekw" }, "tokens": [], "wire": { "twitch": "toString __proto__" },
+          "chips": [{ "word": "toString", "emote": "a_7tv_kekw", "overlay": false }, { "word": "__proto__", "emote": "odd_proto", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "a pick made while editing replaces the stored one when the word reaches it as name0", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:b", "stored": { "Pog": "me_pog" }, "picks": { "Pog": "a_pog" }, "text": "KEKW Pog0",
+        "expect": { "refs": { "KEKW": "b_kekw", "Pog": "a_pog" }, "tokens": [], "wire": { "twitch": "KEKW Pog0" },
+          "chips": [{ "word": "KEKW", "emote": "b_kekw", "overlay": false }, { "word": "Pog0", "emote": "a_pog", "overlay": true }] } }
+    ] },
+    { "kind": "offer", "name": "a search look-alike of a name you blocked here is not offered: blocking hides, it lets nothing in", "world": "main", "room": "twitch:a", "who": "me", "typed": "catKiss", "catalog": ["cat_catkiss"], "blocked": ["a_catkiss"],
+      "expect": [] },
+    { "kind": "offer", "name": "a blocked search result gives way to the next copy of its name", "world": "main", "room": "twitch:a", "who": "me", "typed": "catDance", "catalog": ["cat_dance", "cat_dance_dup"], "blocked": ["cat_dance"],
+      "expect": [{ "emote": "cat_dance_dup", "tier": "catalog", "match": 0 }] },
+    { "kind": "read", "name": "a typed word draws the room's emote: ffz, then 7tv, then bttv", "world": "main", "room": "twitch:a", "sender": "other", "text": "KEKW",
+      "expect": [{ "word": "KEKW", "emote": "a_ffz_kekw", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "the sender's own emote loses to the room and draws where the room has none", "world": "main", "room": "twitch:a", "sender": "other", "text": "KEKW waveHi",
+      "expect": [{ "word": "KEKW", "emote": "a_ffz_kekw", "from": "room", "overlay": false }, { "word": "waveHi", "emote": "oth_wave", "from": "sender", "overlay": false }] },
+    { "kind": "read", "name": "a pick the sender's app shipped beats the room", "world": "main", "room": "twitch:a", "sender": "other", "text": "KEKW", "refs": { "KEKW": "oth_kekw" },
+      "expect": [{ "word": "KEKW", "emote": "oth_kekw", "from": "pick", "overlay": false }] },
+    { "kind": "read", "name": "a platform token owns its span, even over a shipped pick of that name", "world": "main", "room": "twitch:a", "sender": "other", "text": "Kappa KEKW",
+      "tokens": [{ "cp": [0, 5], "emote": "tw_kappa" }], "refs": { "Kappa": "g_kappa" },
+      "expect": [{ "word": "Kappa", "emote": "tw_kappa", "from": "token", "overlay": false }, { "word": "KEKW", "emote": "a_ffz_kekw", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "one name twice: the marked one is the platform's, the bare one reads by the law", "world": "main", "room": "kick:x", "sender": "other", "text": "KEKW KEKW",
+      "tokens": [{ "cp": [0, 4], "emote": "x_kick_kekw" }],
+      "expect": [{ "word": "KEKW", "emote": "x_kick_kekw", "from": "token", "overlay": false }, { "word": "KEKW", "emote": "x_kekw", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "offsets count characters, not bytes or utf-16 units", "world": "main", "room": "twitch:a", "sender": null, "text": "😀 Kappa KEKW",
+      "tokens": [{ "cp": [2, 7], "emote": "tw_kappa" }],
+      "expect": [{ "word": "Kappa", "emote": "tw_kappa", "from": "token", "overlay": false }, { "word": "KEKW", "emote": "a_ffz_kekw", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "the sender's 7tv personal emote sits above the room", "world": "main", "room": "twitch:a", "sender": "me", "text": "Pog",
+      "expect": [{ "word": "Pog", "emote": "me_pog", "from": "personal", "overlay": false }] },
+    { "kind": "read", "name": "nobody's saved emotes draw a stranger's word", "world": "main", "room": "twitch:b", "sender": null, "text": "myEmote MegaPog waveHi",
+      "expect": [] },
+    { "kind": "read", "name": "a row reads its own room: b", "world": "main", "room": "twitch:b", "sender": "other", "text": "KEKW",
+      "expect": [{ "word": "KEKW", "emote": "b_kekw", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "a row reads its own room: the streamer's heatsync emote leads it", "world": "main", "room": "twitch:c", "sender": "other", "text": "KEKW",
+      "expect": [{ "word": "KEKW", "emote": "c_owner_kekw", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "a row reads its own room: on kick the platform's channel emotes come last", "world": "main", "room": "kick:x", "sender": "other", "text": "KEKW kickFree",
+      "expect": [{ "word": "KEKW", "emote": "x_kekw", "from": "room", "overlay": false }, { "word": "kickFree", "emote": "x_kick_free", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "a row reads its own room: youtube", "world": "main", "room": "youtube:y", "sender": "other", "text": "KEKW",
+      "expect": [{ "word": "KEKW", "emote": "y_kekw", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "no room, no room rule: personal, the sender's, globals", "world": "main", "room": null, "sender": "me", "text": "KEKW Pog heatWave",
+      "expect": [{ "word": "KEKW", "emote": "me_kekw", "from": "sender", "overlay": false }, { "word": "Pog", "emote": "me_pog", "from": "personal", "overlay": false }, { "word": "heatWave", "emote": "g_hs_wave", "from": "global", "overlay": false }] },
+    { "kind": "read", "name": "two of one name in one list: the lower id, whatever order they loaded in", "world": "main", "room": null, "sender": "me", "text": "twin",
+      "expect": [{ "word": "twin", "emote": "me_twin_a", "from": "sender", "overlay": false }] },
+    { "kind": "read", "name": "globals: 7tv before bttv before twitch", "world": "main", "room": null, "sender": null, "text": "KEKW Kappa",
+      "expect": [{ "word": "KEKW", "emote": "g_kekw", "from": "global", "overlay": false }, { "word": "Kappa", "emote": "g_kappa", "from": "global", "overlay": false }] },
+    { "kind": "read", "name": "case is exact", "world": "main", "room": "twitch:b", "sender": null, "text": "kekw KEKW Kekw",
+      "expect": [{ "word": "kekw", "emote": "b_kekw_lc", "from": "room", "overlay": false }, { "word": "KEKW", "emote": "b_kekw", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "the case setting only answers a word nothing matched exactly; of two spellings the one that sorts first", "world": "main", "room": "twitch:b", "sender": null, "fold": true, "text": "Kekw kekw",
+      "expect": [{ "word": "Kekw", "emote": "b_kekw", "from": "room", "overlay": false }, { "word": "kekw", "emote": "b_kekw_lc", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "the case setting: an exact room emote beats a pick that only matches folded", "world": "main", "room": "twitch:b", "sender": null, "fold": true, "text": "kekw Kekw", "refs": { "KEKW": "oth_kekw" },
+      "expect": [{ "word": "kekw", "emote": "b_kekw_lc", "from": "room", "overlay": false }, { "word": "Kekw", "emote": "oth_kekw", "from": "pick", "overlay": false }] },
+    { "kind": "read", "name": "a pick is filed under the exact word", "world": "main", "room": "twitch:b", "sender": "other", "text": "KEKW kekw", "refs": { "kekw": "oth_kekw" },
+      "expect": [{ "word": "KEKW", "emote": "b_kekw", "from": "room", "overlay": false }, { "word": "kekw", "emote": "oth_kekw", "from": "pick", "overlay": false }] },
+    { "kind": "read", "name": "name0: an emote really named that wins before the overlay reading, in any tier", "world": "main", "room": "twitch:a", "sender": null, "text": "KEKW KEKW0",
+      "expect": [{ "word": "KEKW", "emote": "a_ffz_kekw", "from": "room", "overlay": false }, { "word": "KEKW0", "emote": "g_kekw0", "from": "global", "overlay": false }] },
+    { "kind": "read", "name": "name0: with no such emote it is the name as an overlay on the emote before it", "world": "main", "room": "twitch:a", "sender": null, "text": "KEKW Pog0",
+      "expect": [{ "word": "KEKW", "emote": "a_ffz_kekw", "from": "room", "overlay": false }, { "word": "Pog0", "emote": "a_pog", "from": "room", "overlay": true }] },
+    { "kind": "read", "name": "an overlay with no emote right before it draws inline", "world": "main", "room": "twitch:a", "sender": null, "text": "hello Pog0 RainTime",
+      "expect": [{ "word": "Pog0", "emote": "a_pog", "from": "room", "overlay": false }, { "word": "RainTime", "emote": "a_rain", "from": "room", "overlay": true }] },
+    { "kind": "read", "name": "a word between them breaks the stack", "world": "main", "room": "twitch:a", "sender": null, "text": "KEKW hi RainTime",
+      "expect": [{ "word": "KEKW", "emote": "a_ffz_kekw", "from": "room", "overlay": false }, { "word": "RainTime", "emote": "a_rain", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "a taken-down pick is text, never a look-alike, and nothing stacks on it", "world": "main", "room": "twitch:a", "sender": "other", "text": "KEKW RainTime", "refs": { "KEKW": "gone" },
+      "expect": [{ "word": "KEKW", "emote": null, "from": "pick", "overlay": false }, { "word": "RainTime", "emote": "a_rain", "from": "room", "overlay": false }] },
+    { "kind": "read", "name": "a room still loading borrows nothing from another room", "world": "main", "room": "twitch:loading", "sender": "other", "text": "KEKW Pog",
+      "expect": [{ "word": "KEKW", "emote": "oth_kekw", "from": "sender", "overlay": false }] },
+
+    { "kind": "session", "name": "picked KEKW in a, typed KEKW in b: the pick died with its message", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "picks": { "KEKW": "a_7tv_kekw" }, "text": "KEKW",
+        "expect": { "from": { "KEKW": "pick" }, "refs": { "KEKW": "a_7tv_kekw" }, "tokens": [], "wire": { "twitch": "KEKW" }, "chips": [{ "word": "KEKW", "emote": "a_7tv_kekw", "overlay": false }] } },
+      { "room": "twitch:b", "text": "KEKW",
+        "expect": { "from": { "KEKW": "room" }, "refs": { "KEKW": "b_kekw" }, "tokens": [], "wire": { "twitch": "KEKW" }, "chips": [{ "word": "KEKW", "emote": "b_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "a typed word is the room's; yours sends where the room has none", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "text": "KEKW myEmote catJAM",
+        "expect": { "from": { "KEKW": "room", "myEmote": "own", "catJAM": "room" }, "refs": { "KEKW": "a_ffz_kekw", "myEmote": "me_mine", "catJAM": "a_catjam" }, "tokens": [], "wire": { "twitch": "KEKW myEmote catJAM" },
+          "chips": [{ "word": "KEKW", "emote": "a_ffz_kekw", "overlay": false }, { "word": "myEmote", "emote": "me_mine", "overlay": false }, { "word": "catJAM", "emote": "a_catjam", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "no room (dm, post, reply): yours, then globals; the open chat tab is not its room", "world": "main", "who": "me", "steps": [
+      { "room": null, "text": "KEKW Pog",
+        "expect": { "from": { "KEKW": "own", "Pog": "personal" }, "refs": { "KEKW": "me_kekw", "Pog": "me_pog" }, "tokens": [], "wire": {},
+          "chips": [{ "word": "KEKW", "emote": "me_kekw", "overlay": false }, { "word": "Pog", "emote": "me_pog", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "the platform's own emote is what sends on its platform; it needs no ref", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "text": "Kappa streamerLove KEKW",
+        "expect": { "from": { "Kappa": "native", "streamerLove": "native", "KEKW": "room" }, "refs": { "KEKW": "a_ffz_kekw" },
+          "tokens": [{ "cp": [0, 5], "emote": "tw_kappa" }, { "cp": [6, 18], "emote": "tw_sub" }], "wire": { "twitch": "Kappa streamerLove KEKW" },
+          "chips": [{ "word": "Kappa", "emote": "tw_kappa", "overlay": false }, { "word": "streamerLove", "emote": "tw_sub", "overlay": false }, { "word": "KEKW", "emote": "a_ffz_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "on twitch a pick cannot beat twitch's own emote of that name: twitch marks the word itself", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "picks": { "Kappa": "g_kappa" }, "text": "Kappa",
+        "expect": { "from": { "Kappa": "native" }, "refs": {}, "tokens": [{ "cp": [0, 5], "emote": "tw_kappa" }], "wire": { "twitch": "Kappa" }, "chips": [{ "word": "Kappa", "emote": "tw_kappa", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "twitch's emote is not twitch's on kick: there the word reads by the law", "world": "main", "who": "me", "steps": [
+      { "room": "kick:x", "text": "Kappa",
+        "expect": { "from": { "Kappa": "global" }, "refs": { "Kappa": "g_kappa" }, "tokens": [], "wire": { "kick": "Kappa" }, "chips": [{ "word": "Kappa", "emote": "g_kappa", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "name0 of a twitch emote is not twitch's: it overlays by the law", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "text": "Kappa Kappa0",
+        "expect": { "from": { "Kappa": "native", "Kappa0": "global" }, "refs": { "Kappa": "g_kappa" }, "tokens": [{ "cp": [0, 5], "emote": "tw_kappa" }], "wire": { "twitch": "Kappa Kappa0" },
+          "chips": [{ "word": "Kappa", "emote": "tw_kappa", "overlay": false }, { "word": "Kappa0", "emote": "g_kappa", "overlay": true }] } }
+    ] },
+    { "kind": "session", "name": "kick's emotes go out in kick's own format", "world": "main", "who": "me", "steps": [
+      { "room": "kick:x", "text": "hypeE kickFree KEKW",
+        "expect": { "from": { "hypeE": "native", "kickFree": "room", "KEKW": "room" }, "refs": { "KEKW": "x_kekw" },
+          "tokens": [{ "cp": [0, 5], "emote": "k_hype" }, { "cp": [6, 14], "emote": "x_kick_free" }], "wire": { "kick": "[emote:77:hypeE] [emote:901:kickFree] KEKW" },
+          "chips": [{ "word": "hypeE", "emote": "k_hype", "overlay": false }, { "word": "kickFree", "emote": "x_kick_free", "overlay": false }, { "word": "KEKW", "emote": "x_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "on kick a pick does beat kick's own emote: the word goes out bare", "world": "main", "who": "me", "steps": [
+      { "room": "kick:x", "picks": { "hypeE": "me_mine" }, "text": "hypeE",
+        "expect": { "from": { "hypeE": "pick" }, "refs": { "hypeE": "me_mine" }, "tokens": [], "wire": { "kick": "hypeE" }, "chips": [{ "word": "hypeE", "emote": "me_mine", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "a kick line too long in kick's format goes out as words, and then nothing claims kick marked it", "world": "main", "who": "me", "steps": [
+      { "room": "kick:x", "textRepeat": ["hypeE", 40], "expect": { "refs": {}, "tokens": [], "wireIsText": ["kick"], "chips": [] } }
+    ] },
+    { "kind": "session", "name": "one send to three platforms resolves once against the first; each platform gets its own wire text", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "legs": ["twitch:a", "kick:x", "youtube:y"], "text": "KEKW hypeE",
+        "expect": { "from": { "KEKW": "room" }, "refs": { "KEKW": "a_ffz_kekw" }, "tokens": [], "wire": { "twitch": "KEKW hypeE", "kick": "KEKW [emote:77:hypeE]", "youtube": "KEKW hypeE" },
+          "chips": [{ "word": "KEKW", "emote": "a_ffz_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "on kick alone, kick's own emote you can use is what a typed word sends", "world": "main", "who": "kicker", "steps": [
+      { "room": "kick:x", "text": "KEKW",
+        "expect": { "from": { "KEKW": "native" }, "refs": {}, "tokens": [{ "cp": [0, 4], "emote": "x_kick_kekw" }], "wire": { "kick": "[emote:900:KEKW]" }, "chips": [{ "word": "KEKW", "emote": "x_kick_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "sent to twitch and kick at once, the word keeps the one meaning it has on the first: kick gets the bare word, not its own look-alike", "world": "main", "who": "kicker", "steps": [
+      { "room": "twitch:a", "legs": ["twitch:a", "kick:x"], "text": "KEKW",
+        "expect": { "from": { "KEKW": "room" }, "refs": { "KEKW": "a_ffz_kekw" }, "tokens": [], "wire": { "twitch": "KEKW", "kick": "KEKW" }, "chips": [{ "word": "KEKW", "emote": "a_ffz_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "one draft, one meaning per name", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "picks": { "KEKW": "a_bttv_kekw" }, "text": "KEKW hi KEKW",
+        "expect": { "from": { "KEKW": "pick" }, "refs": { "KEKW": "a_bttv_kekw" }, "tokens": [], "wire": { "twitch": "KEKW hi KEKW" },
+          "chips": [{ "word": "KEKW", "emote": "a_bttv_kekw", "overlay": false }, { "word": "KEKW", "emote": "a_bttv_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "an overlay ships under the name without the 0", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "text": "KEKW Pog0",
+        "expect": { "from": { "KEKW": "room", "Pog0": "personal" }, "refs": { "KEKW": "a_ffz_kekw", "Pog": "me_pog" }, "tokens": [], "wire": { "twitch": "KEKW Pog0" },
+          "chips": [{ "word": "KEKW", "emote": "a_ffz_kekw", "overlay": false }, { "word": "Pog0", "emote": "me_pog", "overlay": true }] } }
+    ] },
+    { "kind": "session", "name": "an emote really named name0 ships under its own name", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:a", "text": "KEKW0",
+        "expect": { "from": { "KEKW0": "global" }, "refs": { "KEKW0": "g_kekw0" }, "tokens": [], "wire": { "twitch": "KEKW0" }, "chips": [{ "word": "KEKW0", "emote": "g_kekw0", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "the case setting: the ref is filed under the word as typed, so a reader without the setting still sees it", "world": "main", "who": "nobody", "steps": [
+      { "room": "twitch:b", "fold": true, "text": "Kekw",
+        "expect": { "from": { "Kekw": "room" }, "refs": { "Kekw": "b_kekw" }, "tokens": [], "wire": { "twitch": "Kekw" }, "chips": [{ "word": "Kekw", "emote": "b_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "a room still loading: what the chip shows is what ships", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:loading", "text": "KEKW",
+        "expect": { "from": { "KEKW": "own" }, "refs": { "KEKW": "me_kekw" }, "tokens": [], "wire": { "twitch": "KEKW" }, "chips": [{ "word": "KEKW", "emote": "me_kekw", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "an edit keeps the picture of a word it did not touch; a new word resolves fresh", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:b", "stored": { "KEKW": "a_7tv_kekw" }, "text": "KEKW Pog",
+        "expect": { "refs": { "KEKW": "a_7tv_kekw", "Pog": "me_pog" }, "tokens": [], "wire": { "twitch": "KEKW Pog" },
+          "chips": [{ "word": "KEKW", "emote": "a_7tv_kekw", "overlay": false }, { "word": "Pog", "emote": "me_pog", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "an edit drops the pick of a word that left", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:b", "stored": { "KEKW": "a_7tv_kekw", "Pog": "me_pog" }, "text": "Pog",
+        "expect": { "refs": { "Pog": "me_pog" }, "tokens": [], "wire": { "twitch": "Pog" }, "chips": [{ "word": "Pog", "emote": "me_pog", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "an edit never brings a taken-down emote back as a look-alike", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:b", "stored": { "KEKW": "gone" }, "text": "KEKW Pog",
+        "expect": { "refs": { "KEKW": "gone", "Pog": "me_pog" }, "tokens": [], "wire": { "twitch": "KEKW Pog" },
+          "chips": [{ "word": "KEKW", "emote": null, "overlay": false }, { "word": "Pog", "emote": "me_pog", "overlay": false }] } }
+    ] },
+    { "kind": "session", "name": "a pick made while editing replaces the stored one", "world": "main", "who": "me", "steps": [
+      { "room": "twitch:b", "stored": { "KEKW": "a_7tv_kekw" }, "picks": { "KEKW": "me_kekw" }, "text": "KEKW",
+        "expect": { "refs": { "KEKW": "me_kekw" }, "tokens": [], "wire": { "twitch": "KEKW" }, "chips": [{ "word": "KEKW", "emote": "me_kekw", "overlay": false }] } }
+    ] },
+
+    { "kind": "offer", "name": "the exact name first, its copies in the order a typed word would ship them", "world": "main", "room": "twitch:a", "who": "me", "typed": "KEKW",
+      "expect": [{ "emote": "a_ffz_kekw", "tier": "room", "match": 0 }, { "emote": "me_kekw", "tier": "own", "match": 0 }, { "emote": "g_kekw", "tier": "global", "match": 0 }, { "emote": "g_kekw0", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "the spelling you typed leads its case twin", "world": "main", "room": "twitch:b", "who": "me", "typed": "kekw",
+      "expect": [{ "emote": "b_kekw_lc", "tier": "room", "match": 0 }, { "emote": "b_kekw", "tier": "room", "match": 0 }, { "emote": "me_kekw", "tier": "own", "match": 0 }, { "emote": "g_kekw", "tier": "global", "match": 0 }, { "emote": "g_kekw0", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "typed in neither spelling: twins stay whole, the one that sorts first leads", "world": "main", "room": "twitch:b", "who": "me", "typed": "Kekw",
+      "expect": [{ "emote": "b_kekw", "tier": "room", "match": 0 }, { "emote": "me_kekw", "tier": "own", "match": 0 }, { "emote": "g_kekw", "tier": "global", "match": 0 }, { "emote": "b_kekw_lc", "tier": "room", "match": 0 }, { "emote": "g_kekw0", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "your 7tv personal copy leads the room's; a name you use does not jump the room on a word-start match", "world": "main", "room": "twitch:a", "who": "me", "typed": "pog", "usage": { "MegaPog": 5 },
+      "expect": [{ "emote": "me_pog", "tier": "own", "match": 0 }, { "emote": "a_pog", "tier": "room", "match": 0 }, { "emote": "a_pogu", "tier": "room", "match": 1 }, { "emote": "me_megapog", "tier": "own", "match": 2 }, { "emote": "g_poggers", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "a name you use that starts with what you typed jumps the room", "world": "main", "room": "twitch:a", "who": "me", "typed": "pog", "usage": { "MegaPog": 9, "POGGERS": 3 },
+      "expect": [{ "emote": "me_pog", "tier": "own", "match": 0 }, { "emote": "a_pog", "tier": "room", "match": 0 }, { "emote": "g_poggers", "tier": "global", "match": 1 }, { "emote": "a_pogu", "tier": "room", "match": 1 }, { "emote": "me_megapog", "tier": "own", "match": 2 }] },
+    { "kind": "offer", "name": "a used name's copies still stand in send order: your 7tv personal one before the room's", "world": "main", "room": "twitch:a", "who": "me", "typed": "po", "usage": { "Pog": 4 },
+      "expect": [{ "emote": "me_pog", "tier": "own", "match": 1 }, { "emote": "a_pog", "tier": "room", "match": 1 }, { "emote": "a_pogu", "tier": "room", "match": 1 }, { "emote": "me_megapog", "tier": "own", "match": 2 }, { "emote": "g_poggers", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "inside a tier: starts-with, word-start, inside — more carried only orders within one of those", "world": "main", "room": "twitch:a", "who": "me", "typed": "cat", "pop": { "catkiss": 900, "catjam": 100, "sadcat": 5000, "scatter": 9000 },
+      "expect": [{ "emote": "a_catkiss", "tier": "room", "match": 1 }, { "emote": "a_catjam", "tier": "room", "match": 1 }, { "emote": "a_sadcat", "tier": "room", "match": 2 }, { "emote": "a_copycat", "tier": "room", "match": 2 }, { "emote": "a_scatter", "tier": "room", "match": 3 }, { "emote": "me_catjam", "tier": "own", "match": 1 }] },
+    { "kind": "offer", "name": "inside one of those, a name you use leads a more carried one", "world": "main", "room": "twitch:a", "who": "me", "typed": "cat", "pop": { "catkiss": 900, "catjam": 100, "sadcat": 5000, "scatter": 9000 }, "usage": { "CopyCat": 1 },
+      "expect": [{ "emote": "a_catkiss", "tier": "room", "match": 1 }, { "emote": "a_catjam", "tier": "room", "match": 1 }, { "emote": "a_copycat", "tier": "room", "match": 2 }, { "emote": "a_sadcat", "tier": "room", "match": 2 }, { "emote": "a_scatter", "tier": "room", "match": 3 }, { "emote": "me_catjam", "tier": "own", "match": 1 }] },
+    { "kind": "offer", "name": "a used name jumps with every copy, the room's before yours", "world": "main", "room": "twitch:a", "who": "me", "typed": "cat", "usage": { "catJAM": 2 },
+      "expect": [{ "emote": "a_catjam", "tier": "room", "match": 1 }, { "emote": "me_catjam", "tier": "own", "match": 1 }, { "emote": "a_catkiss", "tier": "room", "match": 1 }, { "emote": "a_sadcat", "tier": "room", "match": 2 }, { "emote": "a_copycat", "tier": "room", "match": 2 }, { "emote": "a_scatter", "tier": "room", "match": 3 }] },
+    { "kind": "offer", "name": "not loaded yet comes after everything here: one copy per name, none for a name already here, a tag-only hit last; an emoji named exactly that is an exact name", "world": "main", "room": "twitch:a", "who": "me", "typed": "cat",
+      "catalog": ["cat_dance", "cat_dance_dup", "cat_catjam", "cat_meow"], "emoji": ["emoji_cat"],
+      "expect": [{ "emote": "emoji_cat", "tier": "emoji", "match": 0 }, { "emote": "a_catjam", "tier": "room", "match": 1 }, { "emote": "a_catkiss", "tier": "room", "match": 1 }, { "emote": "a_sadcat", "tier": "room", "match": 2 }, { "emote": "a_copycat", "tier": "room", "match": 2 }, { "emote": "a_scatter", "tier": "room", "match": 3 }, { "emote": "me_catjam", "tier": "own", "match": 1 }, { "emote": "cat_dance", "tier": "catalog", "match": 1 }, { "emote": "cat_meow", "tier": "catalog", "match": 4 }] },
+    { "kind": "offer", "name": "you are never offered what you blocked", "world": "main", "room": "twitch:a", "who": "me", "typed": "KEKW", "blocked": ["a_ffz_kekw"],
+      "expect": [{ "emote": "me_kekw", "tier": "own", "match": 0 }, { "emote": "g_kekw", "tier": "global", "match": 0 }, { "emote": "g_kekw0", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "suggest-my-emotes off hides your saved ones, not your 7tv personal set", "world": "main", "room": "twitch:a", "who": "me", "typed": "pog", "suggestOwn": false,
+      "expect": [{ "emote": "me_pog", "tier": "own", "match": 0 }, { "emote": "a_pog", "tier": "room", "match": 0 }, { "emote": "a_pogu", "tier": "room", "match": 1 }, { "emote": "g_poggers", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "twitch's own emote leads on twitch and its look-alike is marked: it would not show there", "world": "main", "room": "twitch:a", "who": "me", "typed": "kappa",
+      "expect": [{ "emote": "tw_kappa", "tier": "own", "match": 0 }, { "emote": "g_kappa", "tier": "global", "match": 0, "shadowed": true }] },
+    { "kind": "offer", "name": "on kick the same word offers what kick would draw", "world": "main", "room": "kick:x", "who": "me", "typed": "kappa",
+      "expect": [{ "emote": "g_kappa", "tier": "global", "match": 0 }] },
+    { "kind": "offer", "name": "on kick a pick can beat kick's own emote, so its look-alikes are not marked", "world": "main", "room": "kick:x", "who": "kicker", "typed": "KEKW",
+      "expect": [{ "emote": "x_kick_kekw", "tier": "own", "match": 0 }, { "emote": "x_kekw", "tier": "room", "match": 0 }, { "emote": "oth_kekw", "tier": "own", "match": 0 }, { "emote": "g_kekw", "tier": "global", "match": 0 }, { "emote": "g_kekw0", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "kick's emotes you can use are yours there", "world": "main", "room": "kick:x", "who": "me", "typed": "hype",
+      "expect": [{ "emote": "k_hype", "tier": "own", "match": 1 }] },
+    { "kind": "offer", "name": "no room: yours, then globals", "world": "main", "room": null, "who": "me", "typed": "kekw",
+      "expect": [{ "emote": "me_kekw", "tier": "own", "match": 0 }, { "emote": "g_kekw", "tier": "global", "match": 0 }, { "emote": "g_kekw0", "tier": "global", "match": 1 }] },
+    { "kind": "offer", "name": "a limit cuts the same list, it never re-ranks it", "world": "main", "room": "twitch:a", "who": "me", "typed": "KEKW", "limit": 2,
+      "expect": [{ "emote": "a_ffz_kekw", "tier": "room", "match": 0 }, { "emote": "me_kekw", "tier": "own", "match": 0 }] },
+    { "kind": "offer", "name": "a tie ends in character order, capitals first — never in load order", "world": "main", "room": "twitch:t", "who": "nobody", "typed": "ab",
+      "expect": [{ "emote": "t_abx_3", "tier": "room", "match": 1 }, { "emote": "t_abx_2", "tier": "room", "match": 1 }, { "emote": "t_abx_1", "tier": "room", "match": 1 }] },
+    { "kind": "offer", "name": "nothing typed offers nothing", "world": "main", "room": "twitch:a", "who": "me", "typed": "", "expect": [] },
+
+    { "kind": "extend", "name": "a late arrival joins after the cursor; what you already passed never moves", "world": "main", "who": "me", "typed": "cat", "cursor": 1,
+      "prev": { "room": "twitch:a" },
+      "next": { "room": "twitch:a", "catalog": ["cat_dance"], "pop": { "catkiss": 900 } },
+      "expect": [{ "emote": "a_catjam", "tier": "room", "match": 1 }, { "emote": "a_catkiss", "tier": "room", "match": 1 }, { "emote": "a_sadcat", "tier": "room", "match": 2 }, { "emote": "a_copycat", "tier": "room", "match": 2 }, { "emote": "a_scatter", "tier": "room", "match": 3 }, { "emote": "me_catjam", "tier": "own", "match": 1 }, { "emote": "cat_dance", "tier": "catalog", "match": 1 }] },
+    { "kind": "extend", "name": "before the first Tab nothing is frozen", "world": "main", "who": "me", "typed": "cat", "cursor": -1,
+      "prev": { "room": "twitch:a" },
+      "next": { "room": "twitch:a", "catalog": ["cat_dance"], "pop": { "catkiss": 900 } },
+      "expect": [{ "emote": "a_catkiss", "tier": "room", "match": 1 }, { "emote": "a_catjam", "tier": "room", "match": 1 }, { "emote": "a_sadcat", "tier": "room", "match": 2 }, { "emote": "a_copycat", "tier": "room", "match": 2 }, { "emote": "a_scatter", "tier": "room", "match": 3 }, { "emote": "me_catjam", "tier": "own", "match": 1 }, { "emote": "cat_dance", "tier": "catalog", "match": 1 }] },
+    { "kind": "extend", "name": "the room's set lands mid-cycle: it joins after where you are", "world": "main", "who": "me", "typed": "KEKW", "cursor": 0,
+      "prev": { "room": "twitch:loading" },
+      "next": { "room": "twitch:a" },
+      "expect": [{ "emote": "me_kekw", "tier": "own", "match": 0 }, { "emote": "a_ffz_kekw", "tier": "room", "match": 0 }, { "emote": "g_kekw", "tier": "global", "match": 0 }, { "emote": "g_kekw0", "tier": "global", "match": 1 }] },
+
+    { "kind": "browse", "name": "the picker with nothing typed: recents are pictures you can reach here; lists go most-used, then a-z", "world": "main", "room": "twitch:b", "who": "me",
+      "recents": ["a_7tv_kekw", "b_kekw", "me_kekw", "b_kekw"], "usage": { "myEmote": 3 },
+      "expect": {
+        "recent": ["b_kekw", "me_kekw"],
+        "room": ["b_kekw", "b_kekw_lc"],
+        "own": ["me_mine", "me_catjam", "tw_kappa", "me_kekw", "me_megapog", "me_pog", "tw_sub", "me_twin_a"],
+        "global": ["g_hs_wave", "g_kappa", "g_kekw", "g_kekw0", "g_poggers"]
+      } }
+  ]
+}

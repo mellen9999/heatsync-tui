@@ -19,6 +19,7 @@ pub mod hsbadge;
 pub mod i18n;
 pub mod iso;
 pub mod key;
+pub mod law;
 pub mod layout;
 pub mod mock;
 pub mod paint;
