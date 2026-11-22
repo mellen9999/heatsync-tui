@@ -8,6 +8,19 @@
 //! the platform also uses would silently break a mod action, which is why the
 //! list below is short and stays short.
 
+/// one change to your own heatsync emotes: `/emote add|rm|mv|undo`.
+#[derive(Debug, PartialEq)]
+pub enum EmoteOp {
+    /// add the emote this name draws as in the focused tab.
+    Add(String),
+    /// remove your emote of that name.
+    Rm(String),
+    /// rename one of yours: (old, new).
+    Mv(String, String),
+    /// undo your last emote change, server side.
+    Undo,
+}
+
 /// what a line typed into the composer turns out to be.
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
@@ -35,6 +48,10 @@ pub enum Cmd {
     Unblock(String),
     /// `/blocked` — list what's hidden.
     Blocked,
+    /// `/emote add|rm|mv|undo` — manage your own heatsync emotes.
+    Emote(EmoteOp),
+    /// `/emotes` — list your own heatsync emotes.
+    Emotes,
     /// `/sharelayout` (`/sl`, `/share`) — copy the open channels as a heatsync.org/m/ link.
     Share,
     /// `/layout <link>` — open the channels in a share link.
@@ -96,6 +113,8 @@ pub fn parse(input: &str) -> Cmd {
             None => Cmd::Usage(crate::i18n::tr("slash.usage_unblock")),
         },
         "blocked" | "blocks" => Cmd::Blocked,
+        "emote" => emote_op(arg),
+        "emotes" => Cmd::Emotes,
         "sharelayout" | "sl" | "share" => Cmd::Share,
         "layout" => match arg {
             Some(a) => Cmd::Layout(a.to_string()),
@@ -111,6 +130,21 @@ pub fn parse(input: &str) -> Cmd {
         },
         // not ours — the platform's problem, and it must arrive untouched.
         _ => Cmd::Send(line.to_string()),
+    }
+}
+
+/// the rest of `/emote …`: a sub-verb and exactly the words it takes. emote names
+/// are single words, so extra words mean a typo, never a longer name.
+fn emote_op(arg: Option<&str>) -> Cmd {
+    let usage = || Cmd::Usage(crate::i18n::tr("slash.usage_emote"));
+    let words: Vec<&str> = arg.unwrap_or_default().split_whitespace().collect();
+    let verb = words.first().map(|v| v.to_lowercase());
+    match (verb.as_deref(), &words[words.len().min(1)..]) {
+        (Some("add"), [n]) => Cmd::Emote(EmoteOp::Add((*n).into())),
+        (Some("rm" | "remove"), [n]) => Cmd::Emote(EmoteOp::Rm((*n).into())),
+        (Some("mv" | "rename"), [a, b]) => Cmd::Emote(EmoteOp::Mv((*a).into(), (*b).into())),
+        (Some("undo"), []) => Cmd::Emote(EmoteOp::Undo),
+        _ => usage(),
     }
 }
 
@@ -136,6 +170,48 @@ mod tests {
         assert_eq!(parse("/blocked"), Cmd::Blocked);
         assert!(matches!(parse("/block"), Cmd::Usage(_)));
         assert!(matches!(parse("/unblock"), Cmd::Usage(_)));
+    }
+
+    #[test]
+    fn emote_inventory_commands_are_ours() {
+        assert_eq!(
+            parse("/emote add Kappa"),
+            Cmd::Emote(EmoteOp::Add("Kappa".into()))
+        );
+        assert_eq!(
+            parse("/emote  add   Kappa "),
+            Cmd::Emote(EmoteOp::Add("Kappa".into()))
+        );
+        assert_eq!(
+            parse("/emote rm Kappa"),
+            Cmd::Emote(EmoteOp::Rm("Kappa".into()))
+        );
+        assert_eq!(
+            parse("/emote remove Kappa"),
+            Cmd::Emote(EmoteOp::Rm("Kappa".into()))
+        );
+        assert_eq!(
+            parse("/emote mv Kappa Kappa2"),
+            Cmd::Emote(EmoteOp::Mv("Kappa".into(), "Kappa2".into()))
+        );
+        assert_eq!(parse("/emote undo"), Cmd::Emote(EmoteOp::Undo));
+        assert_eq!(parse("/EMOTE Undo"), Cmd::Emote(EmoteOp::Undo));
+        assert_eq!(parse("/emotes"), Cmd::Emotes);
+        // each one is explained when typed short or with extras
+        for bad in [
+            "/emote",
+            "/emote add",
+            "/emote rm",
+            "/emote mv",
+            "/emote mv a",
+            "/emote mv a b c",
+            "/emote add a b",
+            "/emote rm a b",
+            "/emote undo now",
+            "/emote fly",
+        ] {
+            assert!(matches!(parse(bad), Cmd::Usage(_)), "{bad}");
+        }
     }
 
     #[test]
