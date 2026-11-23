@@ -96,6 +96,32 @@ pub struct EmoteSetResponse {
     /// anything else the server adds to the answer is ignored.
     #[serde(default)]
     pub degraded: bool,
+    /// providers (`7tv`, `bttv`, `ffz`) the server answered from a kept copy,
+    /// with when that copy was last fresh (ISO). absent when all are fresh.
+    #[serde(default, rename = "lastFresh")]
+    pub last_fresh: std::collections::BTreeMap<String, String>,
+}
+
+/// a degraded answer never removes what a room already holds: per provider
+/// (7tv, bttv, ffz), take the answer's emotes when it has any for it (fresh or
+/// a kept copy), else keep the held ones; what the answer has for a provider
+/// the room holds nothing of is taken as it came. everything else (the owner's,
+/// the platform's own) is the answer's.
+pub fn degraded_merge(answer: Vec<Emote>, held: Option<&EmoteSet>) -> Vec<Emote> {
+    let mut out = answer;
+    let Some(held) = held else { return out };
+    for p in ["7tv", "bttv", "ffz"] {
+        if !out.iter().any(|e| e.provider == p) {
+            out.extend(
+                held.room
+                    .names
+                    .values()
+                    .filter(|e| e.provider == p)
+                    .cloned(),
+            );
+        }
+    }
+    out
 }
 
 /// a room's emotes and the pooled globals, each one emote per exact name.

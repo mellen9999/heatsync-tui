@@ -155,13 +155,30 @@ fn settle(
             Some(h) if !h.owner_differs(&o) => Step::Done(Outcome::NotModified),
             _ => Step::Full,
         },
-        // a provider was down: this list is missing its emotes. keep the set.
-        (Chan::Body(b, _), Some(_)) if b.degraded => Step::Done(Outcome::Failed),
+        // a provider was down or answered from a kept copy: never lose what the
+        // room holds, take what the answer has, and come back soon
+        (Chan::Body(b, _), Some(o)) if b.degraded => {
+            let kept: Vec<(String, String)> = b
+                .last_fresh
+                .iter()
+                .map(|(p, t)| (clean(p, 8), clean(t, 25)))
+                .collect();
+            let all = heatsync_core::emote::degraded_merge(b.emotes, held);
+            Step::Done(Outcome::Partial(
+                EmoteSet::from_list(all.into_iter().chain(o)),
+                kept,
+            ))
+        }
         (Chan::Body(b, tag), Some(o)) => Step::Done(Outcome::Changed(
             EmoteSet::from_list(b.emotes.into_iter().chain(o)),
             tag,
         )),
     }
+}
+
+/// server text shown to the user: no control bytes, bounded.
+fn clean(s: &str, max: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).take(max).collect()
 }
 
 fn channel_answer(channel: &str, platform: Platform, etag: Option<&str>) -> Chan {
@@ -703,16 +720,64 @@ mod tests {
         ));
     }
 
+    fn partial(o: Outcome) -> (EmoteSet, Vec<(String, String)>) {
+        match o {
+            Outcome::Partial(s, k) => (s, k),
+            other => panic!("expected a partial answer, got {other:?}"),
+        }
+    }
+
+    fn degraded(json: &str, held: Option<&EmoteSet>) -> Outcome {
+        done(settle(Chan::Body(body(json), None), Some(vec![]), held))
+    }
+
     #[test]
-    fn a_degraded_answer_keeps_the_last_good_set() {
-        let held = EmoteSet::from_list([em("Old", "7tv", "https://cdn/old")]);
-        // the server says a provider was down and may add fields we don't know
-        let b = body(r#"{"emotes":[],"degraded":true,"served":{"7tv":"2026-11-22T00:00:00Z"}}"#);
-        assert!(matches!(
-            done(settle(Chan::Body(b, None), Some(vec![]), Some(&held))),
-            Outcome::Failed
+    fn a_degraded_answer_never_removes_what_the_room_holds() {
+        let held = EmoteSet::from_list([
+            em("OldSeven", "7tv", "https://cdn/7"),
+            em("OldBttv", "bttv", "https://cdn/b"),
+        ]);
+        // 1. the answer has a provider's emotes (fresh or a kept copy): taken
+        let (s, kept) = partial(degraded(
+            r#"{"degraded":true,"lastFresh":{"7tv":"2026-11-22T10:00:00Z"},
+                "emotes":[{"name":"NewSeven","url":"https://cdn/n7","provider":"7tv"}]}"#,
+            Some(&held),
         ));
-        // an answer that is not degraded (or never says) replaces it
+        assert!(s.get("NewSeven").is_some() && s.get("OldSeven").is_none());
+        assert_eq!(
+            kept,
+            vec![("7tv".to_string(), "2026-11-22T10:00:00Z".to_string())]
+        );
+        // 2. the answer has none for a provider we hold: ours stay
+        assert!(s.get("OldBttv").is_some());
+        // 3. we hold nothing, the answer has something: taken as it came
+        let (s, _) = partial(degraded(
+            r#"{"degraded":true,"emotes":[{"name":"Only","url":"https://cdn/o","provider":"ffz"}]}"#,
+            None,
+        ));
+        assert!(s.get("Only").is_some());
+        let (s, _) = partial(degraded(
+            r#"{"degraded":true,"emotes":[{"name":"Only","url":"https://cdn/o","provider":"ffz"}]}"#,
+            Some(&held),
+        ));
+        assert!(
+            s.get("Only").is_some() && s.get("OldSeven").is_some() && s.get("OldBttv").is_some()
+        );
+        // 4. a cold start in an outage: a kept copy is the whole set and is used
+        let (s, kept) = partial(degraded(
+            r#"{"degraded":true,"lastFresh":{"bttv":"2026-11-22T09:00:00Z"},
+                "emotes":[{"name":"Kept","url":"https://cdn/k","provider":"bttv"}]}"#,
+            None,
+        ));
+        assert!(s.get("Kept").is_some());
+        assert_eq!(kept.len(), 1);
+        // unknown fields and today's server (no lastFresh) are fine
+        let (_, kept) = partial(degraded(
+            r#"{"degraded":true,"emotes":[],"x":{"y":1}}"#,
+            Some(&held),
+        ));
+        assert!(kept.is_empty());
+        // an answer that is not degraded replaces as before
         let b = body(r#"{"emotes":[{"name":"New","url":"https://cdn/n","provider":"7tv"}]}"#);
         assert!(matches!(
             done(settle(Chan::Body(b, None), Some(vec![]), Some(&held))),

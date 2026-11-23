@@ -47,6 +47,10 @@ pub fn key(platform: Platform, name: &str) -> Key {
 pub enum Outcome {
     /// a new body, and the validator to send next time.
     Changed(EmoteSet, Option<String>),
+    /// a degraded answer already merged with what the room held (nothing the
+    /// room had was dropped), and the providers served from a kept copy with
+    /// when each was last fresh. it is used, and the room is retried soon.
+    Partial(EmoteSet, Vec<(String, String)>),
     /// the server says what we hold is current.
     NotModified,
     /// no usable answer.
@@ -64,6 +68,9 @@ pub struct Applied {
     /// a hand-started refresh: its result is worth a line either way.
     pub manual: bool,
     pub failed: bool,
+    /// providers the answer came from a kept copy for (with since-when), for
+    /// the stale line; empty when unknown.
+    pub stale: Vec<(String, String)>,
 }
 
 struct Entry {
@@ -316,7 +323,20 @@ impl State {
         let e = self.entries.get_mut(&k)?;
         e.inflight = false;
         let manual = std::mem::take(&mut e.manual);
+        let mut stale = Vec::new();
         let (changed, failed, say_stale) = match o {
+            // a degraded answer is used, never trusted as final: retry soon
+            Outcome::Partial(set, kept) if !set.is_empty() => {
+                e.set = Some(set);
+                e.etag = None;
+                e.due = retry;
+                let say = !e.stale_said;
+                e.stale_said = true;
+                if say {
+                    stale = kept;
+                }
+                (true, false, say)
+            }
             Outcome::Changed(set, etag) if !set.is_empty() => {
                 e.set = Some(set);
                 e.fresh = Some(now);
@@ -332,7 +352,7 @@ impl State {
                 (false, false, false)
             }
             // an empty body is as unusable as no body: keep what we have.
-            Outcome::Changed(..) | Outcome::Failed => {
+            Outcome::Changed(..) | Outcome::Partial(..) | Outcome::Failed => {
                 e.due = retry;
                 let say = !e.stale_said;
                 e.stale_said = true;
@@ -345,6 +365,7 @@ impl State {
             say_stale,
             manual,
             failed,
+            stale,
         })
     }
 }
@@ -413,6 +434,34 @@ mod tests {
         // a good answer clears the outage; the next failure speaks again
         st.apply(k("xqc"), Outcome::NotModified, t0).unwrap();
         assert!(st.apply(k("xqc"), Outcome::Failed, t0).unwrap().say_stale);
+    }
+
+    #[test]
+    fn a_partial_answer_is_used_retried_soon_and_says_so_once() {
+        let (mut st, t0) = seeded("xqc", &set(&[("Old", "1")]));
+        let kept = vec![("7tv".to_string(), "2026-11-22T10:00:00Z".to_string())];
+        let a = st
+            .apply(
+                k("xqc"),
+                Outcome::Partial(set(&[("Old", "1"), ("New", "2")]), kept.clone()),
+                t0,
+            )
+            .unwrap();
+        assert!(a.changed && !a.failed && a.say_stale && a.stale == kept);
+        assert!(st.set(&k("xqc")).unwrap().get("New").is_some());
+        // due again within the retry, not a full period
+        assert_eq!(st.wanted(&[k("xqc")], t0 + RETRY * 2).len(), 1);
+        // the next partial answer does not say it again
+        let b = st
+            .apply(k("xqc"), Outcome::Partial(set(&[("Old", "1")]), kept), t0)
+            .unwrap();
+        assert!(!b.say_stale && b.stale.is_empty());
+        // a good answer ends the outage
+        st.apply(k("xqc"), Outcome::NotModified, t0).unwrap();
+        let c = st
+            .apply(k("xqc"), Outcome::Partial(set(&[("Old", "1")]), vec![]), t0)
+            .unwrap();
+        assert!(c.say_stale);
     }
 
     #[test]

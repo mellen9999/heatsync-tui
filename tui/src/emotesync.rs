@@ -7,7 +7,7 @@ use crate::app::{App, Feed};
 use crate::feed::request_stacks;
 use crate::http;
 use crate::refresh::{self, Key};
-use heatsync_core::i18n::tr;
+use heatsync_core::i18n::{tr, trf};
 use heatsync_core::{Channel, Platform};
 
 /// the rooms a tab draws from. youtube tabs are named by video id and have no
@@ -57,7 +57,13 @@ pub(crate) fn pump(app: &mut App) {
             rebuilt |= swap_in(app, &a.key);
         }
         if a.say_stale {
-            app.status = Some(tr("emotes.stale").into());
+            app.status = Some(match a.stale.first() {
+                Some((p, since)) => trf(
+                    "emotes.stale_provider",
+                    &[("provider", p), ("since", &since.replace('T', " "))],
+                ),
+                None => tr("emotes.stale").into(),
+            });
         } else if a.manual {
             app.status = Some(
                 tr(if a.failed {

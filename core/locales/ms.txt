@@ -47,6 +47,7 @@ emotes.refresh_failed=couldn't refresh emotes — emotes may be stale
 emotes.refreshed=emotes refreshed
 emotes.refreshing=refreshing emotes…
 emotes.stale=emotes may be stale — can't reach heatsync, retrying (/emotes refresh tries now)
+emotes.stale_provider={provider} emotes may be stale since {since} — retrying (/emotes refresh tries now)
 draw.h_close=tutup
 draw.h_delete=padam
 draw.h_edit=sunting
