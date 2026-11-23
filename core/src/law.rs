@@ -370,26 +370,36 @@ pub struct WordHit<'a, E> {
     pub overlay: bool,
 }
 
+/// what one exact spelling means: the line's own pick, the sender's personal
+/// set, the room, the sender's inventory, then a global. `Some((None, _))` is a
+/// withdrawn pick. the overlay reading is [`read_word`]'s, which asks this once
+/// for the word and once for the word minus a trailing 0.
+pub fn read_exact<'a, E: Pic>(
+    word: &str,
+    ctx: &ReadCtx<'a, '_, E>,
+    fold: bool,
+) -> Option<(Option<&'a E>, From)> {
+    if let Some(r) = ref_for(ctx.refs, word, fold) {
+        return Some(match r {
+            Ref::Gone => (None, From::Pick),
+            Ref::Pic(e) => (Some(e), From::Pick),
+        });
+    }
+    if let Some(e) = pick(ctx.sender.map(|s| &s.personal), word, fold) {
+        return Some((Some(e), From::Personal));
+    }
+    if let Some(e) = pick(ctx.room.map(|r| &r.names), word, fold) {
+        return Some((Some(e), From::Room));
+    }
+    if let Some(e) = pick(ctx.sender.map(|s| &s.inventory), word, fold) {
+        return Some((Some(e), From::Sender));
+    }
+    pick(Some(ctx.globals), word, fold).map(|e| (Some(e), From::Global))
+}
+
 /// what one word draws. None = not an emote.
 pub fn read_word<'a, E: Pic>(word: &str, ctx: &ReadCtx<'a, '_, E>) -> Option<WordHit<'a, E>> {
-    let ((emote, from), stripped, _) = passes(word, ctx.fold, |w, f, _| {
-        if let Some(r) = ref_for(ctx.refs, w, f) {
-            return Some(match r {
-                Ref::Gone => (None, From::Pick),
-                Ref::Pic(e) => (Some(e), From::Pick),
-            });
-        }
-        if let Some(e) = pick(ctx.sender.map(|s| &s.personal), w, f) {
-            return Some((Some(e), From::Personal));
-        }
-        if let Some(e) = pick(ctx.room.map(|r| &r.names), w, f) {
-            return Some((Some(e), From::Room));
-        }
-        if let Some(e) = pick(ctx.sender.map(|s| &s.inventory), w, f) {
-            return Some((Some(e), From::Sender));
-        }
-        pick(Some(ctx.globals), w, f).map(|e| (Some(e), From::Global))
-    })?;
+    let ((emote, from), stripped, _) = passes(word, ctx.fold, |w, f, _| read_exact(w, ctx, f))?;
     Some(WordHit {
         emote,
         from,

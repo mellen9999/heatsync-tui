@@ -329,7 +329,10 @@ fn feed_edit(v: &Value) -> Event {
         return Event::Ignore;
     }
     let text = text.chars().take(MAX_EDIT_TEXT).collect();
-    let emotes = refs_from(m.get("emote_refs").or_else(|| m.get("emoteRefs")));
+    let emotes = refs_from(
+        m.get("emote_refs").or_else(|| m.get("emoteRefs")),
+        emote::RefKind::Pick,
+    );
     Event::FeedEdit { id, text, emotes }
 }
 
@@ -394,24 +397,33 @@ fn line_from(m: &Value, platform: Platform, channel: Option<&Value>) -> Option<C
     })
 }
 
-/// a `{name: {url, provider, zeroWidth}}` ref map → refs (relay `hsEmotes`,
-/// feed `emote_refs`). cw stubs ({name, cw}, no url) carry nothing to draw —
-/// the word stays text rather than leak the hidden image.
-fn refs_from(v: Option<&Value>) -> Vec<Emote> {
+/// a `{name: {url, provider, zeroWidth}}` ref map → refs of one kind: relay
+/// `hsEmotes` are the sender's inventory ([`emote::RefKind::Sender`]), feed and
+/// edit `emote_refs` are the sender's own picks ([`emote::RefKind::Pick`]).
+/// a stub ({name, cw} or `gone`, no url) carries nothing to draw: as a pick it
+/// stays a `Gone` ref, so the word is plain text rather than leak the hidden
+/// image or borrow a look-alike; as a sender ref it is dropped.
+fn refs_from(v: Option<&Value>, kind: emote::RefKind) -> Vec<Emote> {
     let Some(map) = v.and_then(Value::as_object) else {
         return Vec::new();
     };
     map.iter()
         .take(MAX_REFS)
         .filter_map(|(name, r)| {
-            let url = r.get("url").and_then(Value::as_str)?;
+            let url = match r.get("url").and_then(Value::as_str) {
+                Some(u) if r.get("gone").and_then(Value::as_bool) != Some(true) => u,
+                _ if kind == emote::RefKind::Pick => return Emote::gone(name),
+                _ => return None,
+            };
             let provider = r
                 .get("provider")
                 .and_then(Value::as_str)
                 .filter(|p| !p.is_empty())
                 .unwrap_or("heatsync");
             let zw = r.get("zeroWidth").and_then(Value::as_bool).unwrap_or(false);
-            emote::msg_ref(name, url, provider, zw)
+            let mut e = emote::msg_ref(name, url, provider, zw)?;
+            e.kind = kind;
+            Some(e)
         })
         .collect()
 }
@@ -421,8 +433,9 @@ const MAX_REFS: usize = 64;
 
 /// a message's emote refs, plus its text (kick tokens are rewritten to names).
 /// order is priority, first wins: the platform's native ids (exact by position,
-/// what the line literally carries), then the relay's `hsEmotes` (the sender's
-/// inventory emotes, resolved server-side).
+/// what the line literally carries), the picks the sender's app shipped
+/// (`emote_refs`), then the relay's `hsEmotes` (the sender's inventory emotes,
+/// matched to words server-side — a guess, so the room outranks them).
 fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emote>) {
     let mut refs: Vec<Emote> = Vec::new();
     let mut add = |e: Emote| {
@@ -444,7 +457,7 @@ fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emot
                     if let Some(e) = url
                         .as_str()
                         .and_then(|u| emote::msg_ref(name, u, "twitch", false))
-                        .map(Emote::into_token)
+                        .map(Emote::into_pick)
                     {
                         add(e);
                     }
@@ -460,7 +473,14 @@ fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emot
         }
         _ => {}
     }
-    for e in refs_from(m.get("hsEmotes")) {
+    // what the sender's own app shipped with the line: picks, outranking the room
+    for e in refs_from(
+        m.get("emote_refs").or_else(|| m.get("emoteRefs")),
+        emote::RefKind::Pick,
+    ) {
+        add(e);
+    }
+    for e in refs_from(m.get("hsEmotes"), emote::RefKind::Sender) {
         add(e);
     }
     (text, refs)
@@ -859,7 +879,10 @@ pub fn feed_row(v: &Value) -> Option<SpecialLine> {
     } else {
         Tag::new("[RE]", TagKind::Reply)
     };
-    let emotes = refs_from(v.get("emote_refs").or_else(|| v.get("emoteRefs")));
+    let emotes = refs_from(
+        v.get("emote_refs").or_else(|| v.get("emoteRefs")),
+        emote::RefKind::Pick,
+    );
     Some(SpecialLine {
         tab: TabKind::Feed,
         line: special_chat(
@@ -1699,7 +1722,37 @@ mod tests {
         );
         assert_eq!(l.emotes.len(), 1);
         assert_eq!(l.emotes[0].name, "Sub");
-        assert!(l.emotes[0].token, "a platform's own mark owns its word");
+        assert_eq!(
+            l.emotes[0].kind,
+            emote::RefKind::Pick,
+            "a platform's own mark owns its word"
+        );
+    }
+
+    #[test]
+    fn shipped_picks_and_the_relays_inventory_match_are_two_kinds() {
+        let l = chat(
+            r##"{"type":"irc:message","channel":"c","message":{"username":"u","content":"Pog Kappa Old",
+            "emote_refs":{"Pog":{"url":"https://cdn.hs/p.webp","provider":"7tv"},"Old":{"cw":true}},
+            "hsEmotes":{"Kappa":{"url":"https://cdn.hs/k.webp"},"Pog":{"url":"https://cdn.hs/other.webp"},"Cw":{"cw":true}}}}"##,
+        );
+        let kind = |n: &str| l.emotes.iter().find(|e| e.name == n).map(|e| e.kind);
+        assert_eq!(
+            kind("Pog"),
+            Some(emote::RefKind::Pick),
+            "the shipped pick wins its name"
+        );
+        assert_eq!(kind("Kappa"), Some(emote::RefKind::Sender));
+        assert_eq!(
+            kind("Old"),
+            Some(emote::RefKind::Gone),
+            "a take-down stays a ref"
+        );
+        assert_eq!(kind("Cw"), None, "a stub from the relay carries nothing");
+        assert_eq!(
+            l.emotes.iter().find(|e| e.name == "Pog").unwrap().url,
+            "https://cdn.hs/p.webp"
+        );
     }
 
     #[test]
@@ -1709,7 +1762,7 @@ mod tests {
             "hsEmotes":{"Pog":{"url":"https://cdn.hs/p.webp","provider":"7tv"}}}}"##,
         );
         assert_eq!(l.emotes.len(), 1);
-        assert!(!l.emotes[0].token);
+        assert_eq!(l.emotes[0].kind, emote::RefKind::Sender);
     }
 
     #[test]

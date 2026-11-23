@@ -7,6 +7,7 @@
 //! never a skip — a client that silently ignored a new rule would pass while
 //! breaking it.
 
+use heatsync_core::emote::{self, Emote, EmoteSet, RefKind, Segment};
 use heatsync_core::law::{
     self, Index, OfferCtx, Own, Pic, Platform, Ref, Room, RoomLists, SendCtx, Token,
 };
@@ -887,4 +888,170 @@ fn refuses_a_case_it_does_not_understand_instead_of_skipping_it() {
     assert!(err(json!({ "kind": "read", "name": "x", "world": "main", "room": null, "sender": null, "text": "a", "viewer": "me", "expect": [] })).contains("field \"viewer\""));
     assert!(err(json!({ "kind": "session", "name": "x", "world": "main", "who": "me", "steps": [{ "text": "a", "extra": 1, "expect": {} }] })).contains("field \"extra\""));
     assert!(err(json!({ "kind": "session", "name": "x", "world": "main", "who": "me", "steps": [{ "text": "a", "expect": { "colour": 1 } }] })).contains("field \"colour\""));
+}
+
+// ── the terminal's own drawing path ─────────────────────────────────────────
+//
+// `segments_with` is what the terminal draws a chat line with. these cases run
+// the vectors' `read` cases through it, so the drawing path is held to the law
+// itself and not only the helper the runner above calls. what the terminal can
+// say maps like this: a shipped pick or a taken-down pick is a Pick / Gone ref,
+// the sender's 7tv personal set rides as picks (nothing in its tier is lower
+// than a pick but a same-named pick, which the ref map already decides), the
+// sender's inventory is the relay's Sender refs. a case with a platform token
+// span (positions are not kept after the text is rewritten) or the case-fold
+// setting (the terminal has none) is not one it can say, and is counted.
+
+fn tui_emote(w: &World, alias: &str, kind: RefKind) -> Res<Emote> {
+    let e = w.emote(alias)?;
+    Ok(Emote {
+        name: e.name.clone(),
+        url: format!("https://v.test/{alias}.webp"),
+        provider: e.p.clone(),
+        id: e.id.clone(),
+        animated: false,
+        zero_width: e.zw,
+        global: false,
+        kind,
+    })
+}
+
+/// (words drawn by the terminal, words the law expects) for one `read` case,
+/// None when the terminal cannot say it.
+fn drawing(
+    file: &Map<String, Value>,
+    c: &Value,
+    seed: u32,
+) -> Res<Option<(Vec<String>, Vec<String>)>> {
+    let c = obj(c, "case")?;
+    if str_of(c, "kind") != Some("read")
+        || c.get("fold").and_then(Value::as_bool) == Some(true)
+        || c.get("tokens")
+            .is_some_and(|t| !t.as_array().is_some_and(Vec::is_empty))
+    {
+        return Ok(None);
+    }
+    let raw = obj(&file["worlds"][str_of(c, "world").ok_or("world")?], "world")?;
+    let mut rng = Rng(seed);
+    let w = build_world(file, raw, &mut rng)?;
+    let em = |a: &String, k: RefKind| tui_emote(&w, a, k);
+    let list = |v: Option<&Value>, k: RefKind| -> Res<Vec<Emote>> {
+        rng_list(&mut Rng(seed), v)
+            .iter()
+            .map(|a| em(a, k))
+            .collect()
+    };
+    // the room's lists, and the globals
+    let (mut room_lists, mut loaded) = (Vec::new(), true);
+    if let Some(id) = str_of(c, "room") {
+        let r = obj(&raw["rooms"][id], id)?;
+        loaded = r.get("loaded").and_then(Value::as_bool).unwrap_or(true);
+        for k in ["owner", "third", "native"] {
+            room_lists.extend(list(r.get(k), RefKind::Sender)?);
+        }
+    }
+    let room = EmoteSet::from_list(room_lists);
+    let _ = loaded;
+    let mut set = EmoteSet::from_global_list(list(Some(&raw["globals"]), RefKind::Sender)?);
+    set.merge(room);
+    // the line's own refs: the sender's personal set and shipped picks (picks), the inventory (sender)
+    let mut line: Vec<Emote> = Vec::new();
+    let mut named: HashSet<String> = HashSet::new();
+    if let Some(r) = c.get("refs").and_then(Value::as_object) {
+        for (name, v) in r {
+            let a = v.as_str().ok_or("ref alias")?;
+            named.insert(name.clone());
+            line.push(if a == "gone" {
+                Emote::gone(name).ok_or("gone name")?
+            } else {
+                Emote {
+                    name: name.clone(),
+                    ..tui_emote(&w, a, RefKind::Pick)?
+                }
+            });
+        }
+    }
+    if let Some(who) = str_of(c, "sender") {
+        let p = obj(&raw["people"][who], who)?;
+        let (inv, pers) = (
+            list(p.get("inventory"), RefKind::Sender)?,
+            list(p.get("personal"), RefKind::Pick)?,
+        );
+        let personal = law::build_index(&pers, None);
+        for (n, e) in personal {
+            if named.insert(n) {
+                line.push(e);
+            }
+        }
+        for (n, e) in law::build_index(&inv, None) {
+            if named.insert(n) {
+                line.push(e);
+            }
+        }
+    }
+    let refs = emote::ref_set(&line);
+    let text = str_of(c, "text").ok_or("text")?;
+    let got: Vec<String> = emote::segments_with(text, &set, &refs)
+        .into_iter()
+        .filter_map(|s| match s {
+            Segment::Stack(st) => Some(st.layers.into_iter().map(|l| {
+                l.url
+                    .trim_start_matches("https://v.test/")
+                    .trim_end_matches(".webp")
+                    .to_string()
+            })),
+            Segment::Text(_) => None,
+        })
+        .flatten()
+        .collect();
+    let want: Vec<String> = c["expect"]
+        .as_array()
+        .ok_or("expect")?
+        .iter()
+        .filter_map(|d| d["emote"].as_str().map(String::from))
+        .collect();
+    Ok(Some((got, want)))
+}
+
+fn rng_list(rng: &mut Rng, v: Option<&Value>) -> Vec<String> {
+    rng.shuffled(&strs(v))
+}
+
+#[test]
+fn the_terminals_drawing_path_agrees_with_the_law_on_every_read_case_it_can_say() {
+    let f = file();
+    let (mut said, mut skipped, mut failed) = (0, 0, Vec::new());
+    for c in f["cases"].as_array().unwrap() {
+        for seed in SHUFFLES {
+            match drawing(&f, c, seed) {
+                Ok(None) => {
+                    skipped += 1;
+                    break;
+                }
+                Ok(Some((got, want))) if got == want => {}
+                Ok(Some((got, want))) => {
+                    failed.push(format!(
+                        "{} (shuffle {seed})\n  want {want:?}\n  got  {got:?}",
+                        c["name"]
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    failed.push(format!("{}: {e}", c["name"]));
+                    break;
+                }
+            }
+            if seed == SHUFFLES[SHUFFLES.len() - 1] {
+                said += 1;
+            }
+        }
+    }
+    println!("terminal drawing: {said} read cases agree under every shuffle, {skipped} cases it cannot say (tokens, case fold, and the other jobs)");
+    assert!(said >= 20, "too few cases exercised: {said}");
+    assert!(
+        failed.is_empty(),
+        "{} case(s) differ:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
 }

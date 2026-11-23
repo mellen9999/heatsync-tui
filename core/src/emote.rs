@@ -9,7 +9,8 @@
 use serde::Deserialize;
 
 use crate::complete::Ranked;
-use crate::law::{self, Index, Own, Platform, Room, RoomLists};
+use crate::law::{self, Index, Own, Platform, Ref, Room, RoomLists};
+use std::collections::HashMap;
 
 /// one emote as the HeatSync emote API returns it.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -27,18 +28,40 @@ pub struct Emote {
     /// own set — channel emotes of the same name override it. never serialized.
     #[serde(skip)]
     pub global: bool,
-    /// a platform's own mark on this line (twitch's tag, kick's `[emote:…]`):
-    /// it owns its word, so nothing the room or the sender has outranks it.
-    /// per-message refs only. never serialized.
+    /// what kind of per-message ref this is (see [`RefKind`]); a set's own
+    /// emotes are the default kind and it means nothing for them. never serialized.
     #[serde(skip)]
-    pub token: bool,
+    pub kind: RefKind,
+}
+
+/// what a line's own emote ref is. the law reads them in different tiers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RefKind {
+    /// the sender's inventory emote the relay matched to a word (`hsEmotes`) —
+    /// a server guess: it sits below the room's own emote of that name.
+    #[default]
+    Sender,
+    /// what the line itself carries: a platform's own mark (twitch's tag,
+    /// kick's `[emote:…]`) or a pick the sender's app shipped (`emote_refs`).
+    /// it owns its word, so nothing the room or a global has outranks it.
+    Pick,
+    /// a pick that was taken down: the word is plain text, never a look-alike.
+    Gone,
 }
 
 impl Emote {
-    /// mark as a platform token (see [`Emote::token`]).
-    pub fn into_token(mut self) -> Emote {
-        self.token = true;
+    /// mark as what the line itself carries (see [`RefKind::Pick`]).
+    pub fn into_pick(mut self) -> Emote {
+        self.kind = RefKind::Pick;
         self
+    }
+
+    /// a taken-down pick of `name`: nothing to draw, and nothing else may.
+    pub fn gone(name: &str) -> Option<Emote> {
+        let mut e = msg_ref(name, "https://gone.invalid/", "", false)?;
+        e.url.clear();
+        e.kind = RefKind::Gone;
+        Some(e)
     }
 }
 
@@ -135,7 +158,7 @@ pub fn owner_list(v: &serde_json::Value, base: &str) -> Vec<Emote> {
                 animated: false,
                 zero_width: false,
                 global: false,
-                token: false,
+                kind: Default::default(),
             })
         })
         .collect()
@@ -776,7 +799,7 @@ pub fn msg_ref(name: &str, url: &str, provider: &str, zero_width: bool) -> Optio
         animated: false,
         zero_width,
         global: false,
-        token: false,
+        kind: Default::default(),
     })
 }
 
@@ -819,7 +842,7 @@ pub fn twitch_native(tag: &str, text: &str) -> Vec<Emote> {
         let url = format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0");
         push_ref(
             &mut out,
-            msg_ref(&name, &url, "twitch", false).map(Emote::into_token),
+            msg_ref(&name, &url, "twitch", false).map(Emote::into_pick),
         );
     }
     out
@@ -840,7 +863,7 @@ pub fn kick_native(text: &str) -> (String, Vec<Emote>) {
             let (id, name) = body.split_once(':')?;
             let url = format!("https://files.kick.com/emotes/{id}/fullsize");
             let ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
-            ok.then(|| msg_ref(name, &url, "kick", false).map(|e| (e.into_token(), tail)))?
+            ok.then(|| msg_ref(name, &url, "kick", false).map(|e| (e.into_pick(), tail)))?
         });
         match token {
             Some((e, tail)) => {
@@ -871,23 +894,60 @@ pub enum Segment {
     Stack(Stack),
 }
 
-/// name → emote by the law's order for one word: a platform token on the line
-/// (exact by position, so no same-named emote ever replaces it), then the
-/// room's own emote, then the one the sender's inventory brought along, then a
-/// global. a loading room is empty and borrows nothing.
+/// a line's own refs, sorted into the law's tiers: what the line carries (a
+/// platform's mark, a shipped pick, a taken-down pick) and what the relay
+/// matched from the sender's inventory.
+struct LineView<'a> {
+    picks: HashMap<String, Ref<'a, Emote>>,
+    sender: Own<Emote>,
+}
+
+impl<'a> LineView<'a> {
+    fn new(refs: &'a EmoteSet) -> LineView<'a> {
+        let mut picks = HashMap::new();
+        let mut sender = Own::default();
+        for e in refs.room.names.values().chain(refs.globals.values()) {
+            match e.kind {
+                RefKind::Pick => {
+                    picks.insert(e.name.clone(), Ref::Pic(e));
+                }
+                RefKind::Gone => {
+                    picks.insert(e.name.clone(), Ref::Gone);
+                }
+                RefKind::Sender => {
+                    sender.inventory.insert(e.name.clone(), e.clone());
+                }
+            }
+        }
+        LineView { picks, sender }
+    }
+}
+
+/// name → emote by the emote law, for one line: its own picks and platform
+/// marks, then the room's emote, then the sender's inventory emote, then a
+/// global. a loading room is empty and borrows nothing. every word goes
+/// through `law::read_word`; there is no second order here.
 struct Lookup<'a> {
     set: &'a EmoteSet,
-    refs: &'a EmoteSet,
+    view: &'a LineView<'a>,
 }
 
 impl<'a> Lookup<'a> {
+    fn ctx(&self) -> law::ReadCtx<'a, 'a, Emote> {
+        let (set, view): (&'a EmoteSet, &'a LineView<'a>) = (self.set, self.view);
+        law::ReadCtx {
+            room: Some(&set.room),
+            refs: Some(&view.picks),
+            sender: Some(&view.sender),
+            globals: &set.globals,
+            fold: false,
+        }
+    }
+
+    /// one exact spelling (no overlay reading): what the modifier scans and the
+    /// block keys ask. a taken-down pick has no emote to give.
     fn get(&self, name: &str) -> Option<&'a Emote> {
-        self.refs
-            .get(name)
-            .filter(|e| e.token)
-            .or_else(|| self.set.room_get(name))
-            .or_else(|| self.refs.get(name))
-            .or_else(|| self.set.global_get(name))
+        law::read_exact(name, &self.ctx(), false).and_then(|(e, _)| e)
     }
 }
 
@@ -905,21 +965,14 @@ struct Resolved<'a> {
 /// modifier suffixes (`Kappaw!`, `KappaffzX`, `Kappac!#888`, chains), then
 /// glued BTTV prefixes (`w!h!Kappa`).
 fn resolve<'a>(word: &str, look: &Lookup<'a>) -> Option<Resolved<'a>> {
-    if let Some(e) = look.get(word) {
-        return Some(Resolved {
-            emote: e,
-            overlay: e.zero_width,
+    // the word as typed, then minus a trailing 0 (the overlay reading) — the
+    // law's own two steps. a taken-down pick is plain text and nothing else.
+    if let Some(hit) = law::read_word(word, &look.ctx()) {
+        return hit.emote.map(|emote| Resolved {
+            emote,
+            overlay: hit.overlay,
             mods: Mods::default(),
         });
-    }
-    if let Some(base) = word.strip_suffix('0').filter(|b| !b.is_empty()) {
-        if let Some(e) = look.get(base) {
-            return Some(Resolved {
-                emote: e,
-                overlay: true,
-                mods: Mods::default(),
-            });
-        }
     }
     // every modifier spelling has a `!` or starts `ffz` — skip the peel scans
     // for the (vast majority) plain words.
@@ -962,7 +1015,7 @@ fn resolve<'a>(word: &str, look: &Lookup<'a>) -> Option<Resolved<'a>> {
 
 /// is the next non-modifier word an emote? modifiers in between are skipped so
 /// `c! ffzX Kappa` lands both on Kappa; a plain word stops the scan.
-fn emote_ahead(words: &[&str], from: usize, look: &Lookup) -> bool {
+fn emote_ahead(words: &[&str], from: usize, look: &Lookup<'_>) -> bool {
     for w in &words[from.min(words.len())..] {
         if is_modifier(w, look) {
             continue;
@@ -974,20 +1027,21 @@ fn emote_ahead(words: &[&str], from: usize, look: &Lookup) -> bool {
 
 /// a modifier word — unless it is exactly an emote's name (only chains yield
 /// to a same-named emote; the shared table tokens win, as in the extension).
-fn is_modifier(word: &str, look: &Lookup) -> bool {
+fn is_modifier(word: &str, look: &Lookup<'_>) -> bool {
     classify(word).is_some_and(|c| c.exact || look.get(word).is_none())
 }
 
 /// the emotes a line names by their literal word (refs first, then the set) —
 /// blocked ones included, so a block key can still be aimed at them. in order,
 /// each exact emote once.
-pub fn emotes_in<'a>(content: &str, set: &'a EmoteSet, refs: &'a EmoteSet) -> Vec<&'a Emote> {
-    let look = Lookup { set, refs };
-    let mut out: Vec<&Emote> = Vec::new();
+pub fn emotes_in(content: &str, set: &EmoteSet, refs: &EmoteSet) -> Vec<Emote> {
+    let view = LineView::new(refs);
+    let look = Lookup { set, view: &view };
+    let mut out: Vec<Emote> = Vec::new();
     for w in content.split_whitespace() {
         if let Some(e) = look.get(w) {
             if !out.iter().any(|o| o.url == e.url) {
-                out.push(e);
+                out.push(e.clone());
             }
         }
     }
@@ -1013,7 +1067,8 @@ pub fn segments(content: &str, set: &EmoteSet) -> Vec<Segment> {
 
 /// [`segments`] with a per-message ref set that outranks `set` — see [`Lookup`].
 pub fn segments_with(content: &str, set: &EmoteSet, refs: &EmoteSet) -> Vec<Segment> {
-    let look = Lookup { set, refs };
+    let view = LineView::new(refs);
+    let look = Lookup { set, view: &view };
     let words: Vec<&str> = content.split_whitespace().collect();
     let mut out: Vec<Segment> = Vec::new();
     let mut text = String::new();
@@ -1114,7 +1169,7 @@ mod tests {
             animated: false,
             zero_width: false,
             global: false,
-            token: false,
+            kind: Default::default(),
         }
     }
 
@@ -1131,7 +1186,7 @@ mod tests {
             provider: provider.into(),
             ..e(name)
         }
-        .into_token()
+        .into_pick()
     }
 
     /// the standard cast: bases, an overlay, a literal `Name0`.
@@ -1226,8 +1281,66 @@ mod tests {
     #[test]
     fn a_platform_token_still_beats_the_room() {
         let room = EmoteSet::from_list([e("Pog")]);
-        let refs = ref_set(&[sender("Pog").into_token()]);
+        let refs = ref_set(&[sender("Pog").into_pick()]);
         assert_eq!(show_with("Pog", &room, &refs), "SenderPog");
+    }
+
+    /// what a line draws, as a list of the picture each word shows (`name` of
+    /// the url's last segment) or the word itself in quotes when it stays text.
+    fn drawn(line: &str, room: &EmoteSet, refs: &[Emote]) -> String {
+        show_with(line, room, &ref_set(refs))
+    }
+
+    fn picked(name: &str, tag: &str) -> Emote {
+        Emote {
+            url: format!("https://pick/{tag}.webp"),
+            provider: "7tv".into(),
+            ..e(name)
+        }
+        .into_pick()
+    }
+
+    #[test]
+    fn a_pick_the_sender_shipped_beats_the_room_and_a_global() {
+        // vector: "a line's own pick beats the room" — read through the real
+        // drawing path, not the law helper
+        let room = EmoteSet::from_list([e("Pog")]);
+        assert_eq!(
+            drawn("Pog", &room, &[picked("Pog", "TheirPog")]),
+            "TheirPog"
+        );
+        let mut globals = EmoteSet::from_global_list([e("Pog")]);
+        assert_eq!(
+            drawn("Pog", &globals, &[picked("Pog", "TheirPog")]),
+            "TheirPog"
+        );
+        // the same name from the relay's inventory match gives way to the room
+        assert_eq!(drawn("Pog", &room, &[sender("Pog")]), "Pog");
+        globals.merge(room);
+        assert_eq!(drawn("Pog", &globals, &[sender("Pog")]), "Pog");
+    }
+
+    #[test]
+    fn a_taken_down_pick_is_text_never_a_look_alike() {
+        let room = EmoteSet::from_list([e("Pog"), e("Kappa")]);
+        let gone = Emote::gone("Pog").unwrap();
+        assert_eq!(
+            drawn("Pog Kappa", &room, std::slice::from_ref(&gone)),
+            "'Pog' Kappa"
+        );
+        // the overlay reading and a modifier do not bring the room's back
+        assert_eq!(drawn("Pog0", &room, std::slice::from_ref(&gone)), "'Pog0'");
+        assert_eq!(drawn("w!Pog", &room, &[gone]), "'w!Pog'");
+    }
+
+    #[test]
+    fn a_pick_can_be_an_overlay_name_zero_as_the_law_says() {
+        let room = EmoteSet::from_list([e("GAMBA")]);
+        // picked Pog drawn as `Pog0` over the emote before it
+        assert_eq!(
+            drawn("GAMBA Pog0", &room, &[picked("Pog", "TheirPog")]),
+            "GAMBA+TheirPog"
+        );
     }
 
     #[test]
@@ -1282,13 +1395,14 @@ mod tests {
     #[test]
     fn what_a_platform_marks_is_a_token_and_what_the_relay_sends_is_not() {
         let tw = twitch_native("25:0-4", "Kappa hi");
-        assert!(tw.len() == 1 && tw.iter().all(|e| e.token));
+        assert!(tw.len() == 1 && tw.iter().all(|e| e.kind == RefKind::Pick));
         let (_, kick) = kick_native("[emote:37226:KEKW] hi");
-        assert!(kick.len() == 1 && kick.iter().all(|e| e.token));
-        assert!(
-            !msg_ref("Pog", "https://x/y", "heatsync", false)
+        assert!(kick.len() == 1 && kick.iter().all(|e| e.kind == RefKind::Pick));
+        assert_eq!(
+            msg_ref("Pog", "https://x/y", "heatsync", false)
                 .unwrap()
-                .token
+                .kind,
+            RefKind::Sender
         );
     }
 

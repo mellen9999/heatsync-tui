@@ -1191,7 +1191,7 @@ mod stack_tests {
             animated: false,
             zero_width: zw,
             global: false,
-            token: false,
+            kind: Default::default(),
         }
     }
 

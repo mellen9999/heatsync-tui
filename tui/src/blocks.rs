@@ -120,8 +120,7 @@ pub(crate) fn cursor_block(app: &mut App, text: &str, refs: &EmoteSet) {
     };
     let pick = emotes_in(text, set, refs)
         .into_iter()
-        .find(|e| !block::is_blocked(e))
-        .cloned();
+        .find(|e| !block::is_blocked(e));
     app.status = Some(match pick {
         Some(e) => block_one(app, &e),
         None => tr("input.blocks_none_left").into(),
