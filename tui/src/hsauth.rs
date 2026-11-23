@@ -601,7 +601,7 @@ pub fn is_logged_out(text: &str) -> bool {
 }
 
 /// the server refused for a missing permission on THIS login (not a platform one).
-fn scope_note(v: &Value, what: &str) -> Option<String> {
+pub(crate) fn scope_note(v: &Value, what: &str) -> Option<String> {
     (v.get("error_code").and_then(Value::as_str) == Some("scope_missing")
         && v.get("relink_required").and_then(Value::as_bool) != Some(true))
     .then(|| match what {
@@ -654,7 +654,7 @@ pub fn explain(status: u16, v: &Value, base: &str) -> String {
     match status {
         429 => tr("hsauth.err_too_fast").into(),
         s if s >= 500 => tr("hsauth.err_server").into(),
-        _ if !err.is_empty() => err.chars().take(160).collect(),
+        _ if !err.is_empty() => err.chars().filter(|c| !c.is_control()).take(160).collect(),
         s => trf("hsauth.err_denied", &[("status", &s.to_string())]),
     }
 }

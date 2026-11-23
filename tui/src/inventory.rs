@@ -98,12 +98,15 @@ fn plain(err: &str) -> Option<&'static str> {
 
 /// a non-2xx answer → plain words. a missing `account` permission names the fix.
 fn refused(st: u16, v: &Value, base: &str) -> String {
-    if v.get("error_code").and_then(Value::as_str) == Some("scope_missing")
-        && v.get("relink_required").and_then(Value::as_bool) != Some(true)
-    {
+    if hsauth::scope_note(v, "account").is_some() {
         return tr("inventory.no_scope").into();
     }
     let err = v.get("error").and_then(Value::as_str).unwrap_or("");
+    // a 404 that says nothing is the router, not the handler: this server does
+    // not have the routes yet. a handler's own 404 carries an `error` body.
+    if st == 404 && err.is_empty() {
+        return tr("inventory.not_deployed").into();
+    }
     match plain(err) {
         Some(w) => w.into(),
         None => explain(st, v, base),
@@ -124,10 +127,10 @@ impl Client {
             .map(|v| parse_slots(&v))
     }
 
-    /// add the emote as it is drawn; the name it landed under.
-    pub fn emote_add(&self, e: &Emote) -> Result<String, String> {
+    /// add the emote as it is drawn: what the server did with it.
+    pub fn emote_add(&self, e: &Emote) -> Result<Added, String> {
         let v = self.emote_call("POST", "/api/cli/emotes", Some(add_body(e)))?;
-        Ok(echoed(&v, &e.name))
+        Ok(added_from(&v, &e.name))
     }
 
     pub fn emote_rename(&self, slot: u32, new: &str) -> Result<String, String> {
@@ -151,6 +154,43 @@ impl Client {
             .and_then(Value::as_str)
             .map(|a| a.chars().filter(|c| !c.is_control()).take(80).collect()))
     }
+}
+
+/// what an add did: the name it landed under, the emote a full inventory gave
+/// up to make room, or that it was already there.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Added {
+    pub name: String,
+    pub replaced: Option<String>,
+    pub already: bool,
+}
+
+fn added_from(v: &Value, fallback: &str) -> Added {
+    let clean = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_NAME)
+            .collect()
+    };
+    Added {
+        name: echoed(v, fallback),
+        replaced: v
+            .get("evicted")
+            .and_then(|e| e.get("name"))
+            .and_then(Value::as_str)
+            .map(clean)
+            .filter(|n| !n.is_empty()),
+        already: v.get("alreadyExists").and_then(Value::as_bool) == Some(true),
+    }
+}
+
+/// an undo that reverted many emotes at once ("removed 300 imported emotes"):
+/// this client has no redo for those.
+fn bulk(what: &str) -> bool {
+    what.split_whitespace()
+        .nth(1)
+        .and_then(|n| n.parse::<u32>().ok())
+        .is_some_and(|n| n > 1)
 }
 
 /// the name the server kept (it cleans names), else the one we sent.
@@ -178,7 +218,16 @@ pub fn run_op(c: &Client, op: &EmoteOp, add: Option<&Emote>) -> Outcome {
         EmoteOp::Add(name) => match add {
             None => failed(trf("inventory.add_no_emote", &[("name", name)])),
             Some(e) => match c.emote_add(e) {
-                Ok(n) => done(trf("inventory.added", &[("name", &n)])),
+                Ok(a) if a.already => done(trf("inventory.already_yours", &[("name", &a.name)])),
+                Ok(Added {
+                    name,
+                    replaced: Some(old),
+                    ..
+                }) => done(trf(
+                    "inventory.added_replaced",
+                    &[("name", &name), ("old", &old)],
+                )),
+                Ok(a) => done(trf("inventory.added", &[("name", &a.name)])),
                 Err(w) => failed(trf("inventory.add_failed", &[("name", name), ("why", &w)])),
             },
         },
@@ -210,6 +259,7 @@ pub fn run_op(c: &Client, op: &EmoteOp, add: Option<&Emote>) -> Outcome {
             }
         }
         EmoteOp::Undo => match c.emote_undo() {
+            Ok(Some(what)) if bulk(&what) => done(trf("inventory.undone_bulk", &[("what", &what)])),
             Ok(Some(what)) => done(trf("inventory.undone", &[("what", &what)])),
             Ok(None) => done(tr("inventory.undone_plain").into()),
             Err(w) => failed(trf("inventory.undo_failed", &[("why", &w)])),
@@ -224,6 +274,21 @@ pub(crate) fn client(app: &App) -> Option<Client> {
         .flatten()
 }
 
+/// the lines whose emotes `/emote add` looks through (the screen's backlog).
+const RECENT: usize = 60;
+
+/// the emote `name` draws as: the tab's set first, then the newest line that
+/// carries one by that name.
+pub fn drawn_as<'a>(
+    set: &'a heatsync_core::emote::EmoteSet,
+    recent: impl Iterator<Item = &'a heatsync_core::emote::EmoteSet>,
+    name: &str,
+) -> Option<Emote> {
+    set.get(name)
+        .or_else(|| recent.into_iter().find_map(|r| r.get(name)))
+        .cloned()
+}
+
 /// `/emote …`: checks, then the call on its own thread; the words land as the
 /// tab's note, like a mod action's.
 pub(crate) fn emote_cmd(app: &mut App, op: EmoteOp) {
@@ -234,9 +299,14 @@ pub(crate) fn emote_cmd(app: &mut App, op: EmoteOp) {
     let Some(ch) = app.channels.get(app.focus) else {
         return;
     };
-    // the emote a name draws as in this tab (its channel set + globals)
-    let drawn = match &op {
-        EmoteOp::Add(n) => app.emotes.get(app.focus).and_then(|s| s.get(n)).cloned(),
+    // the emote a name draws as in this tab: its set, else one a recent line
+    // brought along (a sender's own emote is never in the set)
+    let drawn = match (&op, app.emotes.get(app.focus)) {
+        (EmoteOp::Add(n), Some(set)) => drawn_as(
+            set,
+            ch.messages.iter().rev().take(RECENT).map(|m| m.refs()),
+            n,
+        ),
         _ => None,
     };
     let (platform, name) = (ch.platform, ch.name.clone());
@@ -355,6 +425,104 @@ mod tests {
         assert_eq!(s[0].2.as_ref().unwrap()["emoteName"], "catJAM");
     }
 
+    fn add_answer(body: Value) -> Outcome {
+        let f = Fake::new(vec![Ok((200, body))]);
+        run_op(
+            &client(&f),
+            &EmoteOp::Add("catJAM".into()),
+            Some(&emote("catJAM")),
+        )
+    }
+
+    #[test]
+    fn a_full_inventory_says_which_emote_made_room() {
+        let o = add_answer(
+            json!({"success": true, "slot": 4, "name": "catJAM", "evicted": {"slot": 9, "name": "old\u{1b}one"}}),
+        );
+        assert!(o.ok);
+        assert_eq!(
+            o.text,
+            "added catJAM to your emotes (replaced oldone — your slots were full)"
+        );
+        // no eviction: the plain line
+        let o = add_answer(json!({"success": true, "slot": 4, "name": "catJAM", "evicted": null}));
+        assert_eq!(o.text, "added catJAM to your emotes");
+    }
+
+    #[test]
+    fn an_emote_you_already_had_is_not_reported_as_added() {
+        let o = add_answer(
+            json!({"success": true, "slot": 4, "name": "catJAM", "alreadyExists": true}),
+        );
+        assert!(o.ok);
+        assert_eq!(o.text, "catJAM was already yours");
+    }
+
+    #[test]
+    fn a_server_without_the_routes_says_so_not_404() {
+        for call in [
+            EmoteOp::Add("catJAM".into()),
+            EmoteOp::Rm("catJAM".into()),
+            EmoteOp::Mv("catJAM".into(), "x".into()),
+            EmoteOp::Undo,
+        ] {
+            // elysia's router answers a missing route with no json error
+            let f = Fake::new(vec![Ok((404, Value::Null))]);
+            let o = run_op(&client(&f), &call, Some(&emote("catJAM")));
+            assert!(
+                !o.ok && o.text.contains("can't manage emotes yet"),
+                "{}",
+                o.text
+            );
+            assert!(!o.text.contains("404"), "{}", o.text);
+        }
+        // a handler's own 404 keeps its words
+        let f = Fake::new(vec![Ok((404, json!({"error": "no emote in that slot"})))]);
+        let o = run_op(&client(&f), &EmoteOp::Undo, None);
+        assert!(o.text.contains("no emote in that slot"), "{}", o.text);
+    }
+
+    #[test]
+    fn undo_does_not_promise_a_redo_it_cannot_give() {
+        let f = Fake::new(vec![Ok((
+            200,
+            json!({"success": true, "action": "removed 300 imported emotes"}),
+        ))]);
+        let o = run_op(&client(&f), &EmoteOp::Undo, None);
+        assert_eq!(
+            o.text,
+            "undid: removed 300 imported emotes (redo on heatsync.org — this terminal has no redo)"
+        );
+        let f = Fake::new(vec![Ok((
+            200,
+            json!({"success": true, "action": "removed Pog"}),
+        ))]);
+        assert_eq!(
+            run_op(&client(&f), &EmoteOp::Undo, None).text,
+            "undid: removed Pog"
+        );
+    }
+
+    #[test]
+    fn a_senders_own_emote_in_a_recent_line_can_be_added() {
+        use heatsync_core::emote::EmoteSet;
+        let room = EmoteSet::from_list([emote("Kappa")]);
+        let line = EmoteSet::from_list([emote("TheirOwn")]);
+        let older = EmoteSet::from_list([Emote {
+            url: "https://cdn.7tv.app/emote/OLD/2x.webp".into(),
+            ..emote("TheirOwn")
+        }]);
+        // the set misses, the newest line that has it answers
+        let got = drawn_as(&room, [&line, &older].into_iter(), "TheirOwn").unwrap();
+        assert_eq!(got.url, line.get("TheirOwn").unwrap().url);
+        // the set wins when it has the name
+        assert_eq!(
+            drawn_as(&room, [&line].into_iter(), "Kappa").unwrap().name,
+            "Kappa"
+        );
+        assert!(drawn_as(&room, [&line].into_iter(), "Nope").is_none());
+    }
+
     #[test]
     fn add_of_a_word_the_tab_does_not_draw_never_calls_out() {
         let f = Fake::new(vec![]);
@@ -440,7 +608,10 @@ mod tests {
             Ok((200, json!({"success": true, "slot": 7}))),
         ]);
         let o = run_op(&client(&f), &EmoteOp::Rm("kappa".into()), None);
-        assert_eq!(o.text, "removed kappa (/emote undo brings it back)");
+        assert_eq!(
+            o.text,
+            "removed kappa (/emote undo takes back the last change)"
+        );
         let s = seen(&f);
         assert_eq!(
             (s[0].0.as_str(), s[0].1.as_str()),
