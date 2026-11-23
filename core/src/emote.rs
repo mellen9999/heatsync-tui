@@ -112,13 +112,7 @@ pub fn degraded_merge(answer: Vec<Emote>, held: Option<&EmoteSet>) -> Vec<Emote>
     let Some(held) = held else { return out };
     for p in ["7tv", "bttv", "ffz"] {
         if !out.iter().any(|e| e.provider == p) {
-            out.extend(
-                held.room
-                    .names
-                    .values()
-                    .filter(|e| e.provider == p)
-                    .cloned(),
-            );
+            out.extend(held.channel.iter().filter(|e| e.provider == p).cloned());
         }
     }
     out
@@ -131,6 +125,12 @@ pub fn degraded_merge(answer: Vec<Emote>, held: Option<&EmoteSet>) -> Vec<Emote>
 pub struct EmoteSet {
     room: Room<Emote>,
     globals: Index<Emote>,
+    /// the rows the owner route gave, as given: the owner tier is "came from the
+    /// owner route", whatever the emote's own source says.
+    owner: Vec<Emote>,
+    /// the rows the channel route gave, as given: what a degraded answer keeps a
+    /// provider's slice from (including a copy that lost a name collision).
+    channel: Vec<Emote>,
 }
 
 impl Default for EmoteSet {
@@ -145,16 +145,34 @@ impl Default for EmoteSet {
                 names: Index::new(),
             },
             globals: Index::new(),
+            owner: Vec::new(),
+            channel: Vec::new(),
         }
     }
 }
 
-/// the streamer's own heatsync emotes carry no third-party provider.
-fn is_owner(e: &Emote) -> bool {
-    !matches!(
+/// a row on the channel route that is a third party's or the platform's own.
+fn is_channel_source(e: &Emote) -> bool {
+    matches!(
         e.provider.as_str(),
         "ffz" | "7tv" | "bttv" | "twitch" | "kick"
     )
+}
+
+/// the owner rows as the law builds them: one emote per name, sorted.
+fn owner_sig(rows: &[Emote]) -> Vec<(String, String)> {
+    let lists = RoomLists {
+        owner: rows,
+        third: &[],
+        native: &[],
+    };
+    let mut v: Vec<(String, String)> = law::build_room(Platform::Twitch, "", lists, true)
+        .names
+        .into_values()
+        .map(|e| (e.name, e.url))
+        .collect();
+    v.sort_unstable();
+    v
 }
 
 /// the channel owner's own heatsync emotes (`/api/emotes/user/<channel>`) →
@@ -206,12 +224,35 @@ impl EmoteSet {
     /// bttv, then the platform's channel emotes; two of a name in one source
     /// keep the lower id.
     pub fn from_list(list: impl IntoIterator<Item = Emote>) -> EmoteSet {
-        let (mut owner, mut third, mut native) = (Vec::new(), Vec::new(), Vec::new());
-        for e in list {
+        let (owner, channel): (Vec<Emote>, Vec<Emote>) =
+            list.into_iter().partition(|e| !is_channel_source(e));
+        EmoteSet::build(owner, channel, None)
+    }
+
+    /// build from the two routes. the owner route's rows are the owner tier
+    /// whatever their source (a streamer's 7tv-sourced heatsync emote is still
+    /// theirs); the channel route's rows rank by source.
+    pub fn from_parts(owner: Vec<Emote>, channel: Vec<Emote>) -> EmoteSet {
+        let given = owner.clone();
+        let mut owner = owner;
+        let mut rest = Vec::new();
+        for e in channel {
+            // a stray non-third-party row on the channel route is the owner tier too
+            if is_channel_source(&e) {
+                rest.push(e)
+            } else {
+                owner.push(e)
+            }
+        }
+        EmoteSet::build(owner, rest, Some(given))
+    }
+
+    fn build(owner: Vec<Emote>, channel: Vec<Emote>, given: Option<Vec<Emote>>) -> EmoteSet {
+        let (mut third, mut native) = (Vec::new(), Vec::new());
+        for e in &channel {
             match e.provider.as_str() {
-                "ffz" | "7tv" | "bttv" => third.push(e),
-                "twitch" | "kick" => native.push(e),
-                _ => owner.push(e),
+                "ffz" | "7tv" | "bttv" => third.push(e.clone()),
+                _ => native.push(e.clone()),
             }
         }
         let lists = RoomLists {
@@ -222,6 +263,8 @@ impl EmoteSet {
         EmoteSet {
             room: law::build_room(Platform::Twitch, "", lists, true),
             globals: Index::new(),
+            owner: given.unwrap_or(owner),
+            channel,
         }
     }
 
@@ -265,19 +308,7 @@ impl EmoteSet {
     /// does the streamer's own list differ from the one this set was built from?
     /// compared as built (one emote per name), so a duplicate row is not a change.
     pub fn owner_differs(&self, owner: &[Emote]) -> bool {
-        fn sig(set: &EmoteSet) -> Vec<(&str, &str)> {
-            let mut v: Vec<(&str, &str)> = set
-                .room
-                .names
-                .values()
-                .filter(|e| is_owner(e))
-                .map(|e| (e.name.as_str(), e.url.as_str()))
-                .collect();
-            v.sort_unstable();
-            v
-        }
-        let fresh = EmoteSet::from_list(owner.iter().cloned());
-        sig(self) != sig(&fresh)
+        owner_sig(&self.owner) != owner_sig(owner)
     }
 
     /// the emote a word means in this set: the room's, else a global.

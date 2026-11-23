@@ -94,9 +94,7 @@ pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
     if chan.is_none() && owner.is_empty() {
         return None;
     }
-    Some(EmoteSet::from_list(
-        chan.unwrap_or_default().into_iter().chain(owner),
-    ))
+    Some(EmoteSet::from_parts(owner, chan.unwrap_or_default()))
 }
 
 /// re-read a channel's set for the refresh timer: the channel route is asked
@@ -121,7 +119,7 @@ pub fn emote_refresh(
             owner_fetch(channel, platform)
         };
         match settle(chan, owner, held) {
-            Step::Done(o) => return o,
+            Step::Done(o) => return *o,
             // the streamer's emotes changed under an unchanged body: read it whole
             Step::Full => etag = None,
         }
@@ -137,7 +135,7 @@ enum Chan {
 }
 
 enum Step {
-    Done(Outcome),
+    Done(Box<Outcome>),
     /// ask the channel route again without a validator.
     Full,
 }
@@ -150,9 +148,9 @@ fn settle(
     held: Option<&EmoteSet>,
 ) -> Step {
     match (chan, owner) {
-        (Chan::Failed, _) | (_, None) => Step::Done(Outcome::Failed),
+        (Chan::Failed, _) | (_, None) => Step::Done(Box::new(Outcome::Failed)),
         (Chan::NotModified, Some(o)) => match held {
-            Some(h) if !h.owner_differs(&o) => Step::Done(Outcome::NotModified),
+            Some(h) if !h.owner_differs(&o) => Step::Done(Box::new(Outcome::NotModified)),
             _ => Step::Full,
         },
         // a provider was down or answered from a kept copy: never lose what the
@@ -164,15 +162,15 @@ fn settle(
                 .map(|(p, t)| (clean(p, 8), clean(t, 25)))
                 .collect();
             let all = heatsync_core::emote::degraded_merge(b.emotes, held);
-            Step::Done(Outcome::Partial(
-                EmoteSet::from_list(all.into_iter().chain(o)),
+            Step::Done(Box::new(Outcome::Partial(
+                EmoteSet::from_parts(o, all),
                 kept,
-            ))
+            )))
         }
-        (Chan::Body(b, tag), Some(o)) => Step::Done(Outcome::Changed(
-            EmoteSet::from_list(b.emotes.into_iter().chain(o)),
+        (Chan::Body(b, tag), Some(o)) => Step::Done(Box::new(Outcome::Changed(
+            EmoteSet::from_parts(o, b.emotes),
             tag,
-        )),
+        ))),
     }
 }
 
@@ -703,7 +701,7 @@ mod tests {
 
     fn done(s: Step) -> Outcome {
         match s {
-            Step::Done(o) => o,
+            Step::Done(o) => *o,
             Step::Full => panic!("asked for the full body"),
         }
     }
@@ -783,6 +781,37 @@ mod tests {
             done(settle(Chan::Body(b, None), Some(vec![]), Some(&held))),
             Outcome::Changed(..)
         ));
+    }
+
+    #[test]
+    fn an_owner_emote_sourced_from_7tv_is_still_the_owner_tier_and_a_change_is_seen_on_a_304() {
+        // the streamer's heatsync set holds an emote collected from 7tv: the
+        // owner route says so with provider "7tv"; the channel has its own ffz Pog
+        let owner = |url: &str| vec![em("Pog", "7tv", url)];
+        let channel = vec![em("Pog", "ffz", "https://cdn/ffz-pog")];
+        let held = EmoteSet::from_parts(owner("https://hs/a"), channel.clone());
+        // the owner's copy wins the name over the channel's ffz one
+        assert_eq!(held.get("Pog").unwrap().url, "https://hs/a");
+        // same list under an unchanged body: nothing to do
+        assert!(matches!(
+            done(settle(
+                Chan::NotModified,
+                Some(owner("https://hs/a")),
+                Some(&held)
+            )),
+            Outcome::NotModified
+        ));
+        // the owner changed it (or renamed or removed it) under a 304: re-read whole
+        for now in [
+            owner("https://hs/b"),
+            vec![em("Pog2", "7tv", "https://hs/a")],
+            vec![],
+        ] {
+            assert!(matches!(
+                settle(Chan::NotModified, Some(now), Some(&held)),
+                Step::Full
+            ));
+        }
     }
 
     #[test]
