@@ -33,7 +33,7 @@ const RETRY: Duration = Duration::from_secs(90);
 const RECONNECT_SPREAD: Duration = Duration::from_secs(20);
 /// a room read this recently is not re-read because the socket flapped.
 const FLAP_GAP: Duration = Duration::from_secs(60);
-/// the kick emotes remembered per room (see [`State::learn`]).
+/// the kick emotes remembered per room (see [`State::prove`]).
 pub const LEARN_CAP: usize = 256;
 /// fetches in flight at once.
 const MAX_INFLIGHT: usize = 4;
@@ -86,14 +86,12 @@ struct Entry {
 
 pub struct State {
     entries: HashMap<Key, Entry>,
-    /// kick emotes seen used in a room, oldest first (recency order, so the cap
-    /// never depends on a hash): the server cannot list a kick room's own
-    /// emotes, but every `[emote:id:name]` on a line proves one.
-    learned: HashMap<Key, Vec<Emote>>,
-    /// the ids among those that this account itself sent in the room (its own
-    /// echo came back carrying the token), oldest first. only these are ever
-    /// written as kick tokens; seen-from-others emotes only draw.
-    used: HashMap<Key, Vec<String>>,
+    /// kick emotes this account itself used in a room (its own echo came back
+    /// carrying the token), oldest first, by id. the only kick emotes a room
+    /// set ever gains: another person's token is positional (it draws on its
+    /// own line) and teaches nothing, so no chatter can remap a name or push
+    /// these out.
+    mine: HashMap<Key, Vec<Emote>>,
     tx: Sender<(Key, Outcome)>,
     rx: Receiver<(Key, Outcome)>,
     /// the socket dropped since the last time it was up.
@@ -108,8 +106,7 @@ impl State {
         let (tx, rx) = channel();
         State {
             entries: HashMap::new(),
-            learned: HashMap::new(),
-            used: HashMap::new(),
+            mine: HashMap::new(),
             tx,
             rx,
             was_down: false,
@@ -148,18 +145,19 @@ impl State {
         self.entries.get(k).and_then(|e| e.set.as_ref())
     }
 
-    /// a kick emote a line in this room used, by kick's own token: remember it
-    /// (capped; the one seen longest ago goes first). true when the room now
-    /// knows something new, so its tabs should be rebuilt. anything that is not
-    /// kick's, or has no numeric id, is refused.
-    pub fn learn(&mut self, k: &Key, e: &Emote) -> bool {
+    /// this account's own line in the room carried this kick emote: it is now
+    /// the account's here, drawn and sent as kick's own token. capped, keyed by
+    /// id (the one used longest ago goes first). true when the room's set
+    /// changed, so its tabs should be rebuilt. anything not kick's, or with no
+    /// numeric id, is refused.
+    pub fn prove(&mut self, k: &Key, e: &Emote) -> bool {
         if e.provider != "kick" || e.id.is_empty() || !e.id.bytes().all(|b| b.is_ascii_digit()) {
             return false;
         }
-        let list = self.learned.entry(k.clone()).or_default();
+        let list = self.mine.entry(k.clone()).or_default();
         let mut new = true;
-        if let Some(i) = list.iter().position(|x| x.name == e.name) {
-            new = list[i].id != e.id;
+        if let Some(i) = list.iter().position(|x| x.id == e.id) {
+            new = list[i].name != e.name;
             list.remove(i);
         }
         list.push(Emote {
@@ -172,37 +170,12 @@ impl State {
         new
     }
 
-    /// this account's own line in the room carried this kick emote: it is now
-    /// one the account provably may send (capped like `learn`, oldest first).
-    pub fn prove(&mut self, k: &Key, e: &Emote) {
-        if e.provider != "kick" || e.id.is_empty() || !e.id.bytes().all(|b| b.is_ascii_digit()) {
-            return;
-        }
-        let list = self.used.entry(k.clone()).or_default();
-        list.retain(|x| *x != e.id);
-        list.push(e.id.clone());
-        if list.len() > LEARN_CAP {
-            list.remove(0);
-        }
-    }
-
-    /// what a kick send may write as tokens: the fetched set plus only the kick
-    /// emotes this account has used in the room. never a seen-from-others one.
-    pub fn send_set(&self, k: &Key) -> EmoteSet {
-        let mut out = self.set(k).cloned().unwrap_or_default();
-        if let (Some(l), Some(u)) = (self.learned.get(k), self.used.get(k)) {
-            out.merge(EmoteSet::from_list(
-                l.iter().filter(|e| u.contains(&e.id)).cloned(),
-            ));
-        }
-        out
-    }
-
-    /// the room's set as last fetched, plus the kick emotes seen in it. a
-    /// learned emote only fills a name the set leaves open.
+    /// the room's set as last fetched plus this account's own kick emotes there.
+    /// a kick emote only fills a name the set leaves open. this is also what a
+    /// kick send may write as tokens.
     pub fn room_set(&self, k: &Key) -> EmoteSet {
         let mut out = self.set(k).cloned().unwrap_or_default();
-        if let Some(l) = self.learned.get(k) {
+        if let Some(l) = self.mine.get(k) {
             out.merge(EmoteSet::from_list(l.iter().cloned()));
         }
         out
@@ -302,8 +275,7 @@ impl State {
     pub fn register(&mut self, open: &[Key], now: Instant) {
         let open_set: HashSet<&Key> = open.iter().collect();
         self.entries.retain(|k, _| open_set.contains(k));
-        self.learned.retain(|k, _| open_set.contains(k));
-        self.used.retain(|k, _| open_set.contains(k));
+        self.mine.retain(|k, _| open_set.contains(k));
         for k in open {
             if !self.entries.contains_key(k) {
                 let due = self.next_due(now);
@@ -647,26 +619,27 @@ mod tests {
     }
 
     #[test]
-    fn learned_kick_emotes_are_capped_stable_and_only_for_open_rooms() {
+    fn my_kick_emotes_are_capped_stable_by_id_and_only_for_open_rooms() {
         let mut st = State::new();
         let t0 = Instant::now();
         let r = key(Platform::Kick, "room");
         st.wanted(std::slice::from_ref(&r), t0);
         // new → true; the same again → false (recency only)
-        assert!(st.learn(&r, &kick("A", "1")));
-        assert!(!st.learn(&r, &kick("A", "1")));
-        // a new id for a name replaces it
-        assert!(st.learn(&r, &kick("A", "2")));
-        assert_eq!(st.room_set(&r).get("A").unwrap().id, "2");
+        assert!(st.prove(&r, &kick("A", "1")));
+        assert!(!st.prove(&r, &kick("A", "1")));
+        // the same id under a new name renames it; a new id is another emote
+        assert!(st.prove(&r, &kick("A2", "1")));
+        assert!(st.room_set(&r).get("A").is_none() && st.room_set(&r).get("A2").is_some());
+        assert!(st.prove(&r, &kick("A", "2")));
         // a bad one is refused: not kick's, or no numeric id
         let mut seven = kick("S", "9");
         seven.provider = "7tv".into();
-        assert!(!st.learn(&r, &seven));
-        assert!(!st.learn(&r, &kick("T", "")));
-        assert!(!st.learn(&r, &kick("T", "12x")));
-        // the cap drops the one not seen longest, never by hash order
+        assert!(!st.prove(&r, &seven));
+        assert!(!st.prove(&r, &kick("T", "")));
+        assert!(!st.prove(&r, &kick("T", "12x")));
+        // the cap drops the one used longest ago, never by hash order
         for i in 0..LEARN_CAP + 10 {
-            st.learn(&r, &kick(&format!("e{i}"), &i.to_string()));
+            st.prove(&r, &kick(&format!("e{i}"), &(1000 + i).to_string()));
         }
         let set = st.room_set(&r);
         assert!(set.get("A").is_none() && set.get("e0").is_none());
@@ -678,34 +651,14 @@ mod tests {
     }
 
     #[test]
-    fn proof_is_capped_per_room_and_never_comes_from_seen_alone() {
-        let mut st = State::new();
-        let t0 = Instant::now();
-        let r = key(Platform::Kick, "room");
-        st.wanted(std::slice::from_ref(&r), t0);
-        st.learn(&r, &kick("Seen", "1"));
-        assert!(st.send_set(&r).get("Seen").is_none() && st.room_set(&r).get("Seen").is_some());
-        st.learn(&r, &kick("Mine", "2"));
-        st.prove(&r, &kick("Mine", "2"));
-        st.prove(&r, &kick("Bad", "x1"));
-        assert!(st.send_set(&r).get("Mine").is_some());
-        for i in 0..LEARN_CAP + 5 {
-            st.prove(&r, &kick("n", &format!("{}", 1000 + i)));
-        }
-        assert_eq!(st.used[&r].len(), LEARN_CAP);
-        st.register(&[], t0);
-        assert!(st.send_set(&r).is_empty());
-    }
-
-    #[test]
-    fn a_learned_emote_never_outranks_what_the_room_set_says() {
+    fn my_kick_emote_never_outranks_what_the_room_set_says() {
         let mut st = State::new();
         let t0 = Instant::now();
         let r = key(Platform::Kick, "room");
         st.wanted(std::slice::from_ref(&r), t0);
         st.seed(r.clone(), &set(&[("KEKW", "7")]), t0);
-        st.learn(&r, &kick("KEKW", "37226"));
-        st.learn(&r, &kick("Only", "5"));
+        st.prove(&r, &kick("KEKW", "37226"));
+        st.prove(&r, &kick("Only", "5"));
         let s = rebuild(&[r], &st, &EmoteSet::new());
         assert_eq!(s.get("KEKW").unwrap().provider, "7tv");
         assert_eq!(s.get("Only").unwrap().provider, "kick");

@@ -931,7 +931,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
 /// the account may not be allowed.
 pub(crate) fn kick_text(app: &App, name: &str, text: &str) -> String {
     app.refresh
-        .send_set(&crate::refresh::key(Platform::Kick, name))
+        .room_set(&crate::refresh::key(Platform::Kick, name))
         .kick_wire(text)
 }
 
@@ -1221,7 +1221,6 @@ mod send_tests {
             kind: Default::default(),
         };
         let k = crate::refresh::key(Platform::Kick, "kripp");
-        a.refresh.learn(&k, &e);
         a.refresh.prove(&k, &e);
     }
 
