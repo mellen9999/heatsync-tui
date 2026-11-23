@@ -237,6 +237,43 @@ impl EmoteSet {
             .collect()
     }
 
+    /// the text kick receives for `text`: kick draws its own emotes only from
+    /// `[emote:id:name]`, so a word that means one of this room's kick emotes
+    /// goes out in that form. a line that would not fit with them (kick's
+    /// 500-character cap) goes out as the plain words it was typed as. a kick
+    /// emote with no numeric id can't be written that way and stays a word.
+    pub fn kick_wire(&self, text: &str) -> String {
+        let names: Index<Emote> = self
+            .room
+            .names
+            .iter()
+            .filter(|(_, e)| {
+                e.provider != "kick"
+                    || (!e.id.is_empty() && e.id.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .map(|(n, e)| (n.clone(), e.clone()))
+            .collect();
+        let room = Room {
+            platform: Platform::Kick,
+            channel: String::new(),
+            loaded: true,
+            names,
+        };
+        let own = Own::default();
+        let ctx = law::SendCtx {
+            room: Some(&room),
+            legs: &[],
+            own: &own,
+            globals: &self.globals,
+            picks: None,
+            fold: false,
+        };
+        law::send_line(text, &ctx)
+            .wire
+            .remove(&Platform::Kick)
+            .unwrap_or_else(|| text.to_string())
+    }
+
     pub fn len(&self) -> usize {
         self.room.names.len()
             + self
@@ -1212,6 +1249,33 @@ mod tests {
                 .unwrap()
                 .token
         );
+    }
+
+    fn kick_emote(name: &str, id: &str) -> Emote {
+        Emote {
+            provider: "kick".into(),
+            id: id.into(),
+            url: format!("https://files.kick.com/emotes/{id}/fullsize"),
+            ..e(name)
+        }
+    }
+
+    #[test]
+    fn kick_wire_writes_a_rooms_kick_emote_as_kicks_token_and_nothing_else() {
+        let set = EmoteSet::from_list([kick_emote("KEKW", "37226"), e("GAMBA")]);
+        // a 7tv emote and a plain word stay words; an overlay stays a word too
+        assert_eq!(
+            set.kick_wire("KEKW GAMBA hi KEKW0  KEKW"),
+            "[emote:37226:KEKW] GAMBA hi KEKW0  [emote:37226:KEKW]"
+        );
+        assert_eq!(EmoteSet::new().kick_wire("KEKW"), "KEKW");
+    }
+
+    #[test]
+    fn a_higher_room_source_of_the_same_name_keeps_the_word_plain_on_kick() {
+        // the room says KEKW is the 7tv one: kick would draw nothing for a token of the other
+        let set = EmoteSet::from_list([kick_emote("KEKW", "37226"), e("KEKW")]);
+        assert_eq!(set.kick_wire("KEKW"), "KEKW");
     }
 
     #[test]

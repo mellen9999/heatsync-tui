@@ -853,6 +853,12 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
         let c = &app.channels[app.focus];
         (c.platform, c.name.clone())
     };
+    // kick draws its emotes only from its own token format, on every send path
+    let text = if platform == Platform::Kick {
+        kick_text(app, &name, &text)
+    } else {
+        text
+    };
     match platform {
         Platform::Twitch => {
             if let Some(client) = app.hs.clone() {
@@ -916,6 +922,14 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
         },
     }
     Flow::Continue
+}
+
+/// what kick receives for a line typed in the room `name`: that room's own
+/// last-good set when it has one (a merged tab's pooled set can hold another
+/// kick room's emotes), else the tab's.
+fn kick_text(app: &App, name: &str, text: &str) -> String {
+    let own = app.refresh.set(&crate::refresh::key(Platform::Kick, name));
+    own.unwrap_or(&app.emotes[app.focus]).kick_wire(text)
 }
 
 /// post `text` through heatsync on its own thread; only a failure speaks.
@@ -1189,6 +1203,70 @@ mod send_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// a kick room whose set has one of kick's own emotes in it.
+    fn kick_room(a: &mut App, id: &str) {
+        a.emotes[1] = heatsync_core::emote::EmoteSet::from_list([heatsync_core::emote::Emote {
+            name: "KEKW".into(),
+            url: format!("https://files.kick.com/emotes/{id}/fullsize"),
+            provider: "kick".into(),
+            id: id.into(),
+            animated: false,
+            zero_width: false,
+            global: false,
+            token: false,
+        }]);
+    }
+
+    #[test]
+    fn a_kick_send_carries_its_own_emotes_in_kicks_token_format() {
+        let (mut a, rx) = app();
+        a.focus = 1; // kick
+        kick_room(&mut a, "37226");
+        enter(&mut a, "KEKW hi KEKW", 1);
+        assert_eq!(
+            chats(&rx),
+            vec![(
+                Platform::Kick,
+                "kripp".to_string(),
+                "[emote:37226:KEKW] hi [emote:37226:KEKW]".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_kick_emote_without_a_numeric_id_goes_out_as_the_plain_word() {
+        let (mut a, rx) = app();
+        a.focus = 1;
+        kick_room(&mut a, "");
+        enter(&mut a, "KEKW", 1);
+        assert_eq!(chats(&rx)[0].2, "KEKW");
+    }
+
+    #[test]
+    fn only_kick_gets_tokens() {
+        let (mut a, rx) = app();
+        // the same set in a youtube room is sent as typed (a twitch tab with no
+        // login sends nothing, so the relay is the only path to read)
+        kick_room(&mut a, "37226");
+        a.emotes[2] = a.emotes[1].clone();
+        a.focus = 2;
+        enter(&mut a, "KEKW", 1);
+        let sent = chats(&rx);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].2, "KEKW");
+    }
+
+    #[test]
+    fn a_kick_line_too_long_for_the_tokens_goes_out_as_plain_words() {
+        let (mut a, rx) = app();
+        a.focus = 1;
+        kick_room(&mut a, "37226");
+        // 60 words: 4 chars each plain (300 + spaces ≈ 359) but 17 each as tokens
+        let line = vec!["KEKW"; 60].join(" ");
+        enter(&mut a, &line, 1);
+        assert_eq!(chats(&rx)[0].2, line);
     }
 
     #[test]
