@@ -169,26 +169,23 @@ pub(crate) fn drain_emotes(app: &mut App) {
         // for tabs opened later, and pool it into every open tab now.
         if name.is_empty() {
             *globals = set;
-            for es in emotes.iter_mut() {
-                es.merge(globals.clone());
+            for (ch, es) in channels.iter().zip(emotes.iter_mut()) {
+                *es = crate::emotesync::tab_set(ch, refresh, globals);
             }
             dirty = true;
             continue;
         }
         // the refresh keeps this as the room's last good set
-        refresh.seed(
-            crate::refresh::key(platform, &name),
-            &set,
-            std::time::Instant::now(),
-        );
-        if let Some(i) = channels.iter().position(|c| c.matches(platform, &name)) {
-            // merge — a merged tab pools its sources' sets; channel emotes
-            // replace any global of the same name whichever landed first.
-            emotes[i].merge(set);
-            // rescan only the channel on screen — a background channel's
-            // backlog is warmed by the tick sweep if and when it's focused.
-            if i == *focus {
-                dirty = true;
+        let key = crate::refresh::key(platform, &name);
+        refresh.seed(key.clone(), &set, std::time::Instant::now());
+        // rebuild every tab that draws from this room, whole, from its sources
+        // in the tab's own order — arrival order never decides a word.
+        for (i, ch) in channels.iter().enumerate() {
+            if crate::emotesync::keys_of(ch).contains(&key) {
+                emotes[i] = crate::emotesync::tab_set(ch, refresh, globals);
+                // rescan only the channel on screen — a background channel's
+                // backlog is warmed by the tick sweep if and when it's focused.
+                dirty |= i == *focus;
             }
         }
     }
@@ -587,6 +584,7 @@ pub(crate) fn tick_advance(app: &mut App) {
 mod tests {
     use super::*;
     use crate::net::{forward, ChatEvent};
+    use heatsync_core::emote::Emote;
     use heatsync_core::{proto, Unread};
     use std::sync::mpsc::{channel, Sender};
     use std::time::Instant;
@@ -778,5 +776,37 @@ mod tests {
         // history first, then a late live copy of one of its lines
         frame(&mut a, &tx, &kick_live("h1", "u", "one"));
         assert_eq!(texts(&a, KICK_TAB), ["one", "two"]);
+    }
+
+    /// the merged tab's word, whichever of its two rooms' sets landed first.
+    fn kekw_after(order: [(Platform, &str); 2]) -> String {
+        let mut a = crate::special::tests::app();
+        a.channels[0].extra = vec![(Platform::Kick, "kripp".into())];
+        let set = |prov: &str| {
+            EmoteSet::from_list([Emote {
+                name: "KEKW".into(),
+                url: format!("https://cdn/{prov}/KEKW.webp"),
+                provider: prov.into(),
+                id: "1".into(),
+                animated: false,
+                zero_width: false,
+                global: false,
+                token: false,
+            }])
+        };
+        for (p, n) in order {
+            let s = set(if p == Platform::Twitch { "7tv" } else { "bttv" });
+            a.emote_tx.send((p, n.into(), s)).unwrap();
+        }
+        drain_emotes(&mut a);
+        a.emotes[0].get("KEKW").unwrap().url.clone()
+    }
+
+    #[test]
+    fn a_merged_tab_reads_its_rooms_in_tab_order_not_arrival_order() {
+        let first = kekw_after([(Platform::Twitch, "xqc"), (Platform::Kick, "kripp")]);
+        let second = kekw_after([(Platform::Kick, "kripp"), (Platform::Twitch, "xqc")]);
+        assert_eq!(first, second);
+        assert!(first.contains("7tv"), "the tab's first room wins: {first}");
     }
 }

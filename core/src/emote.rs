@@ -6,9 +6,9 @@
 //! modifiers (BTTV `w!`-style prefixes / FFZ `ffzX`-style effect words) are
 //! parsed here into per-layer [`Effect`] lists; the pixel work happens at render.
 
-use std::collections::HashMap;
-
 use serde::Deserialize;
+
+use crate::law::{self, Index, Own, Platform, Room, RoomLists};
 
 /// one emote as the HeatSync emote API returns it.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -26,6 +26,40 @@ pub struct Emote {
     /// own set — channel emotes of the same name override it. never serialized.
     #[serde(skip)]
     pub global: bool,
+    /// a platform's own mark on this line (twitch's tag, kick's `[emote:…]`):
+    /// it owns its word, so nothing the room or the sender has outranks it.
+    /// per-message refs only. never serialized.
+    #[serde(skip)]
+    pub token: bool,
+}
+
+impl Emote {
+    /// mark as a platform token (see [`Emote::token`]).
+    pub fn into_token(mut self) -> Emote {
+        self.token = true;
+        self
+    }
+}
+
+/// the law's view of an emote. the picture is `provider:id`; an emote with no
+/// id of its own (a platform token, an owner upload) is its url.
+impl crate::law::Pic for Emote {
+    fn provider(&self) -> &str {
+        &self.provider
+    }
+    fn id(&self) -> &str {
+        if self.id.is_empty() {
+            &self.url
+        } else {
+            &self.id
+        }
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn zero_width(&self) -> bool {
+        self.zero_width
+    }
 }
 
 /// the /api/channel/:c/emotes envelope (only the bits we need).
@@ -35,10 +69,29 @@ pub struct EmoteSetResponse {
     pub emotes: Vec<Emote>,
 }
 
-/// name → emote lookup, precedence-respecting (first insert wins).
-#[derive(Clone, Debug, Default)]
+/// a room's emotes and the pooled globals, each one emote per exact name.
+/// the two stay apart because the law puts the sender's own emotes BETWEEN
+/// them: the room first, then the sender's, then a global.
+#[derive(Clone, Debug)]
 pub struct EmoteSet {
-    map: HashMap<String, Emote>,
+    room: Room<Emote>,
+    globals: Index<Emote>,
+}
+
+impl Default for EmoteSet {
+    fn default() -> Self {
+        EmoteSet {
+            // the platform is only read by the send and native-tier rules, which
+            // a pooled set never uses; completion and drawing look at names.
+            room: Room {
+                platform: Platform::Twitch,
+                channel: String::new(),
+                loaded: true,
+                names: Index::new(),
+            },
+            globals: Index::new(),
+        }
+    }
 }
 
 /// the channel owner's own heatsync emotes (`/api/emotes/user/<channel>`) →
@@ -68,6 +121,7 @@ pub fn owner_list(v: &serde_json::Value, base: &str) -> Vec<Emote> {
                 animated: false,
                 zero_width: false,
                 global: false,
+                token: false,
             })
         })
         .collect()
@@ -84,77 +138,116 @@ impl EmoteSet {
         NONE.get_or_init(EmoteSet::new)
     }
 
-    /// build from a channel API list. the server sends the winner of a name
-    /// LAST (`[bttv, 7tv, ffz]` for last-writer-wins clients, so ffz > 7tv >
-    /// bttv), so a later entry replaces an earlier one.
+    /// build from a channel API list. the law decides every collision, so the
+    /// order of the list never matters: the owner's own emotes, then ffz, 7tv,
+    /// bttv, then the platform's channel emotes; two of a name in one source
+    /// keep the lower id.
     pub fn from_list(list: impl IntoIterator<Item = Emote>) -> EmoteSet {
-        let mut set = EmoteSet::new();
+        let (mut owner, mut third, mut native) = (Vec::new(), Vec::new(), Vec::new());
         for e in list {
-            set.map.insert(e.name.clone(), e);
+            match e.provider.as_str() {
+                "ffz" | "7tv" | "bttv" => third.push(e),
+                "twitch" | "kick" => native.push(e),
+                _ => owner.push(e),
+            }
         }
-        set
+        let lists = RoomLists {
+            owner: &owner,
+            third: &third,
+            native: &native,
+        };
+        EmoteSet {
+            room: law::build_room(Platform::Twitch, "", lists, true),
+            globals: Index::new(),
+        }
     }
 
     /// build from the pooled global list (`/api/emotes`), stamped global. its
-    /// row order says nothing about providers, so rank them here: 7tv > bttv >
-    /// ffz > twitch (the extension's global order), losers first.
+    /// row order says nothing about providers, so the law ranks them: 7tv >
+    /// bttv > ffz > twitch > heatsync.
     pub fn from_global_list(list: impl IntoIterator<Item = Emote>) -> EmoteSet {
-        const WINNER_FIRST: [&str; 4] = ["7tv", "bttv", "ffz", "twitch"];
-        let rank = |e: &Emote| {
-            WINNER_FIRST
-                .iter()
-                .position(|p| *p == e.provider)
-                .unwrap_or(WINNER_FIRST.len())
-        };
-        let mut list: Vec<Emote> = list.into_iter().collect();
-        // stable, descending rank: the winner ends up last
-        list.sort_by_key(|e| std::cmp::Reverse(rank(e)));
-        let mut set = EmoteSet::from_list(list);
+        let list: Vec<Emote> = list.into_iter().collect();
+        let mut set = EmoteSet::new();
+        set.globals = law::build_globals(&list);
         set.mark_global();
         set
     }
 
     /// fold another set in, first-wins — a merged (multi-platform) tab pools
-    /// its sources' emotes into one lookup. the one exception: a channel emote
-    /// always replaces a pooled GLOBAL of the same name, whichever arrived
-    /// first — globals fetch in parallel with channel sets, so arrival order
-    /// can't be the precedence rule.
+    /// its sources' emotes into one lookup. rooms and globals stay in their own
+    /// tiers, so a channel emote beats a pooled global of the same name
+    /// whichever arrived first — globals fetch in parallel with channel sets,
+    /// so arrival order can't be the precedence rule.
     pub fn merge(&mut self, other: EmoteSet) {
-        for (k, v) in other.map {
-            match self.map.get(&k) {
-                Some(cur) if cur.global && !v.global => {
-                    self.map.insert(k, v);
-                }
-                Some(_) => {}
-                None => {
-                    self.map.insert(k, v);
-                }
-            }
+        for (k, v) in other.room.names {
+            self.room.names.entry(k).or_insert(v);
+        }
+        for (k, v) in other.globals {
+            self.globals.entry(k).or_insert(v);
         }
     }
 
-    /// stamp every entry as coming from the pooled global set.
+    /// stamp every entry as coming from the pooled global set, and file the
+    /// room's entries under the globals tier.
     pub fn mark_global(&mut self) {
-        for e in self.map.values_mut() {
+        for (k, mut e) in std::mem::take(&mut self.room.names) {
+            e.global = true;
+            self.globals.entry(k).or_insert(e);
+        }
+        for e in self.globals.values_mut() {
             e.global = true;
         }
     }
 
+    /// the emote a word means in this set: the room's, else a global.
     pub fn get(&self, name: &str) -> Option<&Emote> {
-        self.map.get(name)
+        self.room.names.get(name).or_else(|| self.globals.get(name))
     }
 
-    /// all emote names (unordered) — completion feeds from this.
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.map.keys().map(String::as_str)
+    /// the room's own emote of this name (never a global).
+    pub fn room_get(&self, name: &str) -> Option<&Emote> {
+        self.room.names.get(name)
+    }
+
+    /// the pooled global of this name (never the room's).
+    pub fn global_get(&self, name: &str) -> Option<&Emote> {
+        self.globals.get(name)
+    }
+
+    /// what tab offers for `typed`, best first: the exact name, then the
+    /// room's, then globals; inside a tier starts-with, word-start, inside,
+    /// then shorter, then a-z (the law's order). blocked emotes are left out.
+    pub fn offer(&self, typed: &str) -> Vec<String> {
+        let own = Own::default();
+        let ctx = law::OfferCtx {
+            room: Some(&self.room),
+            own: &own,
+            globals: &self.globals,
+            catalog: &[],
+            emoji: &[],
+            usage: None,
+            pop: None,
+            blocked: None,
+            suggest_own: true,
+        };
+        law::offer(typed, &ctx, None)
+            .into_iter()
+            .filter(|c| !crate::block::is_blocked(c.emote))
+            .map(|c| c.emote.name.clone())
+            .collect()
     }
 
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.room.names.len()
+            + self
+                .globals
+                .keys()
+                .filter(|k| !self.room.names.contains_key(*k))
+                .count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.room.names.is_empty() && self.globals.is_empty()
     }
 }
 
@@ -605,6 +698,7 @@ pub fn msg_ref(name: &str, url: &str, provider: &str, zero_width: bool) -> Optio
         animated: false,
         zero_width,
         global: false,
+        token: false,
     })
 }
 
@@ -645,7 +739,10 @@ pub fn twitch_native(tag: &str, text: &str) -> Vec<Emote> {
         }
         let name: String = chars[s..=e].iter().collect();
         let url = format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0");
-        push_ref(&mut out, msg_ref(&name, &url, "twitch", false));
+        push_ref(
+            &mut out,
+            msg_ref(&name, &url, "twitch", false).map(Emote::into_token),
+        );
     }
     out
 }
@@ -665,7 +762,7 @@ pub fn kick_native(text: &str) -> (String, Vec<Emote>) {
             let (id, name) = body.split_once(':')?;
             let url = format!("https://files.kick.com/emotes/{id}/fullsize");
             let ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
-            ok.then(|| msg_ref(name, &url, "kick", false).map(|e| (e, tail)))?
+            ok.then(|| msg_ref(name, &url, "kick", false).map(|e| (e.into_token(), tail)))?
         });
         match token {
             Some((e, tail)) => {
@@ -696,10 +793,10 @@ pub enum Segment {
     Stack(Stack),
 }
 
-/// name → emote with per-message refs on top. refs (the sender's inventory
-/// emotes, twitch/kick native ids) win over the channel set — the emote the
-/// sender actually used is the only one that isn't a guess. a platform token
-/// is exact by position, so no same-named set emote ever replaces it.
+/// name → emote by the law's order for one word: a platform token on the line
+/// (exact by position, so no same-named emote ever replaces it), then the
+/// room's own emote, then the one the sender's inventory brought along, then a
+/// global. a loading room is empty and borrows nothing.
 struct Lookup<'a> {
     set: &'a EmoteSet,
     refs: &'a EmoteSet,
@@ -707,7 +804,12 @@ struct Lookup<'a> {
 
 impl<'a> Lookup<'a> {
     fn get(&self, name: &str) -> Option<&'a Emote> {
-        self.refs.get(name).or_else(|| self.set.get(name))
+        self.refs
+            .get(name)
+            .filter(|e| e.token)
+            .or_else(|| self.set.room_get(name))
+            .or_else(|| self.refs.get(name))
+            .or_else(|| self.set.global_get(name))
     }
 }
 
@@ -934,6 +1036,7 @@ mod tests {
             animated: false,
             zero_width: false,
             global: false,
+            token: false,
         }
     }
 
@@ -950,6 +1053,7 @@ mod tests {
             provider: provider.into(),
             ..e(name)
         }
+        .into_token()
     }
 
     /// the standard cast: bases, an overlay, a literal `Name0`.
@@ -1023,9 +1127,96 @@ mod tests {
         assert_eq!(set.len(), 1);
     }
 
+    /// an emote the sender's inventory brought along, not a platform token.
+    fn sender(name: &str) -> Emote {
+        Emote {
+            url: format!("https://sender/Sender{name}.webp"),
+            provider: "heatsync".into(),
+            ..e(name)
+        }
+    }
+
     #[test]
-    fn last_entry_wins_on_collision() {
-        // server order [bttv, 7tv, ffz]: ffz > 7tv > bttv
+    fn a_senders_inventory_emote_gives_way_to_the_room() {
+        // the room says Pog is the 7tv one; the sender's own Pog is only the
+        // tier below the room (law: room, then the sender's, then globals).
+        let room = EmoteSet::from_list([e("Pog")]);
+        let refs = ref_set(&[sender("Pog")]);
+        assert_eq!(show_with("Pog", &room, &refs), "Pog");
+    }
+
+    #[test]
+    fn a_platform_token_still_beats_the_room() {
+        let room = EmoteSet::from_list([e("Pog")]);
+        let refs = ref_set(&[sender("Pog").into_token()]);
+        assert_eq!(show_with("Pog", &room, &refs), "SenderPog");
+    }
+
+    #[test]
+    fn the_senders_emote_beats_a_global_and_the_room_beats_the_sender() {
+        let mut globals = EmoteSet::from_list([e("Pog")]);
+        globals.mark_global();
+        let refs = ref_set(&[sender("Pog")]);
+        assert_eq!(show_with("Pog", &globals, &refs), "SenderPog");
+        let mut both = EmoteSet::from_list([Emote {
+            url: "https://cdn/RoomPog.webp".into(),
+            ..e("Pog")
+        }]);
+        both.merge(globals);
+        assert_eq!(show_with("Pog", &both, &refs), "RoomPog");
+    }
+
+    #[test]
+    fn a_room_set_does_not_depend_on_the_order_it_arrived_in() {
+        let p = |prov: &str, id: &str| Emote {
+            provider: prov.into(),
+            id: id.into(),
+            ..e("Kappa")
+        };
+        // two of one name from one provider: the lower id, whichever came first
+        for rows in [
+            vec![p("7tv", "b"), p("7tv", "a")],
+            vec![p("7tv", "a"), p("7tv", "b")],
+        ] {
+            assert_eq!(EmoteSet::from_list(rows).get("Kappa").unwrap().id, "a");
+        }
+        // ffz over 7tv over bttv, and the owner's own upload over all three
+        for rows in [
+            vec![p("ffz", "1"), p("7tv", "1")],
+            vec![p("7tv", "1"), p("ffz", "1")],
+        ] {
+            assert_eq!(
+                EmoteSet::from_list(rows).get("Kappa").unwrap().provider,
+                "ffz"
+            );
+        }
+        for rows in [
+            vec![p("upload", "1"), p("ffz", "1")],
+            vec![p("ffz", "1"), p("upload", "1")],
+        ] {
+            assert_eq!(
+                EmoteSet::from_list(rows).get("Kappa").unwrap().provider,
+                "upload"
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_platform_marks_is_a_token_and_what_the_relay_sends_is_not() {
+        let tw = twitch_native("25:0-4", "Kappa hi");
+        assert!(tw.len() == 1 && tw.iter().all(|e| e.token));
+        let (_, kick) = kick_native("[emote:37226:KEKW] hi");
+        assert!(kick.len() == 1 && kick.iter().all(|e| e.token));
+        assert!(
+            !msg_ref("Pog", "https://x/y", "heatsync", false)
+                .unwrap()
+                .token
+        );
+    }
+
+    #[test]
+    fn collisions_go_to_the_higher_provider_whatever_the_order() {
+        // ffz > 7tv > bttv, however the list is ordered
         let p = |n: &str| Emote {
             provider: n.into(),
             ..e("Kappa")
@@ -1271,17 +1462,23 @@ mod tests {
     }
 
     #[test]
-    fn refs_outrank_the_set_native_included() {
+    fn a_platform_token_outranks_the_set_and_the_senders_beat_a_global() {
         let set = EmoteSet::from_list([e("Kappa")]);
         let heat = Emote {
             url: "https://hs/Kappa".into(),
             provider: "heatsync".into(),
             ..e("Kappa")
         };
-        // inventory ref beats the channel emote of the same name
-        let refs = EmoteSet::from_list([heat]);
-        assert_eq!(show_with("Kappa", &set, &refs), "Kappa");
+        // the room's emote beats the sender's inventory one of the same name
+        let refs = EmoteSet::from_list([heat.clone()]);
         match &segments_with("Kappa", &set, &refs)[0] {
+            Segment::Stack(s) => assert_eq!(s.layers[0].url, "https://cdn/Kappa.webp"),
+            _ => panic!(),
+        }
+        // ...and outranks a global
+        let mut globals = EmoteSet::from_list([e("Kappa")]);
+        globals.mark_global();
+        match &segments_with("Kappa", &globals, &refs)[0] {
             Segment::Stack(s) => assert_eq!(s.layers[0].url, "https://hs/Kappa"),
             _ => panic!(),
         }

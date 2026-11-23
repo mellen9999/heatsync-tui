@@ -1,13 +1,19 @@
 //! tab completion for the composer — emote names and usernames, twitch-style.
 //!
-//! pure text machinery: the face hands in the line, the cursor, and candidate
-//! iterators; this returns what span to replace with what. cycling state lives
-//! here so repeated tabs walk the match list; ANY other edit drops the state
-//! (the face clears it), which is what makes the walk feel like one gesture.
+//! pure text machinery: the face hands in the line, the cursor, a ranker for
+//! emotes and the recent chatters; this returns what span to replace with
+//! what. cycling state lives here so repeated tabs walk the match list; ANY
+//! other edit drops the state (the face clears it), which is what makes the
+//! walk feel like one gesture.
 //!
-//! `@word` completes usernames only (the `@` is kept); a bare word matches
-//! emote names first (case-insensitive prefix), then usernames — same order
-//! every chat client trains.
+//! `@word` completes usernames only (the `@` is kept); a bare word offers
+//! emotes first, in the emote law's order (see `law::offer`: the exact name,
+//! then the room's, then globals; starts-with, word-start, inside), then
+//! usernames. an emote needs two typed characters — one letter would offer
+//! half the set.
+
+/// the fewest typed characters that offer emotes.
+pub const MIN_EMOTE: usize = 2;
 
 /// a completion in progress: the matches for the word that was under the
 /// cursor, and which one currently occupies the line.
@@ -29,7 +35,7 @@ impl Completion {
     pub fn build<'a>(
         text: &str,
         cursor: usize,
-        emotes: impl Iterator<Item = &'a str>,
+        emotes: impl FnOnce(&str) -> Vec<String>,
         users: impl Iterator<Item = &'a str>,
     ) -> Option<Completion> {
         let chars: Vec<char> = text.chars().collect();
@@ -63,11 +69,9 @@ impl Completion {
                 items.push(s);
             }
         };
-        if !at {
-            let mut hits: Vec<&str> = emotes.filter(|e| matches(e)).collect();
-            hits.sort_unstable_by_key(|a| twin_key(a, prefix));
-            for e in hits {
-                push(e.to_string());
+        if !at && prefix.chars().count() >= MIN_EMOTE {
+            for e in emotes(prefix) {
+                push(e);
             }
         }
         let mut hits: Vec<&str> = users.filter(|u| matches(u)).collect();
@@ -102,8 +106,8 @@ impl Completion {
     }
 }
 
-/// stable order: by lowercase name; case twins both stay, the one spelled
-/// like the typed word leads, then plain byte order (HashMap order never leaks).
+/// usernames: by lowercase name; case twins both stay, the one spelled like
+/// the typed word leads, then plain byte order (HashMap order never leaks).
 fn twin_key(name: &str, typed: &str) -> (String, bool, String) {
     let exact = name.get(..typed.len()).is_some_and(|h| h == typed);
     (name.to_ascii_lowercase(), !exact, name.to_string())
@@ -112,38 +116,68 @@ fn twin_key(name: &str, typed: &str) -> (String, bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emote::{Emote, EmoteSet};
+
+    fn em(name: &str, provider: &str) -> Emote {
+        Emote {
+            name: name.into(),
+            url: format!("https://cdn/{provider}/{name}.webp"),
+            provider: provider.into(),
+            id: format!("{provider}-{name}"),
+            animated: false,
+            zero_width: false,
+            global: false,
+            token: false,
+        }
+    }
+
+    /// a room of 7tv emotes and nothing else.
+    fn room(names: &[&str]) -> EmoteSet {
+        EmoteSet::from_list(names.iter().map(|n| em(n, "7tv")))
+    }
+
+    fn run(set: &EmoteSet, users: &[&str], text: &str, cursor: usize) -> Option<Completion> {
+        Completion::build(text, cursor, |t| set.offer(t), users.iter().copied())
+    }
 
     fn build(text: &str, cursor: usize) -> Option<Completion> {
-        let emotes = ["KEKW", "Kappa", "kekHeim", "GAMBA"];
-        let users = ["kekuser", "Gamba_Andy", "mellen"];
-        Completion::build(text, cursor, emotes.iter().copied(), users.iter().copied())
+        let set = room(&["KEKW", "Kappa", "kekHeim", "GAMBA"]);
+        run(&set, &["kekuser", "Gamba_Andy", "mellen"], text, cursor)
+    }
+
+    /// every match in the order tab walks them.
+    fn walk(set: &EmoteSet, typed: &str) -> Vec<String> {
+        let mut c = run(set, &[], typed, typed.len()).unwrap();
+        let n = c.items.len();
+        (0..n).map(|_| c.advance(1).2.to_string()).collect()
     }
 
     #[test]
     fn completes_emotes_case_insensitively_then_users() {
         let mut c = build("hi kek", 6).unwrap();
-        assert_eq!(c.advance(1), (3, 6, "kekHeim"));
-        assert_eq!(c.advance(1).2, "KEKW");
+        // the shorter name leads inside a tier
+        assert_eq!(c.advance(1), (3, 6, "KEKW"));
+        assert_eq!(c.advance(1).2, "kekHeim");
         assert_eq!(c.advance(1).2, "kekuser");
-        assert_eq!(c.advance(1).2, "kekHeim", "wraps");
+        assert_eq!(c.advance(1).2, "KEKW", "wraps");
     }
 
     #[test]
     fn advance_replaces_the_previous_completion_not_the_word() {
         let mut c = build("kek", 3).unwrap();
         let (lo, hi, s) = c.advance(1);
-        assert_eq!((lo, hi, s), (0, 3, "kekHeim"));
-        // the line now holds "kekHeim" — the next advance must span all 7 chars
+        assert_eq!((lo, hi, s), (0, 3, "KEKW"));
+        // the line now holds "KEKW" — the next advance must span those 4 chars
         let (lo, hi, s) = c.advance(1);
-        assert_eq!((lo, hi), (0, 7));
-        assert_eq!(s, "KEKW");
+        assert_eq!((lo, hi), (0, 4));
+        assert_eq!(s, "kekHeim");
     }
 
     #[test]
     fn backwards_starts_at_the_end_of_the_list() {
         let mut c = build("kek", 3).unwrap();
         assert_eq!(c.advance(-1).2, "kekuser");
-        assert_eq!(c.advance(-1).2, "KEKW");
+        assert_eq!(c.advance(-1).2, "kekHeim");
     }
 
     #[test]
@@ -168,23 +202,57 @@ mod tests {
     fn word_boundaries_are_char_safe() {
         // multibyte text before the word must not break the span indices
         let mut c = build("キツネ kek", 7).unwrap();
-        assert_eq!(c.advance(1), (4, 7, "kekHeim"));
+        assert_eq!(c.advance(1), (4, 7, "KEKW"));
     }
 
     #[test]
-    fn case_twins_both_stay_and_the_typed_spelling_leads() {
-        let emotes = ["sadge", "Sadge", "SADGE"];
-        let run = |t: &str| {
-            let mut c =
-                Completion::build(t, t.len(), emotes.iter().copied(), [].into_iter()).unwrap();
-            (0..3)
-                .map(|_| c.advance(1).2.to_string())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(run("Sad"), ["Sadge", "SADGE", "sadge"]);
-        assert_eq!(run("sad"), ["sadge", "SADGE", "Sadge"]);
-        let rev = ["Sadge", "SADGE", "sadge"];
-        let mut c = Completion::build("sad", 3, rev.iter().copied(), [].into_iter()).unwrap();
-        assert_eq!(c.advance(1).2, "sadge", "input order never matters");
+    fn the_exact_name_leads_and_its_spelling_leads_its_twin() {
+        let set = room(&["sadge", "Sadge", "SADGE", "SadgeBusiness"]);
+        assert_eq!(
+            walk(&set, "Sadge"),
+            ["Sadge", "SADGE", "sadge", "SadgeBusiness"]
+        );
+        assert_eq!(
+            walk(&set, "sadge"),
+            ["sadge", "SADGE", "Sadge", "SadgeBusiness"]
+        );
+        // input order never matters
+        let rev = room(&["SadgeBusiness", "SADGE", "Sadge", "sadge"]);
+        assert_eq!(
+            walk(&rev, "sadge"),
+            ["sadge", "SADGE", "Sadge", "SadgeBusiness"]
+        );
+    }
+
+    #[test]
+    fn word_start_and_inside_matches_come_after_the_prefix_ones() {
+        let set = room(&["scatter", "xcat0", "SadCat", "catJAM"]);
+        // starts-with, then a word that starts there, then inside another word
+        assert_eq!(walk(&set, "cat"), ["catJAM", "SadCat", "xcat0", "scatter"]);
+    }
+
+    #[test]
+    fn the_room_comes_before_the_globals() {
+        let mut globals = EmoteSet::from_global_list([em("Pog", "7tv"), em("Pogu", "7tv")]);
+        globals.merge(EmoteSet::from_list([em("Poggers", "ffz")]));
+        // typed "po": every one starts with it; the room's goes first even
+        // though it is the longest
+        assert_eq!(walk(&globals, "po"), ["Poggers", "Pog", "Pogu"]);
+    }
+
+    #[test]
+    fn one_letter_offers_no_emotes_but_still_offers_people() {
+        let set = room(&["KEKW", "Kappa"]);
+        assert!(run(&set, &[], "k", 1).is_none());
+        let mut c = run(&set, &["kevin"], "k", 1).unwrap();
+        assert_eq!(c.advance(1).2, "kevin");
+    }
+
+    #[test]
+    fn the_walk_does_not_depend_on_the_order_the_set_was_built_in() {
+        let names = ["catJAM", "SadCat", "catKISS", "scatter", "Cat", "xcat0"];
+        let mut rev = names;
+        rev.reverse();
+        assert_eq!(walk(&room(&names), "cat"), walk(&room(&rev), "cat"));
     }
 }

@@ -965,11 +965,7 @@ fn complete_step(app: &mut App, dir: i32) {
         app.completion = Completion::build(
             &text,
             app.line.cursor(),
-            app.emotes[app.focus].names().filter(|n| {
-                app.emotes[app.focus]
-                    .get(n)
-                    .is_some_and(|e| !heatsync_core::block::is_blocked(e))
-            }),
+            |typed| app.emotes[app.focus].offer(typed),
             users.into_iter(),
         );
     }

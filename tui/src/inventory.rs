@@ -259,6 +259,7 @@ mod tests {
             animated: false,
             zero_width: false,
             global: false,
+            token: false,
         }
     }
 

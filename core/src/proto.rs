@@ -444,6 +444,7 @@ fn msg_emotes(m: &Value, platform: Platform, content: &str) -> (String, Vec<Emot
                     if let Some(e) = url
                         .as_str()
                         .and_then(|u| emote::msg_ref(name, u, "twitch", false))
+                        .map(Emote::into_token)
                     {
                         add(e);
                     }
@@ -1698,6 +1699,17 @@ mod tests {
         );
         assert_eq!(l.emotes.len(), 1);
         assert_eq!(l.emotes[0].name, "Sub");
+        assert!(l.emotes[0].token, "a platform's own mark owns its word");
+    }
+
+    #[test]
+    fn the_senders_inventory_refs_are_not_tokens() {
+        let l = chat(
+            r##"{"type":"irc:message","channel":"c","message":{"username":"u","content":"Pog",
+            "hsEmotes":{"Pog":{"url":"https://cdn.hs/p.webp","provider":"7tv"}}}}"##,
+        );
+        assert_eq!(l.emotes.len(), 1);
+        assert!(!l.emotes[0].token);
     }
 
     #[test]

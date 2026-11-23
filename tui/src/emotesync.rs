@@ -12,11 +12,22 @@ use heatsync_core::{Channel, Platform};
 
 /// the rooms a tab draws from. youtube tabs are named by video id and have no
 /// emote api, so they are never refreshed.
-fn keys_of(ch: &Channel) -> Vec<Key> {
+pub(crate) fn keys_of(ch: &Channel) -> Vec<Key> {
     ch.subs()
         .filter(|(p, _)| *p != Platform::Youtube)
         .map(|(p, n)| refresh::key(p, n))
         .collect()
+}
+
+/// one tab's emote set: its sources' latest sets in the tab's order, then the
+/// globals. built whole from what is stored, so it never depends on which
+/// fetch landed first.
+pub(crate) fn tab_set(
+    ch: &Channel,
+    st: &refresh::State,
+    globals: &heatsync_core::emote::EmoteSet,
+) -> heatsync_core::emote::EmoteSet {
+    refresh::rebuild(&keys_of(ch), st, globals)
 }
 
 /// every room open in any tab, once.
@@ -80,7 +91,7 @@ fn swap_in(app: &mut App, key: &Key) -> bool {
     for i in 0..app.channels.len() {
         let subs = keys_of(&app.channels[i]);
         if subs.contains(key) {
-            app.emotes[i] = refresh::rebuild(&subs, &app.refresh, &app.globals);
+            app.emotes[i] = tab_set(&app.channels[i], &app.refresh, &app.globals);
             any = true;
         }
     }
