@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use heatsync_core::emote::EmoteSet;
+use heatsync_core::emote::{Emote, EmoteSet};
 use heatsync_core::Platform;
 
 /// (platform, lowercased channel): the unit that is fetched.
@@ -33,6 +33,8 @@ const RETRY: Duration = Duration::from_secs(90);
 const RECONNECT_SPREAD: Duration = Duration::from_secs(20);
 /// a room read this recently is not re-read because the socket flapped.
 const FLAP_GAP: Duration = Duration::from_secs(60);
+/// the kick emotes remembered per room (see [`State::learn`]).
+pub const LEARN_CAP: usize = 256;
 /// fetches in flight at once.
 const MAX_INFLIGHT: usize = 4;
 
@@ -77,6 +79,10 @@ struct Entry {
 
 pub struct State {
     entries: HashMap<Key, Entry>,
+    /// kick emotes seen used in a room, oldest first (recency order, so the cap
+    /// never depends on a hash): the server cannot list a kick room's own
+    /// emotes, but every `[emote:id:name]` on a line proves one.
+    learned: HashMap<Key, Vec<Emote>>,
     tx: Sender<(Key, Outcome)>,
     rx: Receiver<(Key, Outcome)>,
     /// the socket dropped since the last time it was up.
@@ -91,6 +97,7 @@ impl State {
         let (tx, rx) = channel();
         State {
             entries: HashMap::new(),
+            learned: HashMap::new(),
             tx,
             rx,
             was_down: false,
@@ -127,6 +134,40 @@ impl State {
     /// the set last fetched for this key (the first fetch seeds it).
     pub fn set(&self, k: &Key) -> Option<&EmoteSet> {
         self.entries.get(k).and_then(|e| e.set.as_ref())
+    }
+
+    /// a kick emote a line in this room used, by kick's own token: remember it
+    /// (capped; the one seen longest ago goes first). true when the room now
+    /// knows something new, so its tabs should be rebuilt. anything that is not
+    /// kick's, or has no numeric id, is refused.
+    pub fn learn(&mut self, k: &Key, e: &Emote) -> bool {
+        if e.provider != "kick" || e.id.is_empty() || !e.id.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        let list = self.learned.entry(k.clone()).or_default();
+        let mut new = true;
+        if let Some(i) = list.iter().position(|x| x.name == e.name) {
+            new = list[i].id != e.id;
+            list.remove(i);
+        }
+        list.push(Emote {
+            kind: Default::default(),
+            ..e.clone()
+        });
+        if list.len() > LEARN_CAP {
+            list.remove(0);
+        }
+        new
+    }
+
+    /// the room's set as last fetched, plus the kick emotes seen in it. a
+    /// learned emote only fills a name the set leaves open.
+    pub fn room_set(&self, k: &Key) -> EmoteSet {
+        let mut out = self.set(k).cloned().unwrap_or_default();
+        if let Some(l) = self.learned.get(k) {
+            out.merge(EmoteSet::from_list(l.iter().cloned()));
+        }
+        out
     }
 
     /// the first fetch of a room's set landed (from the open path). an empty
@@ -223,6 +264,7 @@ impl State {
     pub fn register(&mut self, open: &[Key], now: Instant) {
         let open_set: HashSet<&Key> = open.iter().collect();
         self.entries.retain(|k, _| open_set.contains(k));
+        self.learned.retain(|k, _| open_set.contains(k));
         for k in open {
             if !self.entries.contains_key(k) {
                 let due = self.next_due(now);
@@ -312,9 +354,7 @@ impl State {
 pub fn rebuild(subs: &[Key], st: &State, globals: &EmoteSet) -> EmoteSet {
     let mut out = EmoteSet::new();
     for k in subs {
-        if let Some(s) = st.set(k) {
-            out.merge(s.clone());
-        }
+        out.merge(st.room_set(k));
     }
     out.merge(globals.clone());
     out
@@ -510,6 +550,64 @@ mod tests {
         assert!(st
             .wanted(&[k("xqc")], t0 + Duration::from_secs(5) + RECONNECT_SPREAD)
             .is_empty());
+    }
+
+    fn kick(name: &str, id: &str) -> Emote {
+        Emote {
+            name: name.into(),
+            url: format!("https://files.kick.com/emotes/{id}/fullsize"),
+            provider: "kick".into(),
+            id: id.into(),
+            animated: false,
+            zero_width: false,
+            global: false,
+            kind: Default::default(),
+        }
+    }
+
+    #[test]
+    fn learned_kick_emotes_are_capped_stable_and_only_for_open_rooms() {
+        let mut st = State::new();
+        let t0 = Instant::now();
+        let r = key(Platform::Kick, "room");
+        st.wanted(std::slice::from_ref(&r), t0);
+        // new → true; the same again → false (recency only)
+        assert!(st.learn(&r, &kick("A", "1")));
+        assert!(!st.learn(&r, &kick("A", "1")));
+        // a new id for a name replaces it
+        assert!(st.learn(&r, &kick("A", "2")));
+        assert_eq!(st.room_set(&r).get("A").unwrap().id, "2");
+        // a bad one is refused: not kick's, or no numeric id
+        let mut seven = kick("S", "9");
+        seven.provider = "7tv".into();
+        assert!(!st.learn(&r, &seven));
+        assert!(!st.learn(&r, &kick("T", "")));
+        assert!(!st.learn(&r, &kick("T", "12x")));
+        // the cap drops the one not seen longest, never by hash order
+        for i in 0..LEARN_CAP + 10 {
+            st.learn(&r, &kick(&format!("e{i}"), &i.to_string()));
+        }
+        let set = st.room_set(&r);
+        assert!(set.get("A").is_none() && set.get("e0").is_none());
+        assert!(set.get(&format!("e{}", LEARN_CAP + 9)).is_some());
+        assert_eq!(set.len(), LEARN_CAP);
+        // closing the room forgets them
+        st.register(&[], t0);
+        assert!(st.room_set(&r).is_empty());
+    }
+
+    #[test]
+    fn a_learned_emote_never_outranks_what_the_room_set_says() {
+        let mut st = State::new();
+        let t0 = Instant::now();
+        let r = key(Platform::Kick, "room");
+        st.wanted(std::slice::from_ref(&r), t0);
+        st.seed(r.clone(), &set(&[("KEKW", "7")]), t0);
+        st.learn(&r, &kick("KEKW", "37226"));
+        st.learn(&r, &kick("Only", "5"));
+        let s = rebuild(&[r], &st, &EmoteSet::new());
+        assert_eq!(s.get("KEKW").unwrap().provider, "7tv");
+        assert_eq!(s.get("Only").unwrap().provider, "kick");
     }
 
     #[test]

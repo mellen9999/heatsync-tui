@@ -924,12 +924,18 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
     Flow::Continue
 }
 
-/// what kick receives for a line typed in the room `name`: that room's own
-/// last-good set when it has one (a merged tab's pooled set can hold another
-/// kick room's emotes), else the tab's.
-fn kick_text(app: &App, name: &str, text: &str) -> String {
-    let own = app.refresh.set(&crate::refresh::key(Platform::Kick, name));
-    own.unwrap_or(&app.emotes[app.focus]).kick_wire(text)
+/// what kick receives for a line typed in the room `name`: that room's own set
+/// (the last good fetch plus the kick emotes seen used there — a merged tab's
+/// pooled set can hold another kick room's), else the tab's.
+pub(crate) fn kick_text(app: &App, name: &str, text: &str) -> String {
+    let room = app
+        .refresh
+        .room_set(&crate::refresh::key(Platform::Kick, name));
+    if room.is_empty() {
+        app.emotes[app.focus].kick_wire(text)
+    } else {
+        room.kick_wire(text)
+    }
 }
 
 /// post `text` through heatsync on its own thread; only a failure speaks.
@@ -1258,12 +1264,42 @@ mod send_tests {
         assert_eq!(sent[0].2, "KEKW");
     }
 
+    /// 26 tokens + their spaces are 493 units; `tail` makes the rest.
+    fn kick_line(tail: &str) -> String {
+        let mut words = vec!["KEKW"; 26];
+        words.push(tail);
+        words.join(" ")
+    }
+
+    #[test]
+    fn the_kick_cap_is_500_utf16_units_exactly() {
+        let token = "[emote:37226:KEKW]";
+        for (tail, tokens) in [
+            ("abcdef", true),                        // 493 + 1 + 6 = 500: fits
+            ("abcdefg", false),                      // 501: plain words
+            ("\u{1f600}\u{1f600}\u{1f600}", true),   // astral: 3 chars are 6 units = 500
+            ("\u{1f600}\u{1f600}\u{1f600}a", false), // 501
+        ] {
+            let (mut a, rx) = app();
+            a.focus = 1;
+            kick_room(&mut a, "37226");
+            let line = kick_line(tail);
+            enter(&mut a, &line, 1);
+            let want = if tokens {
+                vec![token; 26].join(" ") + " " + tail
+            } else {
+                line
+            };
+            assert_eq!(chats(&rx)[0].2, want, "tail {tail:?}");
+        }
+    }
+
     #[test]
     fn a_kick_line_too_long_for_the_tokens_goes_out_as_plain_words() {
         let (mut a, rx) = app();
         a.focus = 1;
         kick_room(&mut a, "37226");
-        // 60 words: 4 chars each plain (300 + spaces ≈ 359) but 17 each as tokens
+        // 60 words: 4 chars each plain (299 with the spaces) but 18 each as a token
         let line = vec!["KEKW"; 60].join(" ");
         enter(&mut a, &line, 1);
         assert_eq!(chats(&rx)[0].2, line);

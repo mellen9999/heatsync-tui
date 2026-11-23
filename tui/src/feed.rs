@@ -229,7 +229,30 @@ pub(crate) fn deliver(app: &mut App, l: ChatLine, now: u64) {
         .iter()
         .position(|c| c.matches(l.platform, &l.channel))
     {
+        learn_kick(app, &l);
         deliver_at(app, i, l, now, true);
+    }
+}
+
+/// a kick line's own tokens prove the room's emotes (id + name): keep them, and
+/// rebuild the tabs that hold the room when one is new — drawing and sending
+/// both read them from the room's set.
+fn learn_kick(app: &mut App, l: &ChatLine) {
+    if l.platform != Platform::Kick {
+        return;
+    }
+    let key = crate::refresh::key(l.platform, &l.channel);
+    let mut new = false;
+    for e in l.emotes.iter().filter(|e| e.provider == "kick") {
+        new |= app.refresh.learn(&key, e);
+    }
+    if !new {
+        return;
+    }
+    for i in 0..app.channels.len() {
+        if crate::emotesync::keys_of(&app.channels[i]).contains(&key) {
+            app.emotes[i] = crate::emotesync::tab_set(&app.channels[i], &app.refresh, &app.globals);
+        }
     }
 }
 
@@ -808,5 +831,71 @@ mod tests {
         let second = kekw_after([(Platform::Kick, "kripp"), (Platform::Twitch, "xqc")]);
         assert_eq!(first, second);
         assert!(first.contains("7tv"), "the tab's first room wins: {first}");
+    }
+
+    /// the room's set exactly as the real routes shape it: 7tv/bttv/ffz rows
+    /// from `/api/channel/:c/emotes`, never a kick-provider row (the server
+    /// cannot reach kick's emote list), plus the streamer's upload.
+    fn route_set() -> EmoteSet {
+        let body: heatsync_core::emote::EmoteSetResponse = serde_json::from_str(
+            r#"{"emotes":[
+                {"name":"catJAM","url":"https://cdn.7tv.app/emote/01ABC/2x.webp","provider":"7tv","id":"01ABC","animated":true},
+                {"name":"Pog","url":"https://cdn.betterttv.net/emote/5f/2x.webp","provider":"bttv","id":"5f"}]}"#,
+        )
+        .unwrap();
+        let owner = heatsync_core::emote::owner_list(
+            &serde_json::json!({"emotes":[{"name":"Mine","url":"/uploads/e/mine.webp","hash":"abc"}]}),
+            "https://heatsync.org",
+        );
+        EmoteSet::from_list(body.emotes.into_iter().chain(owner))
+    }
+
+    #[test]
+    fn a_kick_emote_seen_in_a_room_is_that_rooms_and_goes_out_as_kicks_own() {
+        let (mut a, tx) = live();
+        a.emote_tx
+            .send((Platform::Kick, "kripp".into(), route_set()))
+            .unwrap();
+        drain_emotes(&mut a);
+        // nothing of kick's is known yet: the word goes out as typed
+        assert_eq!(
+            crate::input::kick_text(&a, "kripp", "kekHype catJAM"),
+            "kekHype catJAM"
+        );
+        // a viewer's line carries kick's own token for it
+        frame(
+            &mut a,
+            &tx,
+            &kick_live("k1", "viewer", "[emote:37226:kekHype] hi"),
+        );
+        let e = a.emotes[KICK_TAB].get("kekHype").expect("learned");
+        assert_eq!((e.provider.as_str(), e.id.as_str()), ("kick", "37226"));
+        // the room's real emotes are untouched
+        assert!(
+            a.emotes[KICK_TAB].get("catJAM").is_some() && a.emotes[KICK_TAB].get("Mine").is_some()
+        );
+        // now a typed word is kick's own emote on the wire, and only that word
+        assert_eq!(
+            crate::input::kick_text(&a, "kripp", "kekHype catJAM Pog"),
+            "[emote:37226:kekHype] catJAM Pog"
+        );
+    }
+
+    #[test]
+    fn a_kick_emote_is_learned_for_its_own_room_only() {
+        let (mut a, tx) = live();
+        frame(
+            &mut a,
+            &tx,
+            &kick_live("k1", "viewer", "[emote:37226:kekHype] hi"),
+        );
+        assert!(a.emotes[KICK_TAB].get("kekHype").is_some());
+        assert!(a.emotes[0].get("kekHype").is_none(), "another room's set");
+        // a refresh of the room's set (a server answer with no kick rows) keeps it
+        let t = std::time::Instant::now();
+        let k = crate::refresh::key(Platform::Kick, "kripp");
+        a.refresh.seed(k.clone(), &route_set(), t);
+        let tab = crate::emotesync::tab_set(&a.channels[KICK_TAB], &a.refresh, &a.globals);
+        assert!(tab.get("kekHype").is_some() && tab.get("catJAM").is_some());
     }
 }

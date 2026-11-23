@@ -305,15 +305,21 @@ impl EmoteSet {
     /// `[emote:id:name]`, so a word that means one of this room's kick emotes
     /// goes out in that form. a line that would not fit with them (kick's
     /// 500-character cap) goes out as the plain words it was typed as. a kick
-    /// emote with no numeric id can't be written that way and stays a word.
+    /// emote with no numeric id (or a name with `]`, `:` or a space in it) can't
+    /// be written that way and stays a word.
     pub fn kick_wire(&self, text: &str) -> String {
         let names: Index<Emote> = self
             .room
             .names
             .iter()
-            .filter(|(_, e)| {
+            .filter(|(n, e)| {
+                // a token is `[emote:id:name]`: the id must be kick's numeric one
+                // and the name must not be able to end or split it
                 e.provider != "kick"
-                    || (!e.id.is_empty() && e.id.bytes().all(|b| b.is_ascii_digit()))
+                    || (!e.id.is_empty()
+                        && e.id.bytes().all(|b| b.is_ascii_digit())
+                        && !n.contains([']', ':'])
+                        && !n.chars().any(char::is_whitespace))
             })
             .map(|(n, e)| (n.clone(), e.clone()))
             .collect();
@@ -863,7 +869,13 @@ pub fn kick_native(text: &str) -> (String, Vec<Emote>) {
             let (id, name) = body.split_once(':')?;
             let url = format!("https://files.kick.com/emotes/{id}/fullsize");
             let ok = !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
-            ok.then(|| msg_ref(name, &url, "kick", false).map(|e| (e.into_pick(), tail)))?
+            ok.then(|| {
+                msg_ref(name, &url, "kick", false).map(|mut e| {
+                    // the id is what a send writes back into the token
+                    e.id = id.to_string();
+                    (e.into_pick(), tail)
+                })
+            })?
         });
         match token {
             Some((e, tail)) => {
@@ -1424,6 +1436,14 @@ mod tests {
             "[emote:37226:KEKW] GAMBA hi KEKW0  [emote:37226:KEKW]"
         );
         assert_eq!(EmoteSet::new().kick_wire("KEKW"), "KEKW");
+    }
+
+    #[test]
+    fn a_kick_name_that_could_end_the_token_early_stays_a_word() {
+        for name in ["a]b", "a:b"] {
+            let set = EmoteSet::from_list([kick_emote(name, "1")]);
+            assert_eq!(set.kick_wire(name), name);
+        }
     }
 
     #[test]
