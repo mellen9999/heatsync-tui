@@ -79,8 +79,10 @@ pub(crate) fn pump(app: &mut App) {
     }
     let open = open_keys(app);
     for (k, etag) in app.refresh.wanted(&open, now) {
-        app.refresh
-            .spawn(k, etag, |k, etag| http::emote_refresh(&k.1, k.0, etag));
+        let held = app.refresh.set(&k).cloned();
+        app.refresh.spawn(k, etag, move |k, etag| {
+            http::emote_refresh(&k.1, k.0, etag, held.as_ref())
+        });
     }
 }
 

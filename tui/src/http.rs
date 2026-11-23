@@ -81,7 +81,7 @@ pub fn cosmetics(ids: &[String]) -> Option<serde_json::Value> {
     agent().get(&url).call().ok()?.body_mut().read_json().ok()
 }
 
-/// channel emote set (the server sends each name's winner last: ffz > 7tv > bttv)
+/// channel emote set (the law ranks collisions: ffz > 7tv > bttv, whatever the row order)
 /// plus the streamer's own heatsync emotes, which win their names in their own
 /// channel. fetched side by side; a failed owner lookup just leaves them out.
 pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
@@ -101,10 +101,70 @@ pub fn emote_set(channel: &str, platform: Platform) -> Option<EmoteSet> {
 
 /// re-read a channel's set for the refresh timer: the channel route is asked
 /// conditionally (`If-None-Match`, the server's weak ETag over the whole body),
-/// so an unchanged set costs a header. a failed or odd answer is `Failed`, never
-/// an empty set, so the caller keeps what it has. the owner's own emotes are
-/// re-read only when the channel body changed (their route sends no validator).
-pub fn emote_refresh(channel: &str, platform: Platform, etag: Option<&str>) -> Outcome {
+/// so an unchanged set costs a header. the streamer's own emotes (their route
+/// sends no validator) are read every time — one small request — because they
+/// change on the streamer's say-so, not the providers'. a failed, odd or
+/// degraded answer is `Failed`, never a smaller set, so the caller keeps what it
+/// has. `held` is the set the room has now.
+pub fn emote_refresh(
+    channel: &str,
+    platform: Platform,
+    etag: Option<&str>,
+    held: Option<&EmoteSet>,
+) -> Outcome {
+    let mut etag = etag;
+    for _ in 0..2 {
+        let chan = channel_answer(channel, platform, etag);
+        let owner = if matches!(chan, Chan::Failed) {
+            None
+        } else {
+            owner_fetch(channel, platform)
+        };
+        match settle(chan, owner, held) {
+            Step::Done(o) => return o,
+            // the streamer's emotes changed under an unchanged body: read it whole
+            Step::Full => etag = None,
+        }
+    }
+    Outcome::Failed
+}
+
+/// what the channel route said.
+enum Chan {
+    NotModified,
+    Body(EmoteSetResponse, Option<String>),
+    Failed,
+}
+
+enum Step {
+    Done(Outcome),
+    /// ask the channel route again without a validator.
+    Full,
+}
+
+/// the channel answer + the owner's list → what to do. pure, so it is tested
+/// without a network.
+fn settle(
+    chan: Chan,
+    owner: Option<Vec<heatsync_core::emote::Emote>>,
+    held: Option<&EmoteSet>,
+) -> Step {
+    match (chan, owner) {
+        (Chan::Failed, _) | (_, None) => Step::Done(Outcome::Failed),
+        (Chan::NotModified, Some(o)) => match held {
+            Some(h) if !h.owner_differs(&o) => Step::Done(Outcome::NotModified),
+            _ => Step::Full,
+        },
+        // a provider was down: this list is missing its emotes. keep the set.
+        (Chan::Body(b, _), Some(_)) if b.degraded => Step::Done(Outcome::Failed),
+        (Chan::Body(b, tag), Some(o)) => Step::Done(Outcome::Changed(
+            EmoteSet::from_list(b.emotes.into_iter().chain(o)),
+            tag,
+        )),
+    }
+}
+
+fn channel_answer(channel: &str, platform: Platform, etag: Option<&str>) -> Chan {
     let url = format!(
         "{BASE}/api/channel/{channel}/emotes?platform={}",
         platform_q(platform)
@@ -115,11 +175,11 @@ pub fn emote_refresh(channel: &str, platform: Platform, etag: Option<&str>) -> O
     }
     let mut resp = match req.call() {
         Ok(r) => r,
-        Err(ureq::Error::StatusCode(304)) => return Outcome::NotModified,
-        Err(_) => return Outcome::Failed,
+        Err(ureq::Error::StatusCode(304)) => return Chan::NotModified,
+        Err(_) => return Chan::Failed,
     };
     if resp.status().as_u16() == 304 {
-        return Outcome::NotModified;
+        return Chan::NotModified;
     }
     let tag = resp
         .headers()
@@ -127,16 +187,10 @@ pub fn emote_refresh(channel: &str, platform: Platform, etag: Option<&str>) -> O
         .and_then(|v| v.to_str().ok())
         .filter(|v| v.len() <= 80)
         .map(str::to_string);
-    let Some(body) = resp.body_mut().read_json::<EmoteSetResponse>().ok() else {
-        return Outcome::Failed;
-    };
-    let Some(owner) = owner_fetch(channel, platform) else {
-        return Outcome::Failed;
-    };
-    Outcome::Changed(
-        EmoteSet::from_list(body.emotes.into_iter().chain(owner)),
-        tag,
-    )
+    match resp.body_mut().read_json::<EmoteSetResponse>() {
+        Ok(b) => Chan::Body(b, tag),
+        Err(_) => Chan::Failed,
+    }
 }
 
 fn channel_emotes(channel: &str, platform: Platform) -> Option<Vec<heatsync_core::emote::Emote>> {
@@ -600,6 +654,84 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use heatsync_core::emote::Emote;
+
+    fn em(name: &str, provider: &str, url: &str) -> Emote {
+        Emote {
+            name: name.into(),
+            url: url.into(),
+            provider: provider.into(),
+            id: format!("{provider}-{name}"),
+            animated: false,
+            zero_width: false,
+            global: false,
+            token: false,
+        }
+    }
+
+    fn body(json: &str) -> EmoteSetResponse {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn done(s: Step) -> Outcome {
+        match s {
+            Step::Done(o) => o,
+            Step::Full => panic!("asked for the full body"),
+        }
+    }
+
+    #[test]
+    fn a_degraded_answer_keeps_the_last_good_set() {
+        let held = EmoteSet::from_list([em("Old", "7tv", "https://cdn/old")]);
+        // the server says a provider was down and may add fields we don't know
+        let b = body(r#"{"emotes":[],"degraded":true,"served":{"7tv":"2026-11-22T00:00:00Z"}}"#);
+        assert!(matches!(
+            done(settle(Chan::Body(b, None), Some(vec![]), Some(&held))),
+            Outcome::Failed
+        ));
+        // an answer that is not degraded (or never says) replaces it
+        let b = body(r#"{"emotes":[{"name":"New","url":"https://cdn/n","provider":"7tv"}]}"#);
+        assert!(matches!(
+            done(settle(Chan::Body(b, None), Some(vec![]), Some(&held))),
+            Outcome::Changed(..)
+        ));
+    }
+
+    #[test]
+    fn an_unchanged_body_still_rereads_the_streamers_own_emotes() {
+        let own = |url: &str| vec![em("Mine", "upload", url)];
+        let held = EmoteSet::from_list(own("https://hs/a"));
+        // same emotes: nothing to do
+        assert!(matches!(
+            done(settle(
+                Chan::NotModified,
+                Some(own("https://hs/a")),
+                Some(&held)
+            )),
+            Outcome::NotModified
+        ));
+        // renamed, added or removed: read the body whole so the set rebuilds
+        for fresh in [
+            own("https://hs/b"),
+            vec![],
+            vec![
+                em("Mine", "upload", "https://hs/a"),
+                em("Two", "upload", "https://hs/2"),
+            ],
+        ] {
+            assert!(matches!(
+                settle(Chan::NotModified, Some(fresh), Some(&held)),
+                Step::Full
+            ));
+        }
+        // the owner route failing is a failed refresh, the set stays
+        assert!(matches!(
+            done(settle(Chan::NotModified, None, Some(&held))),
+            Outcome::Failed
+        ));
+    }
+
     #[test]
     fn newest_posts_sent_in_place_of_hot_ones_are_not_called_hot() {
         let page = |fallback: bool| -> super::HotPage {

@@ -67,6 +67,11 @@ impl crate::law::Pic for Emote {
 pub struct EmoteSetResponse {
     #[serde(default)]
     pub emotes: Vec<Emote>,
+    /// the server could not reach a provider and sent what it had: the list is
+    /// missing that provider's emotes, so it must not replace a good set.
+    /// anything else the server adds to the answer is ignored.
+    #[serde(default)]
+    pub degraded: bool,
 }
 
 /// a room's emotes and the pooled globals, each one emote per exact name.
@@ -92,6 +97,14 @@ impl Default for EmoteSet {
             globals: Index::new(),
         }
     }
+}
+
+/// the streamer's own heatsync emotes carry no third-party provider.
+fn is_owner(e: &Emote) -> bool {
+    !matches!(
+        e.provider.as_str(),
+        "ffz" | "7tv" | "bttv" | "twitch" | "kick"
+    )
 }
 
 /// the channel owner's own heatsync emotes (`/api/emotes/user/<channel>`) →
@@ -197,6 +210,24 @@ impl EmoteSet {
         for e in self.globals.values_mut() {
             e.global = true;
         }
+    }
+
+    /// does the streamer's own list differ from the one this set was built from?
+    /// compared as built (one emote per name), so a duplicate row is not a change.
+    pub fn owner_differs(&self, owner: &[Emote]) -> bool {
+        fn sig(set: &EmoteSet) -> Vec<(&str, &str)> {
+            let mut v: Vec<(&str, &str)> = set
+                .room
+                .names
+                .values()
+                .filter(|e| is_owner(e))
+                .map(|e| (e.name.as_str(), e.url.as_str()))
+                .collect();
+            v.sort_unstable();
+            v
+        }
+        let fresh = EmoteSet::from_list(owner.iter().cloned());
+        sig(self) != sig(&fresh)
     }
 
     /// the emote a word means in this set: the room's, else a global.
