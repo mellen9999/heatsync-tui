@@ -48,7 +48,7 @@ pub(crate) type PinMsg = (Platform, String, Option<heatsync_core::Pin>);
 
 pub(crate) struct App {
     pub(crate) channels: Vec<Channel>,
-    pub(crate) emotes: Vec<EmoteSet>, // index-aligned with channels
+    pub(crate) emotes: Vec<heatsync_core::tabsets::TabSets>, // index-aligned with channels
     /// the pooled global set (twitch + unlocked + bttv/ffz/7tv globals),
     /// merged under every channel set — channel emotes of the same name win.
     pub(crate) globals: EmoteSet,

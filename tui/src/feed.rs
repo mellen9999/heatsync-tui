@@ -141,7 +141,7 @@ pub(crate) fn drain_history(app: &mut App) {
             if i == *focus {
                 let from = channels[i].messages.len().saturating_sub(60);
                 for m in channels[i].messages.iter().skip(from) {
-                    request_stacks(store, fb, &emotes[i], m.refs(), &m.text);
+                    request_stacks(store, fb, emotes[i].for_row(m), m.refs(), &m.text);
                 }
             }
         }
@@ -194,7 +194,7 @@ pub(crate) fn drain_emotes(app: &mut App) {
         let i = (*focus).min(channels.len() - 1);
         let from = channels[i].messages.len().saturating_sub(60);
         for m in channels[i].messages.iter().skip(from) {
-            request_stacks(store, fb, &emotes[i], m.refs(), &m.text);
+            request_stacks(store, fb, emotes[i].for_row(m), m.refs(), &m.text);
         }
     }
 }
@@ -304,7 +304,13 @@ fn deliver_at(app: &mut App, i: usize, l: ChatLine, now: u64, own: bool) {
         .then(|| std::sync::Arc::new(heatsync_core::emote::ref_set(&l.emotes)));
     if i == *focus {
         let r = refs.as_deref().unwrap_or(EmoteSet::none());
-        request_stacks(store, fb, &emotes[i], r, &l.content);
+        request_stacks(
+            store,
+            fb,
+            emotes[i].for_line(l.platform, &l.channel),
+            r,
+            &l.content,
+        );
     }
     let pinged = l.note.is_none()
         && !me.iter().any(|n| l.user.eq_ignore_ascii_case(n))
@@ -323,6 +329,7 @@ fn deliver_at(app: &mut App, i: usize, l: ChatLine, now: u64, own: bool) {
         note: l.note,
         extra: Extra {
             ts: crate::clock::now_secs(),
+            channel: chan.clone(),
             ..l.extra
         },
         emotes: refs,
@@ -608,7 +615,7 @@ pub(crate) fn tick_advance(app: &mut App) {
     if let Some(ch) = channels.get(*focus) {
         let from = ch.messages.len().saturating_sub(60);
         for m in ch.messages.iter().skip(from) {
-            request_stacks(store, fb, &emotes[*focus], m.refs(), &m.text);
+            request_stacks(store, fb, emotes[*focus].for_row(m), m.refs(), &m.text);
         }
     }
 }
@@ -634,7 +641,7 @@ mod tests {
         };
         a.channels
             .push(heatsync_core::Channel::new("vid1", Platform::Youtube, 50));
-        a.emotes.push(EmoteSet::new());
+        a.emotes.push(EmoteSet::new().into());
         (a, tx)
     }
 
@@ -753,7 +760,7 @@ mod tests {
         let mut second = heatsync_core::Channel::new("vid1", Platform::Youtube, 50);
         second.extra = vec![(Platform::Kick, "kripp".into())];
         a.channels.push(second);
-        a.emotes.push(EmoteSet::new());
+        a.emotes.push(EmoteSet::new().into());
         frame(&mut a, &tx, &kick_live("t1", "a", "once"));
         frame(&mut a, &tx, KICK_BACKFILL);
         let drawn: usize = a

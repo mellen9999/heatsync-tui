@@ -30,6 +30,7 @@ pub mod scroll;
 pub mod slash;
 pub mod social;
 pub mod streamev;
+pub mod tabsets;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -311,6 +312,9 @@ pub struct Extra {
     pub highlight: bool,
     /// wall-clock seconds when the line landed (0 = unknown) — for `HH:MM`.
     pub ts: u64,
+    /// the room this line came from (its channel on `Message::platform`); empty
+    /// when unknown. a merged tab reads each row against its own room's emotes.
+    pub channel: String,
 }
 
 /// a non-chat event shown inline in the chat flow. `what` is the human
@@ -652,12 +656,16 @@ impl Channel {
     /// definition. `msgs` is chronological (oldest first); the cap still bounds
     /// the buffer.
     pub fn backfill(&mut self, channel: &str, msgs: Vec<Message>) {
-        for m in msgs.into_iter().rev() {
+        for mut m in msgs.into_iter().rev() {
             if self.messages.len() == self.cap {
                 break;
             }
             if !self.first_sight(m.platform, channel, m.id.as_deref()) {
                 continue;
+            }
+            // history knows its room: a merged tab reads the row against it
+            if m.extra.channel.is_empty() {
+                m.extra.channel = channel.to_string();
             }
             self.messages.push_front(m);
         }
@@ -805,6 +813,13 @@ mod channel_tests {
             c.record(msg("u", &i.to_string()), 1);
         }
         assert_eq!((c.seq, c.messages.len()), (5, 2));
+    }
+
+    #[test]
+    fn backfilled_history_knows_its_room() {
+        let mut c = Channel::new("x", Platform::Twitch, 10);
+        c.backfill("room_a", vec![msg("a", "old")]);
+        assert_eq!(c.messages[0].extra.channel, "room_a");
     }
 
     #[test]

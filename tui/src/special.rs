@@ -243,7 +243,7 @@ pub(crate) fn add(app: &mut App, kind: TabKind) -> usize {
         ch.mark_seen(); // history isn't news
     }
     app.channels.insert(at, ch);
-    app.emotes.insert(at, app.globals.clone());
+    app.emotes.insert(at, app.globals.clone().into());
     if app.focus >= at && app.channels.len() > 1 {
         app.focus += 1; // keep the same tab focused
     }
@@ -588,7 +588,7 @@ pub(crate) mod tests {
                 Channel::new("xqc", Platform::Twitch, 50),
                 Channel::new("kripp", Platform::Kick, 50),
             ],
-            emotes: vec![EmoteSet::new(), EmoteSet::new()],
+            emotes: vec![EmoteSet::new().into(), EmoteSet::new().into()],
             globals: EmoteSet::new(),
             focus: 0,
             paused: false,

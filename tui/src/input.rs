@@ -412,7 +412,7 @@ pub(crate) fn add_tab(app: &mut App, subs: &[Sub], temp: bool) {
     }
     app.channels.push(ch);
     // seeded with globals now; channel sets merge in async (spawn_emote_fetch).
-    app.emotes.push(app.globals.clone());
+    app.emotes.push(app.globals.clone().into());
     app.focus = app.channels.len() - 1;
 }
 
@@ -1181,7 +1181,7 @@ mod send_tests {
         };
         a.channels
             .push(heatsync_core::Channel::new("vid1", Platform::Youtube, 50));
-        a.emotes.push(heatsync_core::emote::EmoteSet::new());
+        a.emotes.push(heatsync_core::emote::EmoteSet::new().into());
         let (tx, rx) = channel();
         a.out = Some(tx);
         (a, rx)
@@ -1255,7 +1255,7 @@ mod send_tests {
         // the same set in a youtube room is sent as typed (a twitch tab with no
         // login sends nothing, so the relay is the only path to read)
         kick_room(&mut a, "37226");
-        a.emotes[2] = a.emotes[1].clone();
+        a.emotes[2] = (*a.emotes[1]).clone().into();
         a.focus = 2;
         enter(&mut a, "KEKW", 1);
         let sent = chats(&rx);

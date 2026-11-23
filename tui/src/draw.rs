@@ -277,7 +277,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
         };
         let mut rows = layout_message(
             m,
-            set,
+            set.for_row(m),
             mode,
             body.width,
             &Look {

@@ -6,6 +6,7 @@
 //! is no message cursor and no keyboard nav over messages.
 
 mod app;
+
 mod blocks;
 mod cli;
 mod clock;
@@ -135,7 +136,7 @@ fn chat(args: &[String]) -> io::Result<()> {
         App {
             channels: mock::channels(),
             emotes: (0..mock::channels().len())
-                .map(|_| EmoteSet::new())
+                .map(|_| EmoteSet::new().into())
                 .collect(),
             globals: EmoteSet::new(),
             focus: 0,
@@ -280,7 +281,7 @@ fn build_live(
         let mut ch = Channel::new(name, *platform, 200);
         ch.extra = tab[1..].to_vec();
         channels.push(ch);
-        emotes.push(EmoteSet::new());
+        emotes.push(EmoteSet::new().into());
         for (p, n) in tab {
             // youtube has no emote API, and its archive is keyed by broadcaster
             // name (we only know the video id) — both fetches would be dead calls.

@@ -554,6 +554,7 @@ fn extra_of(m: &Value) -> Extra {
         first: flag("isFirstMsg"),
         highlight: flag("isHighlighted"),
         ts: 0,
+        channel: String::new(),
     }
 }
 

@@ -11,6 +11,8 @@ use heatsync_core::emote::{self, Emote, EmoteSet, RefKind, Segment};
 use heatsync_core::law::{
     self, Index, OfferCtx, Own, Pic, Platform, Ref, Room, RoomLists, SendCtx, Token,
 };
+use heatsync_core::tabsets::TabSets;
+use heatsync_core::Platform as TabPlatform;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -949,19 +951,41 @@ fn drawing(
             .map(|a| em(a, k))
             .collect()
     };
-    // the room's lists, and the globals
-    let (mut room_lists, mut loaded) = (Vec::new(), true);
-    if let Some(id) = str_of(c, "room") {
+    // a room's set + the globals, exactly as the terminal builds one source room
+    let globals = EmoteSet::from_global_list(list(Some(&raw["globals"]), RefKind::Sender)?);
+    let room_of = |id: &str| -> Res<EmoteSet> {
         let r = obj(&raw["rooms"][id], id)?;
-        loaded = r.get("loaded").and_then(Value::as_bool).unwrap_or(true);
+        let mut lists = Vec::new();
         for k in ["owner", "third", "native"] {
-            room_lists.extend(list(r.get(k), RefKind::Sender)?);
+            lists.extend(list(r.get(k), RefKind::Sender)?);
         }
+        let mut set = globals.clone();
+        set.merge(EmoteSet::from_list(lists));
+        Ok(set)
+    };
+    let room_id = str_of(c, "room");
+    let set = match room_id {
+        Some(id) => room_of(id)?,
+        None => globals.clone(),
+    };
+    // the same world as ONE merged tab holding every room in it: the row is read
+    // against its own room, so the answer must not depend on its neighbours
+    let platform_of = |s: &str| match s {
+        "kick" => TabPlatform::Kick,
+        "youtube" => TabPlatform::Youtube,
+        _ => TabPlatform::Twitch,
+    };
+    let mut rooms = Vec::new();
+    for id in raw["rooms"]
+        .as_object()
+        .map(|m| m.keys())
+        .into_iter()
+        .flatten()
+    {
+        let (p, ch) = id.split_once(':').ok_or("room id")?;
+        rooms.push((platform_of(p), ch.to_string(), room_of(id)?));
     }
-    let room = EmoteSet::from_list(room_lists);
-    let _ = loaded;
-    let mut set = EmoteSet::from_global_list(list(Some(&raw["globals"]), RefKind::Sender)?);
-    set.merge(room);
+    let tab = TabSets::new(EmoteSet::new(), rooms);
     // the line's own refs: the sender's personal set and shipped picks (picks), the inventory (sender)
     let mut line: Vec<Emote> = Vec::new();
     let mut named: HashSet<String> = HashSet::new();
@@ -999,19 +1023,31 @@ fn drawing(
     }
     let refs = emote::ref_set(&line);
     let text = str_of(c, "text").ok_or("text")?;
-    let got: Vec<String> = emote::segments_with(text, &set, &refs)
-        .into_iter()
-        .filter_map(|s| match s {
-            Segment::Stack(st) => Some(st.layers.into_iter().map(|l| {
-                l.url
-                    .trim_start_matches("https://v.test/")
-                    .trim_end_matches(".webp")
-                    .to_string()
-            })),
-            Segment::Text(_) => None,
-        })
-        .flatten()
-        .collect();
+    let draw = |set: &EmoteSet| -> Vec<String> {
+        emote::segments_with(text, set, &refs)
+            .into_iter()
+            .filter_map(|s| match s {
+                Segment::Stack(st) => Some(st.layers.into_iter().map(|l| {
+                    l.url
+                        .trim_start_matches("https://v.test/")
+                        .trim_end_matches(".webp")
+                        .to_string()
+                })),
+                Segment::Text(_) => None,
+            })
+            .flatten()
+            .collect()
+    };
+    let got = draw(&set);
+    if let Some(id) = room_id {
+        let (p, ch) = id.split_once(':').ok_or("room id")?;
+        let in_tab = draw(tab.for_line(platform_of(p), ch));
+        if in_tab != got {
+            return Err(format!(
+                "merged tab read {in_tab:?}, its own room read {got:?}"
+            ));
+        }
+    }
     let want: Vec<String> = c["expect"]
         .as_array()
         .ok_or("expect")?
