@@ -6,14 +6,23 @@
 //! other edit drops the state (the face clears it), which is what makes the
 //! walk feel like one gesture.
 //!
-//! `@word` completes usernames only (the `@` is kept); a bare word offers
-//! emotes first, in the emote law's order (see `law::offer`: the exact name,
-//! then the room's, then globals; starts-with, word-start, inside), then
-//! usernames. an emote needs two typed characters — one letter would offer
-//! half the set.
+//! `@word` completes usernames only (the `@` is kept); a bare word offers, in
+//! this order: the exact emote name, the room's emotes, the people, then every
+//! other emote (the emote law's order inside each: see `law::offer`). an emote
+//! needs two typed characters — one letter would offer half the set.
 
 /// the fewest typed characters that offer emotes.
 pub const MIN_EMOTE: usize = 2;
+
+/// the emote names tab offers for a word, split around the people: `first` is
+/// the exact name and the room's own emotes, `rest` is everything else.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Ranked {
+    pub first: Vec<String>,
+    pub rest: Vec<String>,
+}
+
+use std::collections::HashSet;
 
 /// a completion in progress: the matches for the word that was under the
 /// cursor, and which one currently occupies the line.
@@ -35,7 +44,7 @@ impl Completion {
     pub fn build<'a>(
         text: &str,
         cursor: usize,
-        emotes: impl FnOnce(&str) -> Vec<String>,
+        emotes: impl FnOnce(&str) -> Ranked,
         users: impl Iterator<Item = &'a str>,
     ) -> Option<Completion> {
         let chars: Vec<char> = text.chars().collect();
@@ -64,20 +73,27 @@ impl Completion {
                 .is_some_and(|h| h.eq_ignore_ascii_case(prefix))
         };
         let mut items: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut push = |s: String| {
-            if !items.contains(&s) {
+            if seen.insert(s.clone()) {
                 items.push(s);
             }
         };
-        if !at && prefix.chars().count() >= MIN_EMOTE {
-            for e in emotes(prefix) {
-                push(e);
-            }
+        let ranked = if !at && prefix.chars().count() >= MIN_EMOTE {
+            emotes(prefix)
+        } else {
+            Ranked::default()
+        };
+        for e in ranked.first {
+            push(e);
         }
         let mut hits: Vec<&str> = users.filter(|u| matches(u)).collect();
         hits.sort_unstable_by_key(|a| twin_key(a, prefix));
         for u in hits {
             push(if at { format!("@{u}") } else { u.to_string() });
+        }
+        for e in ranked.rest {
+            push(e);
         }
 
         (!items.is_empty()).then_some(Completion {
@@ -238,6 +254,33 @@ mod tests {
         // typed "po": every one starts with it; the room's goes first even
         // though it is the longest
         assert_eq!(walk(&globals, "po"), ["Poggers", "Pog", "Pogu"]);
+    }
+
+    #[test]
+    fn the_exact_name_then_the_room_then_people_then_the_rest() {
+        // a global that starts with it, a global that is it, a room emote that
+        // holds it inside a word, a room emote that starts with it
+        let mut set = EmoteSet::from_list([em("xpogx", "7tv"), em("Pogchamp", "7tv")]);
+        let mut globals = EmoteSet::from_global_list([em("Pogu", "7tv"), em("pog", "7tv")]);
+        globals.merge(std::mem::take(&mut set));
+        let mut c = run(&globals, &["pogman"], "pog", 3).unwrap();
+        let order: Vec<String> = (0..5).map(|_| c.advance(1).2.to_string()).collect();
+        assert_eq!(order, ["pog", "Pogchamp", "xpogx", "pogman", "Pogu"]);
+    }
+
+    #[test]
+    fn at_means_people_only_and_a_name_is_never_offered_twice() {
+        let set = room(&["mellen"]);
+        let mut c = run(&set, &["mellen", "Mellen"], "me", 2).unwrap();
+        let all: Vec<String> = (0..3).map(|_| c.advance(1).2.to_string()).collect();
+        assert_eq!(
+            all,
+            ["mellen", "Mellen", "mellen"],
+            "wraps after two distinct"
+        );
+        let mut c = run(&set, &["mellen"], "@me", 3).unwrap();
+        assert_eq!(c.advance(1).2, "@mellen");
+        assert_eq!(c.advance(1).2, "@mellen", "one item, wraps");
     }
 
     #[test]

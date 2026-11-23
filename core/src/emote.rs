@@ -8,6 +8,7 @@
 
 use serde::Deserialize;
 
+use crate::complete::Ranked;
 use crate::law::{self, Index, Own, Platform, Room, RoomLists};
 
 /// one emote as the HeatSync emote API returns it.
@@ -245,10 +246,11 @@ impl EmoteSet {
         self.globals.get(name)
     }
 
-    /// what tab offers for `typed`, best first: the exact name, then the
-    /// room's, then globals; inside a tier starts-with, word-start, inside,
-    /// then shorter, then a-z (the law's order). blocked emotes are left out.
-    pub fn offer(&self, typed: &str) -> Vec<String> {
+    /// what tab offers for `typed`, in the law's order: the exact name and the
+    /// room's emotes (`first` — the people go after these), then globals and the
+    /// rest. inside each, starts-with, word-start, inside, then shorter, then
+    /// a-z. blocked emotes are left out.
+    pub fn offer(&self, typed: &str) -> Ranked {
         let own = Own::default();
         let ctx = law::OfferCtx {
             room: Some(&self.room),
@@ -261,11 +263,19 @@ impl EmoteSet {
             blocked: None,
             suggest_own: true,
         };
-        law::offer(typed, &ctx, None)
-            .into_iter()
-            .filter(|c| !crate::block::is_blocked(c.emote))
-            .map(|c| c.emote.name.clone())
-            .collect()
+        let mut out = Ranked::default();
+        for c in law::offer(typed, &ctx, None) {
+            if crate::block::is_blocked(c.emote) {
+                continue;
+            }
+            let side = if c.matched == law::BUCKET_EXACT || c.tier == law::Tier::Room {
+                &mut out.first
+            } else {
+                &mut out.rest
+            };
+            side.push(c.emote.name.clone());
+        }
+        out
     }
 
     /// the text kick receives for `text`: kick draws its own emotes only from
