@@ -853,7 +853,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
         let c = &app.channels[app.focus];
         (c.platform, c.name.clone())
     };
-    note_usage(app, &text);
+    let used = used_keys(app, &text);
     // kick draws its emotes only from its own token format, on every send path
     let text = if platform == Platform::Kick {
         kick_text(app, &name, &text)
@@ -863,7 +863,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
     match platform {
         Platform::Twitch => {
             if let Some(client) = app.hs.clone() {
-                send_via_heatsync(app, client, platform, name.clone(), text, reply);
+                send_via_heatsync(app, client, platform, name.clone(), text, reply, used);
                 app.line.accept();
                 app.status = Some(trf("input.status_sent", &[("name", &name)]));
             } else {
@@ -872,6 +872,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                         // a dead sender (auth failed for good) must not look like a send.
                         if tx.send((name.clone(), text, reply)).is_ok() {
                             app.line.accept();
+                            record_use(app, &used);
                             app.status = Some(trf("input.status_sent", &[("name", &name)]));
                             crate::temp::sent(app, platform, &name);
                         } else {
@@ -885,12 +886,13 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
         // heatsync login first; then a kick token the user supplied; then the ext relay.
         Platform::Kick => {
             if let Some(client) = app.hs.clone() {
-                send_via_heatsync(app, client, platform, name.clone(), text, reply);
+                send_via_heatsync(app, client, platform, name.clone(), text, reply, used);
                 app.line.accept();
                 app.status = Some(trf("input.status_sent", &[("name", &name)]));
             } else if let Some(ktx) = &app.kick_tx {
                 let _ = ktx.send((name.clone(), text, reply));
                 app.line.accept();
+                record_use(app, &used);
                 app.status = Some(trf("input.status_sent", &[("name", &name)]));
                 crate::temp::sent(app, platform, &name);
             } else if let Some(out) = &app.out {
@@ -900,6 +902,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                     text,
                 });
                 app.line.accept();
+                record_use(app, &used);
                 app.status = Some(trf("input.status_sent_ext", &[("name", &name)]));
             } else {
                 app.status = Some(tr("input.status_no_login_kick").into());
@@ -917,6 +920,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
                     text,
                 });
                 app.line.accept();
+                record_use(app, &used);
                 app.status = Some(trf("input.status_sent_ext", &[("name", &name)]));
             }
             None => app.status = Some(tr("input.status_no_send_path").into()),
@@ -925,22 +929,35 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
     Flow::Continue
 }
 
-/// the emotes in a line being sent count as used (by picture), and the file is
-/// saved on its own thread.
-fn note_usage(app: &mut App, text: &str) {
-    let now = crate::clock::now_secs();
-    let keys: Vec<String> = text
+/// the emote pictures a line is about to send, each once however many times
+/// the word is typed.
+fn used_keys(app: &App, text: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for e in text
         .split_whitespace()
         .filter_map(|w| app.emotes[app.focus].get(w))
-        .map(heatsync_core::law::key_of)
-        .collect();
+    {
+        let k = heatsync_core::law::key_of(e);
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
+/// a send went out: its pictures count as used, once each, and are handed to
+/// the saver thread. never called for a refusal or a line still in the composer.
+pub(crate) fn record_use(app: &mut App, keys: &[String]) {
     if keys.is_empty() {
         return;
     }
+    let now = crate::clock::now_secs();
     for k in keys {
-        app.usage.note(&k, now);
+        app.usage.note(k, now);
     }
-    let _ = app.usage_tx.send(app.usage.render());
+    let _ = app
+        .usage_tx
+        .send(keys.iter().map(|k| (k.clone(), now)).collect());
 }
 
 /// what kick receives for a line typed in the room `name`: a word is written
@@ -962,17 +979,22 @@ fn send_via_heatsync(
     name: String,
     text: String,
     reply: Option<String>,
+    used: Vec<String>,
 ) {
     let chan = name.clone();
-    hsauth::spawn_send(app.hs_tx.clone(), platform, name, move || {
-        match client.send(platform, &chan, &text, reply.as_deref()) {
+    hsauth::spawn_send(
+        app.hs_tx.clone(),
+        platform,
+        name,
+        used,
+        move || match client.send(platform, &chan, &text, reply.as_deref()) {
             Ok(()) => hsauth::Outcome {
                 ok: true,
                 text: String::new(),
             },
             Err(e) => hsauth::Outcome { ok: false, text: e },
-        }
-    });
+        },
+    );
 }
 
 /// one tab press: start or continue a completion walk over the focused
@@ -1230,10 +1252,8 @@ mod send_tests {
             .collect()
     }
 
-    #[test]
-    fn what_you_send_leads_tab_next_time_and_is_saved_off_the_ui_thread() {
-        use heatsync_core::emote::{Emote, EmoteSet};
-        let em = |n: &str| Emote {
+    fn em7(n: &str) -> heatsync_core::emote::Emote {
+        heatsync_core::emote::Emote {
             name: n.into(),
             url: format!("https://cdn/{n}.webp"),
             provider: "7tv".into(),
@@ -1242,38 +1262,113 @@ mod send_tests {
             zero_width: false,
             global: false,
             kind: Default::default(),
-        };
-        let (mut a, _rx) = app();
-        a.focus = 0;
-        let mut set = EmoteSet::from_list([em("PogU")]);
-        set.merge(EmoteSet::from_global_list([em("PogChamp"), em("MegaPog")]));
-        a.emotes[0] = set.into();
+        }
+    }
+
+    /// tab `i` knows PogU (room) and PogChamp / MegaPog (globals); the saver is a
+    /// channel in hand.
+    fn pog_app(
+        i: usize,
+    ) -> (
+        App,
+        Receiver<crate::usagestore::Uses>,
+        Receiver<net::Outbound>,
+    ) {
+        use heatsync_core::emote::EmoteSet;
+        let (mut a, rx) = app();
+        a.focus = i;
+        let mut set = EmoteSet::from_list([em7("PogU")]);
+        set.merge(EmoteSet::from_global_list([
+            em7("PogChamp"),
+            em7("MegaPog"),
+        ]));
+        a.emotes[i] = set.into();
         let (tx, saved) = channel();
         a.usage_tx = tx;
-        // nothing used yet: the room's PogU leads
-        let walk = |a: &mut App| {
-            a.line
-                .replace_range(0, a.line.text().chars().count(), "pog");
-            a.completion = None;
-            complete_step(a, 1);
-            a.line.text()
-        };
-        assert_eq!(walk(&mut a), "PogU");
-        // the person sends PogChamp (and a plain word): it is counted by picture
-        a.line.replace_range(0, a.line.text().chars().count(), "");
         a.mode = InputMode::Insert;
+        (a, saved, rx)
+    }
+
+    fn walk(a: &mut App) -> String {
+        a.line
+            .replace_range(0, a.line.text().chars().count(), "pog");
+        a.completion = None;
+        complete_step(a, 1);
+        let out = a.line.text();
+        a.line.replace_range(0, out.chars().count(), "");
+        out
+    }
+
+    #[test]
+    fn what_you_send_leads_tab_next_time_and_is_saved_off_the_ui_thread() {
+        // kick tab, ext relay: a send that goes out
+        let (mut a, saved, _rx) = pog_app(1);
+        assert_eq!(walk(&mut a), "PogU");
         enter(&mut a, "gg PogChamp", 1);
-        let file = saved.try_recv().expect("a snapshot goes to the saver");
-        assert!(
-            file.contains("7tv:PogChamp\t1.0000\t") && !file.contains("gg"),
-            "{file}"
-        );
+        let got = saved.try_recv().expect("a send goes to the saver");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "7tv:PogChamp");
         // now it starts with what they typed, so it leads the room
-        a.line.replace_range(0, a.line.text().chars().count(), "");
         assert_eq!(walk(&mut a), "PogChamp");
         // a line with no emote in it saves nothing
         enter(&mut a, "hello there", 1);
         assert!(saved.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_refused_send_counts_nothing_and_a_retry_counts_once() {
+        // twitch tab, no login and no sender: every Enter is refused, the line stays
+        let (mut a, saved, _rx) = pog_app(0);
+        enter(&mut a, "PogChamp PogChamp PogChamp", 3);
+        assert!(saved.try_recv().is_err(), "a refusal is not a use");
+        assert!(a.usage.is_empty());
+        assert_eq!(walk_score(&a), 0.0);
+        // the login arrives; the same line goes out on the next Enter
+        let (ttx, _trx) = channel();
+        a.twitch_tx = Some(ttx);
+        enter(&mut a, "", 1);
+        let got = saved.try_recv().expect("the send that went");
+        // three of one word are one picture, once
+        assert_eq!(got.len(), 1);
+        assert!((walk_score(&a) - 1.0).abs() < 1e-9, "{}", walk_score(&a));
+        assert!(saved.try_recv().is_err());
+    }
+
+    fn walk_score(a: &App) -> f64 {
+        a.usage.score("7tv:PogChamp", crate::clock::now_secs())
+    }
+
+    #[test]
+    fn a_heatsync_send_counts_when_the_server_took_it_and_not_when_it_refused() {
+        use crate::hsauth::testkit::{client as fake_client, Fake};
+        use serde_json::json;
+        for (ok, want) in [(true, 1.0), (false, 0.0)] {
+            let reply = if ok {
+                Ok((200, json!({"success": true})))
+            } else {
+                Ok((403, json!({"error": "no"})))
+            };
+            let f = Fake::new(vec![reply]);
+            let (mut a, saved, _rx) = pog_app(0);
+            a.hs = Some(fake_client(&f));
+            let (tx, rx) = channel();
+            a.hs_tx = tx;
+            a.hs_notes = rx;
+            enter(&mut a, "PogChamp PogChamp", 1);
+            // handed to the server, not yet counted: the answer decides
+            assert!(a.usage.is_empty());
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(2) && a.usage.is_empty() == ok {
+                crate::feed::drain_hs(&mut a);
+                if !ok && t0.elapsed() > Duration::from_millis(300) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            crate::feed::drain_hs(&mut a);
+            assert!((walk_score(&a) - want).abs() < 1e-9, "ok={ok}");
+            assert_eq!(saved.try_recv().is_ok(), ok);
+        }
     }
 
     /// a kick room where this account has itself used one of kick's own emotes.

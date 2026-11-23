@@ -717,6 +717,9 @@ pub struct Note {
     pub text: String,
     /// a chat send from a channel tab that landed (nothing to say, but it counts).
     pub sent: bool,
+    /// the emote pictures of a chat send that landed (what Tab learns from);
+    /// empty for anything the server refused.
+    pub used: Vec<String>,
     /// the saved login is dead: the UI stops using it.
     pub logged_out: bool,
 }
@@ -726,18 +729,18 @@ pub fn spawn_note<F>(tx: Sender<Note>, platform: Platform, channel: String, f: F
 where
     F: FnOnce() -> Outcome + Send + 'static,
 {
-    spawn(tx, platform, channel, false, f)
+    spawn(tx, platform, channel, None, f)
 }
 
 /// same, for a chat send: a clean outcome also flags the note `sent`.
-pub fn spawn_send<F>(tx: Sender<Note>, platform: Platform, channel: String, f: F)
+pub fn spawn_send<F>(tx: Sender<Note>, platform: Platform, channel: String, used: Vec<String>, f: F)
 where
     F: FnOnce() -> Outcome + Send + 'static,
 {
-    spawn(tx, platform, channel, true, f)
+    spawn(tx, platform, channel, Some(used), f)
 }
 
-fn spawn<F>(tx: Sender<Note>, platform: Platform, channel: String, is_send: bool, f: F)
+fn spawn<F>(tx: Sender<Note>, platform: Platform, channel: String, send: Option<Vec<String>>, f: F)
 where
     F: FnOnce() -> Outcome + Send + 'static,
 {
@@ -750,7 +753,12 @@ where
         let _ = tx.send(Note {
             platform,
             channel,
-            sent: is_send && o.ok,
+            sent: send.is_some() && o.ok,
+            used: if o.ok {
+                send.unwrap_or_default()
+            } else {
+                Vec::new()
+            },
             text: o.text,
             logged_out,
         });

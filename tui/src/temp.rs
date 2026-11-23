@@ -187,6 +187,7 @@ mod tests {
             channel: "forsen".into(),
             text: text.into(),
             sent,
+            used: Vec::new(),
             logged_out: false,
         };
         a.hs_tx.send(note(false, "nope")).unwrap();

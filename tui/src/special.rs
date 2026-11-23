@@ -381,6 +381,9 @@ pub(crate) fn account_changed(app: &mut App) {
         return;
     }
     let Some(c) = app.hs.clone() else { return };
+    // a different account may be signed in now: its emotes are read again at once
+    app.inventory.clear();
+    app.inv_due = Instant::now();
     let tx = app.names_tx.clone();
     std::thread::spawn(move || {
         if let Ok(v) = c.me() {

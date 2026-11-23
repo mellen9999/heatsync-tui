@@ -540,10 +540,13 @@ pub(crate) fn drain_hs(app: &mut App) {
     while let Ok(n) = app.hs_notes.try_recv() {
         if n.logged_out {
             app.hs = None; // the session file is already gone; stop using the dead login
+            app.inventory.clear(); // and what it listed is not whoever signs in next's
         }
         // a send that landed from a temp tab keeps it (the ext's auto-keep).
         if n.sent {
             crate::temp::sent(app, n.platform, &n.channel);
+            // the server took the line: now its emotes count as used
+            crate::input::record_use(app, &n.used);
         }
         if n.text.is_empty() {
             continue;

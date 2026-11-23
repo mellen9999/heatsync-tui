@@ -93,7 +93,7 @@ pub(crate) struct App {
     pub(crate) inv_busy: bool,
     /// the emotes this person sends, for Tab (local only), and its saver.
     pub(crate) usage: heatsync_core::usage::Usage,
-    pub(crate) usage_tx: Sender<String>,
+    pub(crate) usage_tx: Sender<crate::usagestore::Uses>,
     /// dim `HH:MM` before each line (`t`, persisted).
     pub(crate) stamps: bool,
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the
