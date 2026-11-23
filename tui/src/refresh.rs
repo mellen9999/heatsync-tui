@@ -31,6 +31,8 @@ const RETRY: Duration = Duration::from_secs(90);
 /// after a reconnect the refresh is spread over this, so a server restart
 /// doesn't draw every client back at the same second.
 const RECONNECT_SPREAD: Duration = Duration::from_secs(20);
+/// a room read this recently is not re-read because the socket flapped.
+const FLAP_GAP: Duration = Duration::from_secs(60);
 /// fetches in flight at once.
 const MAX_INFLIGHT: usize = 4;
 
@@ -69,6 +71,8 @@ struct Entry {
     inflight: bool,
     stale_said: bool,
     manual: bool,
+    /// when this room last answered well.
+    fresh: Option<Instant>,
 }
 
 pub struct State {
@@ -139,9 +143,11 @@ impl State {
             inflight: false,
             stale_said: false,
             manual: false,
+            fresh: None,
         });
         e.set = Some(set.clone());
         e.etag = None;
+        e.fresh = Some(now);
     }
 
     /// the socket state: a reconnect after a drop refreshes everything open.
@@ -165,19 +171,27 @@ impl State {
                 Duration::ZERO
             };
             if let Some(e) = self.entries.get_mut(&k) {
+                // a flapping socket must not turn into a request storm
+                if spread && e.fresh.is_some_and(|t| now.duration_since(t) < FLAP_GAP) {
+                    continue;
+                }
                 e.due = now + s;
             }
         }
     }
 
-    /// `/emotes refresh`: these rooms, now, and tell me how it went.
-    pub fn force(&mut self, keys: &[Key], now: Instant) {
+    /// `/emotes refresh`: these rooms, now, and tell me how it went. returns how
+    /// many rooms will run — none means there is nothing to wait for.
+    pub fn force(&mut self, keys: &[Key], now: Instant) -> usize {
+        let mut armed = 0;
         for k in keys {
             if let Some(e) = self.entries.get_mut(k) {
                 e.due = now;
                 e.manual = true;
+                armed += 1;
             }
         }
+        armed
     }
 
     /// what to fetch now, given the rooms open right now. a room that is no
@@ -193,9 +207,9 @@ impl State {
                 break;
             }
             if let Some(e) = self.entries.get_mut(k) {
-                // a room with no good set yet has nothing to refresh against: the
-                // open path's own fetch is still the one in charge of it.
-                if e.set.is_some() && !e.inflight && now >= e.due {
+                // a room whose first fetch failed has no set and no validator: it is
+                // fetched like any other, and a good answer becomes its set.
+                if !e.inflight && now >= e.due {
                     e.inflight = true;
                     busy += 1;
                     out.push((k.clone(), e.etag.clone()));
@@ -221,6 +235,7 @@ impl State {
                         inflight: false,
                         stale_said: false,
                         manual: false,
+                        fresh: None,
                     },
                 );
             }
@@ -255,25 +270,28 @@ impl State {
 
     pub fn apply(&mut self, k: Key, o: Outcome, now: Instant) -> Option<Applied> {
         let next = self.next_due(now);
+        let retry = now + RETRY + self.spread(RETRY / 3);
         let e = self.entries.get_mut(&k)?;
         e.inflight = false;
         let manual = std::mem::take(&mut e.manual);
         let (changed, failed, say_stale) = match o {
             Outcome::Changed(set, etag) if !set.is_empty() => {
                 e.set = Some(set);
+                e.fresh = Some(now);
                 e.etag = etag;
                 e.due = next;
                 e.stale_said = false;
                 (true, false, false)
             }
             Outcome::NotModified => {
+                e.fresh = Some(now);
                 e.due = next;
                 e.stale_said = false;
                 (false, false, false)
             }
             // an empty body is as unusable as no body: keep what we have.
             Outcome::Changed(..) | Outcome::Failed => {
-                e.due = now + RETRY;
+                e.due = retry;
                 let say = !e.stale_said;
                 e.stale_said = true;
                 (false, true, say)
@@ -440,26 +458,58 @@ mod tests {
     fn a_reconnect_refreshes_everything_open_once_spread_out() {
         let (mut st, t0) = seeded("xqc", &set(&[("A", "1")]));
         // first connect, and a connect that never followed a drop: nothing
-        st.socket(true, t0);
-        assert!(st.wanted(&[k("xqc")], t0).is_empty());
-        st.socket(false, t0);
-        st.socket(true, t0);
-        assert!(st.wanted(&[k("xqc")], t0 + RECONNECT_SPREAD).len() == 1);
+        let t1 = t0 + FLAP_GAP * 2;
+        st.socket(true, t1);
+        assert!(st.wanted(&[k("xqc")], t1).is_empty());
+        st.socket(false, t1);
+        st.socket(true, t1);
+        assert!(st.wanted(&[k("xqc")], t1 + RECONNECT_SPREAD).len() == 1);
         // a second up without a drop in between does it again? no
-        st.apply(k("xqc"), Outcome::NotModified, t0);
-        st.socket(true, t0);
-        assert!(st.wanted(&[k("xqc")], t0 + RECONNECT_SPREAD).is_empty());
+        st.apply(k("xqc"), Outcome::NotModified, t1);
+        st.socket(true, t1);
+        assert!(st.wanted(&[k("xqc")], t1 + RECONNECT_SPREAD).is_empty());
     }
 
     #[test]
-    fn a_room_without_a_good_set_is_left_to_the_open_path() {
+    fn a_room_whose_first_fetch_failed_is_fetched_on_the_timer_and_on_force() {
         let mut st = State::new();
         let t0 = Instant::now();
         st.wanted(&[k("new")], t0);
-        st.force_all(t0, false);
-        assert!(st.wanted(&[k("new")], t0).is_empty());
+        // the failed first fetch seeded nothing
         st.seed(k("new"), &EmoteSet::new(), t0);
         assert!(st.set(&k("new")).is_none());
+        // the timer picks it up, with no validator to send
+        let later = t0 + PERIOD + JITTER + Duration::from_secs(1);
+        assert_eq!(st.wanted(&[k("new")], later), vec![(k("new"), None)]);
+        // and a good answer becomes its set
+        let a = st
+            .apply(k("new"), Outcome::Changed(set(&[("A", "1")]), None), later)
+            .unwrap();
+        assert!(a.changed);
+        assert!(st.set(&k("new")).unwrap().get("A").is_some());
+        // a hand refresh of a room with no set runs too
+        let mut st = State::new();
+        st.wanted(&[k("new")], t0);
+        assert_eq!(st.force(&[k("new")], t0), 1);
+        assert_eq!(st.wanted(&[k("new")], t0).len(), 1);
+    }
+
+    #[test]
+    fn a_hand_refresh_with_no_room_to_run_says_so_instead_of_waiting() {
+        let mut st = State::new();
+        assert_eq!(st.force(&[k("nowhere")], Instant::now()), 0);
+    }
+
+    #[test]
+    fn a_socket_that_flaps_does_not_refetch_a_room_read_a_moment_ago() {
+        let (mut st, t0) = seeded("xqc", &set(&[("A", "1")]));
+        for _ in 0..3 {
+            st.socket(false, t0);
+            st.socket(true, t0 + Duration::from_secs(5));
+        }
+        assert!(st
+            .wanted(&[k("xqc")], t0 + Duration::from_secs(5) + RECONNECT_SPREAD)
+            .is_empty());
     }
 
     #[test]

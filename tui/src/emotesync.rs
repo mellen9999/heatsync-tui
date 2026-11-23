@@ -127,6 +127,13 @@ pub(crate) fn manual(app: &mut App) {
     let open = open_keys(app);
     let now = Instant::now();
     app.refresh.register(&open, now);
-    app.refresh.force(&keys, now);
-    app.status = Some(tr("emotes.refreshing").into());
+    let armed = app.refresh.force(&keys, now);
+    app.status = Some(
+        tr(if armed == 0 {
+            "emotes.refresh_failed"
+        } else {
+            "emotes.refreshing"
+        })
+        .into(),
+    );
 }
