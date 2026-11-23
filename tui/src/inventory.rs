@@ -61,6 +61,50 @@ pub fn parse_slots(v: &Value) -> Vec<Slot> {
     out
 }
 
+/// `GET /api/cli/emotes` → the emotes as pictures, for Tab. a row with no usable
+/// name or no https / root-relative url is dropped; the list is capped.
+pub fn parse_own(v: &Value, base: &str) -> Vec<Emote> {
+    v.get("emotes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_ROWS)
+        .filter_map(|r| {
+            let s = |k: &str| r.get(k).and_then(Value::as_str).filter(|x| !x.is_empty());
+            let name: String = s("custom_name")
+                .or_else(|| s("name"))?
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_NAME)
+                .collect();
+            if !valid_name(&name) {
+                return None;
+            }
+            let url = s("url")?;
+            let url = if url.starts_with('/') && !url.starts_with("//") {
+                format!("{base}{url}")
+            } else if url.starts_with("https://") {
+                url.to_string()
+            } else {
+                return None;
+            };
+            Some(Emote {
+                name,
+                url,
+                provider: s("source").unwrap_or("hs").chars().take(32).collect(),
+                id: s("hash").unwrap_or_default().chars().take(200).collect(),
+                animated: false,
+                zero_width: r
+                    .get("zero_width")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                global: false,
+                kind: Default::default(),
+            })
+        })
+        .collect()
+}
+
 /// the slot that holds exactly this name.
 pub fn slot_of(rows: &[Slot], name: &str) -> Option<u32> {
     rows.iter().find(|s| s.name == name).map(|s| s.slot)
@@ -126,6 +170,12 @@ impl Client {
     pub fn emotes(&self) -> Result<Vec<Slot>, String> {
         self.emote_call("GET", "/api/cli/emotes", None)
             .map(|v| parse_slots(&v))
+    }
+
+    /// your inventory as pictures (Tab's "yours" tier).
+    pub fn my_emotes(&self) -> Result<Vec<Emote>, String> {
+        self.emote_call("GET", "/api/cli/emotes", None)
+            .map(|v| parse_own(&v, self.base()))
     }
 
     /// add the emote as it is drawn: what the server did with it.
@@ -520,6 +570,35 @@ mod tests {
             run_op(&client(&f), &EmoteOp::Undo, None).text,
             "undid: removed Pog"
         );
+    }
+
+    #[test]
+    fn your_inventory_reads_as_pictures_and_drops_junk_rows() {
+        let v = json!({"emotes":[
+            {"slot_number":1,"custom_name":"catJAM","hash":"4be0","url":"https://cdn.7tv.app/emote/x/1x.webp","source":"7tv","zero_width":true},
+            {"slot_number":2,"name":"Mine","url":"/uploads/e/mine.webp"},
+            {"slot_number":3,"name":"NoUrl"},
+            {"slot_number":4,"name":"Http","url":"http://insecure/x.webp"},
+            {"slot_number":5,"name":"two words","url":"https://cdn/x.webp"},
+            {"slot_number":6,"name":"Proto","url":"//evil/x.webp"}
+        ]});
+        let got = parse_own(&v, "https://h.test");
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (
+                got[0].name.as_str(),
+                got[0].provider.as_str(),
+                got[0].id.as_str(),
+                got[0].zero_width
+            ),
+            ("catJAM", "7tv", "4be0", true)
+        );
+        assert_eq!(
+            (got[1].url.as_str(), got[1].provider.as_str()),
+            ("https://h.test/uploads/e/mine.webp", "hs")
+        );
+        assert!(parse_own(&json!({}), "x").is_empty());
+        assert!(parse_own(&json!({"emotes": 5}), "x").is_empty());
     }
 
     #[test]

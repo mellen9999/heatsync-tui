@@ -84,6 +84,13 @@ pub(crate) struct App {
     pub(crate) names_rx: Receiver<Vec<(Platform, String)>>,
     /// …and again whenever `account:changed` pushes.
     pub(crate) names_tx: Sender<Vec<(Platform, String)>>,
+    /// your own heatsync emotes ("yours" in Tab), empty until the server says;
+    /// refreshed on the emote cadence. a server without the route leaves it empty.
+    pub(crate) inventory: Vec<heatsync_core::emote::Emote>,
+    pub(crate) inv_rx: Receiver<Option<Vec<heatsync_core::emote::Emote>>>,
+    pub(crate) inv_tx: Sender<Option<Vec<heatsync_core::emote::Emote>>>,
+    pub(crate) inv_due: std::time::Instant,
+    pub(crate) inv_busy: bool,
     /// the emotes this person sends, for Tab (local only), and its saver.
     pub(crate) usage: heatsync_core::usage::Usage,
     pub(crate) usage_tx: Sender<String>,

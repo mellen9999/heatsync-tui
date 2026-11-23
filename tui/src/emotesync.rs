@@ -102,6 +102,7 @@ pub(crate) fn pump(app: &mut App) {
     if rebuilt {
         prefetch_focused(app);
     }
+    pump_inventory(app, now);
     if !app.refresh.look(now) {
         return;
     }
@@ -126,6 +127,28 @@ fn swap_in(app: &mut App, key: &Key) -> bool {
         }
     }
     any
+}
+
+/// your own emotes, read at start and on the emote cadence. a server that
+/// does not have the route yet (or a login without the permission) just leaves
+/// the tier empty and asks again next time: nothing is said about it.
+fn pump_inventory(app: &mut App, now: Instant) {
+    while let Ok(got) = app.inv_rx.try_recv() {
+        app.inv_busy = false;
+        if let Some(list) = got {
+            app.inventory = list;
+        }
+        app.inv_due = app.refresh.period_from(now);
+    }
+    if app.inv_busy || now < app.inv_due {
+        return;
+    }
+    let Some(c) = app.hs.clone() else { return };
+    app.inv_busy = true;
+    let tx = app.inv_tx.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(c.my_emotes().ok());
+    });
 }
 
 /// the lines already on screen were scanned against the old set: look again.
@@ -207,6 +230,82 @@ mod tests {
             heat: 0.0,
             uid: None,
         }
+    }
+
+    fn live_app_with(f: &std::sync::Arc<crate::hsauth::testkit::Fake>) -> App {
+        let mut a = crate::special::tests::app();
+        a.feed = Feed::Live {
+            rx: std::sync::mpsc::channel().1,
+            start: Instant::now(),
+            connected: true,
+        };
+        a.hs = Some(crate::hsauth::testkit::client(f));
+        let (tx, rx) = std::sync::mpsc::channel();
+        a.inv_tx = tx;
+        a.inv_rx = rx;
+        a
+    }
+
+    fn settle(a: &mut App) {
+        let t = Instant::now();
+        for _ in 0..200 {
+            pump_inventory(a, t);
+            if !a.inv_busy {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the inventory read never landed");
+    }
+
+    #[test]
+    fn a_server_without_the_route_leaves_the_yours_tier_empty_and_silent() {
+        use crate::hsauth::testkit::Fake;
+        // the router's own 404, byte for byte
+        let f = Fake::new(vec![Ok((
+            404,
+            serde_json::json!({"error": "not found", "path": "/api/cli/emotes"}),
+        ))]);
+        let mut a = live_app_with(&f);
+        a.status = None;
+        let before = Instant::now();
+        pump_inventory(&mut a, before); // starts the read
+        settle(&mut a);
+        assert!(a.inventory.is_empty());
+        assert!(a.status.is_none(), "no error line: {:?}", a.status);
+        // and it asks again on the normal cadence, not now and not never
+        assert!(a.inv_due > before + refresh::PERIOD / 2);
+        assert!(!a.inv_busy);
+    }
+
+    #[test]
+    fn your_emotes_load_and_replace_on_the_cadence() {
+        use crate::hsauth::testkit::Fake;
+        let row = |n: &str| {
+            serde_json::json!({"emotes":[{"slot_number":1,"custom_name":n,
+                "url":"https://cdn.7tv.app/emote/x/1x.webp","source":"7tv","hash":"h"}]})
+        };
+        let f = Fake::new(vec![
+            Ok((200, row("catJAM"))),
+            Ok((200, row("catJAM2"))),
+            Ok((500, serde_json::json!({"error": "boom"}))),
+        ]);
+        let mut a = live_app_with(&f);
+        pump_inventory(&mut a, Instant::now());
+        settle(&mut a);
+        assert_eq!(a.inventory[0].name, "catJAM");
+        // not asked again before it is due
+        pump_inventory(&mut a, Instant::now());
+        assert!(!a.inv_busy);
+        a.inv_due = Instant::now();
+        pump_inventory(&mut a, Instant::now());
+        settle(&mut a);
+        assert_eq!(a.inventory[0].name, "catJAM2");
+        // a failed read keeps what is held
+        a.inv_due = Instant::now();
+        pump_inventory(&mut a, Instant::now());
+        settle(&mut a);
+        assert_eq!(a.inventory[0].name, "catJAM2");
     }
 
     #[test]

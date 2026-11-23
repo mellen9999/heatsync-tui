@@ -1002,7 +1002,9 @@ fn complete_step(app: &mut App, dir: i32) {
         app.completion = Completion::build(
             &text,
             app.line.cursor(),
-            |typed| app.emotes[app.focus].offer_with(typed, Some((&app.usage, now))),
+            |typed| {
+                app.emotes[app.focus].offer_with(typed, Some((&app.usage, now)), &app.inventory)
+            },
             users.into_iter(),
         );
     }

@@ -140,6 +140,12 @@ impl State {
         now + PERIOD - JITTER + self.spread(JITTER * 2)
     }
 
+    /// when a good answer is next due: the refresh period, jittered. other
+    /// slow reads (your own inventory) keep this same cadence.
+    pub fn period_from(&mut self, now: Instant) -> Instant {
+        self.next_due(now)
+    }
+
     /// the set last fetched for this key (the first fetch seeds it).
     pub fn set(&self, k: &Key) -> Option<&EmoteSet> {
         self.entries.get(k).and_then(|e| e.set.as_ref())

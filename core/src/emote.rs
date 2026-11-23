@@ -331,7 +331,7 @@ impl EmoteSet {
     /// rest. inside each, starts-with, word-start, inside, then shorter, then
     /// a-z. blocked emotes are left out.
     pub fn offer(&self, typed: &str) -> Ranked {
-        self.offer_with(typed, None)
+        self.offer_with(typed, None, &[])
     }
 
     /// [`offer`] with this person's own usage (`(usage, now)`): a name they use
@@ -339,8 +339,13 @@ impl EmoteSet {
     /// `pog` does not pull a used `MegaPog` over the room's `PogU`. inside its own
     /// tier a used name still leads. usage is by picture, so it follows the
     /// emote the name means here.
-    pub fn offer_with(&self, typed: &str, usage: Option<(&crate::usage::Usage, u64)>) -> Ranked {
-        let own = Own::default();
+    pub fn offer_with(
+        &self,
+        typed: &str,
+        usage: Option<(&crate::usage::Usage, u64)>,
+        mine: &[Emote],
+    ) -> Ranked {
+        let own = law::build_own(mine, &[], &[]);
         let used = |name: &str| -> f64 {
             usage.map_or(0.0, |(u, now)| {
                 self.get(name)
@@ -1524,7 +1529,7 @@ mod tests {
             u.note("7tv:MegaPog", 10); // heavily used, but `pog` only sits inside it
         }
         u.note("7tv:PogChamp", 10); // lightly used, and `pog` starts it
-        let got = set.offer_with("pog", Some((&u, 10)));
+        let got = set.offer_with("pog", Some((&u, 10)), &[]);
         // the used one that starts with `pog` leads the room; MegaPog stays behind it
         assert_eq!(got.first, ["PogChamp", "PogU"]);
         assert_eq!(got.rest, ["MegaPog"]);
@@ -1535,13 +1540,35 @@ mod tests {
     }
 
     #[test]
+    fn your_own_emotes_come_after_the_room_and_before_globals() {
+        let mine = |n: &str| Emote {
+            provider: "hs".into(),
+            url: format!("https://hs/{n}.webp"),
+            ..e(n)
+        };
+        let mut set = EmoteSet::from_list([e("PogU")]);
+        set.merge(EmoteSet::from_global_list([e("PogChamp")]));
+        let got = set.offer_with("pog", None, &[mine("PogMine"), mine("PogU")]);
+        // the room leads; yours then sit ahead of the globals, in the law's order
+        assert_eq!(got.first[0], "PogU");
+        let rest: Vec<&str> = got.rest.iter().map(String::as_str).collect();
+        let (own_at, global_at) = (
+            rest.iter().position(|n| *n == "PogMine").unwrap(),
+            rest.iter().position(|n| *n == "PogChamp").unwrap(),
+        );
+        assert!(own_at < global_at, "{rest:?}");
+        // none of yours: just the room and the globals, as before
+        assert_eq!(set.offer("pog").first, ["PogU"]);
+    }
+
+    #[test]
     fn usage_belongs_to_the_picture_not_the_name() {
         use crate::usage::Usage;
         let mut u = Usage::default();
         u.note("7tv:PogChamp", 10);
         // another emote that is now called PogChamp is not the one that was used
         let set = pog_world("a-different-id");
-        let got = set.offer_with("pog", Some((&u, 10)));
+        let got = set.offer_with("pog", Some((&u, 10)), &[]);
         assert_eq!(got.first, ["PogU"]);
     }
 
@@ -1556,7 +1583,7 @@ mod tests {
         let day = 86_400;
         let mut both = u.clone();
         both.note("7tv:PogU", 90 * day);
-        let got = set.offer_with("pog", Some((&both, 90 * day)));
+        let got = set.offer_with("pog", Some((&both, 90 * day)), &[]);
         assert_eq!(got.first[0], "PogU");
     }
 
