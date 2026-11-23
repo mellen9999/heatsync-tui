@@ -1055,7 +1055,10 @@ fn the_terminals_drawing_path_agrees_with_the_law_on_every_read_case_it_can_say(
         }
     }
     println!("terminal drawing: {said} read cases agree under every shuffle, {skipped} cases it cannot say (tokens, case fold, and the other jobs)");
-    assert!(said >= 20, "too few cases exercised: {said}");
+    // exact, so a quietly shrinking set fails: 22 read cases agree, 5 of the 27
+    // read cases are skipped (3 token spans, 2 case fold), and the other 51
+    // cases (session, offer, extend, browse) are not drawing
+    assert_eq!((said, skipped), (22, 56), "the drawing split moved");
     assert!(
         failed.is_empty(),
         "{} case(s) differ:\n{}",

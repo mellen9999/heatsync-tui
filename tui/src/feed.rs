@@ -516,8 +516,13 @@ pub(crate) fn drain_twitch(app: &mut App) {
 /// a clean send has no words: nothing to say.
 pub(crate) fn drain_hs(app: &mut App) {
     while let Ok(names) = app.names_rx.try_recv() {
+        // each answer names the linked kick login outright: an unlinked or
+        // changed one drops out, so a recycled name can't count as mine
+        if !names.is_empty() {
+            app.me_kick.clear();
+        }
         for (plat, n) in names {
-            if plat == Platform::Kick && !app.me_kick.iter().any(|m| m.eq_ignore_ascii_case(&n)) {
+            if plat == Platform::Kick {
                 app.me_kick.push(n.clone());
             }
             if !app.me.iter().any(|m| m.eq_ignore_ascii_case(&n)) {
@@ -916,6 +921,32 @@ mod tests {
             crate::input::kick_text(&a, "kripp", "kekHype catJAM"),
             "[emote:37226:kekHype] catJAM"
         );
+    }
+
+    #[test]
+    fn my_kick_login_follows_the_account_and_does_not_pile_up() {
+        let (mut a, _tx) = live();
+        let (ntx, nrx) = std::sync::mpsc::channel();
+        a.names_rx = nrx;
+        ntx.send(vec![
+            (Platform::Twitch, "t".into()),
+            (Platform::Kick, "old_k".into()),
+        ])
+        .unwrap();
+        drain_hs(&mut a);
+        assert_eq!(a.me_kick, ["old_k"]);
+        // relinked to another kick account: the old name stops being mine
+        ntx.send(vec![
+            (Platform::Twitch, "t".into()),
+            (Platform::Kick, "new_k".into()),
+        ])
+        .unwrap();
+        drain_hs(&mut a);
+        assert_eq!(a.me_kick, ["new_k"]);
+        // kick unlinked: nobody on kick is me
+        ntx.send(vec![(Platform::Twitch, "t".into())]).unwrap();
+        drain_hs(&mut a);
+        assert!(a.me_kick.is_empty());
     }
 
     #[test]
