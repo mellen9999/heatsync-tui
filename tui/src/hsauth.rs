@@ -678,12 +678,12 @@ pub fn needs_rotation(expires_at: &str, now: i64) -> bool {
 
 /// the platform logins in a `/api/cli/me` answer (twitch, kick) — what chat
 /// calls me, for mention + reply-to-me pings.
-pub fn my_names(me: &Value) -> Vec<String> {
-    ["twitch", "kick"]
+pub fn my_names(me: &Value) -> Vec<(Platform, String)> {
+    [("twitch", Platform::Twitch), ("kick", Platform::Kick)]
         .iter()
-        .filter_map(|p| me.get(p)?.get("login")?.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+        .filter_map(|(p, plat)| Some((*plat, me.get(p)?.get("login")?.as_str()?)))
+        .filter(|(_, s)| !s.is_empty())
+        .map(|(plat, s)| (plat, s.to_string()))
         .collect()
 }
 
@@ -1039,9 +1039,15 @@ mod tests {
     fn my_names_reads_twitch_and_kick_logins() {
         let me =
             json!({"twitch":{"linked":true,"login":"mel"},"kick":{"linked":false,"login":null}});
-        assert_eq!(my_names(&me), ["mel"]);
+        assert_eq!(my_names(&me), [(Platform::Twitch, "mel".to_string())]);
         let both = json!({"twitch":{"login":"mel"},"kick":{"login":"mel_k"}});
-        assert_eq!(my_names(&both), ["mel", "mel_k"]);
+        assert_eq!(
+            my_names(&both),
+            [
+                (Platform::Twitch, "mel".to_string()),
+                (Platform::Kick, "mel_k".to_string())
+            ]
+        );
         assert!(my_names(&json!({})).is_empty());
     }
 

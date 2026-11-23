@@ -243,8 +243,12 @@ fn learn_kick(app: &mut App, l: &ChatLine) {
     }
     let key = crate::refresh::key(l.platform, &l.channel);
     let mut new = false;
+    let mine = app.me_kick.iter().any(|m| m.eq_ignore_ascii_case(&l.user));
     for e in l.emotes.iter().filter(|e| e.provider == "kick") {
         new |= app.refresh.learn(&key, e);
+        if mine {
+            app.refresh.prove(&key, e);
+        }
     }
     if !new {
         return;
@@ -514,7 +518,10 @@ pub(crate) fn drain_twitch(app: &mut App) {
 /// a clean send has no words: nothing to say.
 pub(crate) fn drain_hs(app: &mut App) {
     while let Ok(names) = app.names_rx.try_recv() {
-        for n in names {
+        for (plat, n) in names {
+            if plat == Platform::Kick && !app.me_kick.iter().any(|m| m.eq_ignore_ascii_case(&n)) {
+                app.me_kick.push(n.clone());
+            }
             if !app.me.iter().any(|m| m.eq_ignore_ascii_case(&n)) {
                 app.me.push(n);
             }
@@ -851,33 +858,61 @@ mod tests {
     }
 
     #[test]
-    fn a_kick_emote_seen_in_a_room_is_that_rooms_and_goes_out_as_kicks_own() {
+    fn someone_elses_kick_token_draws_but_goes_out_as_the_plain_word() {
         let (mut a, tx) = live();
+        a.me_kick.push("me_k".into());
         a.emote_tx
             .send((Platform::Kick, "kripp".into(), route_set()))
             .unwrap();
         drain_emotes(&mut a);
-        // nothing of kick's is known yet: the word goes out as typed
-        assert_eq!(
-            crate::input::kick_text(&a, "kripp", "kekHype catJAM"),
-            "kekHype catJAM"
-        );
-        // a viewer's line carries kick's own token for it
+        // a viewer's line carries kick's own token: it draws…
         frame(
             &mut a,
             &tx,
             &kick_live("k1", "viewer", "[emote:37226:kekHype] hi"),
         );
-        let e = a.emotes[KICK_TAB].get("kekHype").expect("learned");
+        let e = a.emotes[KICK_TAB].get("kekHype").expect("drawn");
         assert_eq!((e.provider.as_str(), e.id.as_str()), ("kick", "37226"));
         // the room's real emotes are untouched
         assert!(
             a.emotes[KICK_TAB].get("catJAM").is_some() && a.emotes[KICK_TAB].get("Mine").is_some()
         );
-        // now a typed word is kick's own emote on the wire, and only that word
+        // …but it may be sub-only for this account: the word is sent as typed
+        assert_eq!(
+            crate::input::kick_text(&a, "kripp", "kekHype catJAM Pog"),
+            "kekHype catJAM Pog"
+        );
+    }
+
+    #[test]
+    fn my_own_echoed_kick_token_is_written_as_a_token_in_that_room_only() {
+        let (mut a, tx) = live();
+        a.me_kick.push("Me_K".into());
+        a.emote_tx
+            .send((Platform::Kick, "kripp".into(), route_set()))
+            .unwrap();
+        drain_emotes(&mut a);
+        // my own line (any case of my login) proves the emote is mine here
+        frame(
+            &mut a,
+            &tx,
+            &kick_live("k1", "me_k", "[emote:37226:kekHype] hi"),
+        );
         assert_eq!(
             crate::input::kick_text(&a, "kripp", "kekHype catJAM Pog"),
             "[emote:37226:kekHype] catJAM Pog"
+        );
+        // another room never learned it: plain
+        assert_eq!(crate::input::kick_text(&a, "other", "kekHype"), "kekHype");
+        // someone else using a different emote in this room does not prove it for me
+        frame(
+            &mut a,
+            &tx,
+            &kick_live("k2", "viewer", "[emote:99:subOnly] hi"),
+        );
+        assert_eq!(
+            crate::input::kick_text(&a, "kripp", "subOnly kekHype"),
+            "subOnly [emote:37226:kekHype]"
         );
     }
 

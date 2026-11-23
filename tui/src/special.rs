@@ -610,6 +610,7 @@ pub(crate) mod tests {
             manage_cursor: 0,
             completion: None,
             me: Vec::new(),
+            me_kick: Vec::new(),
             names_rx: channel().1,
             names_tx: channel().0,
             stamps: false,
@@ -723,7 +724,7 @@ pub(crate) mod tests {
         account_changed(&mut a);
         account_changed(&mut a); // inside the gap: no second call
         let names = rx.recv_timeout(Duration::from_secs(2)).expect("names");
-        assert_eq!(names, vec!["newme".to_string()]);
+        assert_eq!(names, vec![(Platform::Twitch, "newme".to_string())]);
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
         assert_eq!(f.seen.lock().unwrap().len(), 1);
     }

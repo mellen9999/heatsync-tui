@@ -924,18 +924,15 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
     Flow::Continue
 }
 
-/// what kick receives for a line typed in the room `name`: that room's own set
-/// (the last good fetch plus the kick emotes seen used there — a merged tab's
-/// pooled set can hold another kick room's), else the tab's.
+/// what kick receives for a line typed in the room `name`: a word is written
+/// as kick's own token only when this account has itself used that emote in
+/// that room (its own echo carried it). a kick emote merely seen from others
+/// draws but goes out as the plain word, so a line is never lost to an emote
+/// the account may not be allowed.
 pub(crate) fn kick_text(app: &App, name: &str, text: &str) -> String {
-    let room = app
-        .refresh
-        .room_set(&crate::refresh::key(Platform::Kick, name));
-    if room.is_empty() {
-        app.emotes[app.focus].kick_wire(text)
-    } else {
-        room.kick_wire(text)
-    }
+    app.refresh
+        .send_set(&crate::refresh::key(Platform::Kick, name))
+        .kick_wire(text)
 }
 
 /// post `text` through heatsync on its own thread; only a failure speaks.
@@ -1211,9 +1208,9 @@ mod send_tests {
             .collect()
     }
 
-    /// a kick room whose set has one of kick's own emotes in it.
+    /// a kick room where this account has itself used one of kick's own emotes.
     fn kick_room(a: &mut App, id: &str) {
-        a.emotes[1] = heatsync_core::emote::EmoteSet::from_list([heatsync_core::emote::Emote {
+        let e = heatsync_core::emote::Emote {
             name: "KEKW".into(),
             url: format!("https://files.kick.com/emotes/{id}/fullsize"),
             provider: "kick".into(),
@@ -1222,7 +1219,10 @@ mod send_tests {
             zero_width: false,
             global: false,
             kind: Default::default(),
-        }]);
+        };
+        let k = crate::refresh::key(Platform::Kick, "kripp");
+        a.refresh.learn(&k, &e);
+        a.refresh.prove(&k, &e);
     }
 
     #[test]

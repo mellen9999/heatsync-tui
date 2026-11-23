@@ -78,10 +78,12 @@ pub(crate) struct App {
     pub(crate) completion: Option<Completion>,
     /// my names (twitch login, kick login) for mention + reply-to-me pings.
     pub(crate) me: Vec<String>,
+    /// my kick login alone: a kick line from this name is mine (it also sits in `me`).
+    pub(crate) me_kick: Vec<String>,
     /// the heatsync login's names arrive here once, from a startup thread.
-    pub(crate) names_rx: Receiver<Vec<String>>,
+    pub(crate) names_rx: Receiver<Vec<(Platform, String)>>,
     /// …and again whenever `account:changed` pushes.
-    pub(crate) names_tx: Sender<Vec<String>>,
+    pub(crate) names_tx: Sender<Vec<(Platform, String)>>,
     /// dim `HH:MM` before each line (`t`, persisted).
     pub(crate) stamps: bool,
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the

@@ -90,6 +90,10 @@ pub struct State {
     /// never depends on a hash): the server cannot list a kick room's own
     /// emotes, but every `[emote:id:name]` on a line proves one.
     learned: HashMap<Key, Vec<Emote>>,
+    /// the ids among those that this account itself sent in the room (its own
+    /// echo came back carrying the token), oldest first. only these are ever
+    /// written as kick tokens; seen-from-others emotes only draw.
+    used: HashMap<Key, Vec<String>>,
     tx: Sender<(Key, Outcome)>,
     rx: Receiver<(Key, Outcome)>,
     /// the socket dropped since the last time it was up.
@@ -105,6 +109,7 @@ impl State {
         State {
             entries: HashMap::new(),
             learned: HashMap::new(),
+            used: HashMap::new(),
             tx,
             rx,
             was_down: false,
@@ -165,6 +170,32 @@ impl State {
             list.remove(0);
         }
         new
+    }
+
+    /// this account's own line in the room carried this kick emote: it is now
+    /// one the account provably may send (capped like `learn`, oldest first).
+    pub fn prove(&mut self, k: &Key, e: &Emote) {
+        if e.provider != "kick" || e.id.is_empty() || !e.id.bytes().all(|b| b.is_ascii_digit()) {
+            return;
+        }
+        let list = self.used.entry(k.clone()).or_default();
+        list.retain(|x| *x != e.id);
+        list.push(e.id.clone());
+        if list.len() > LEARN_CAP {
+            list.remove(0);
+        }
+    }
+
+    /// what a kick send may write as tokens: the fetched set plus only the kick
+    /// emotes this account has used in the room. never a seen-from-others one.
+    pub fn send_set(&self, k: &Key) -> EmoteSet {
+        let mut out = self.set(k).cloned().unwrap_or_default();
+        if let (Some(l), Some(u)) = (self.learned.get(k), self.used.get(k)) {
+            out.merge(EmoteSet::from_list(
+                l.iter().filter(|e| u.contains(&e.id)).cloned(),
+            ));
+        }
+        out
     }
 
     /// the room's set as last fetched, plus the kick emotes seen in it. a
@@ -272,6 +303,7 @@ impl State {
         let open_set: HashSet<&Key> = open.iter().collect();
         self.entries.retain(|k, _| open_set.contains(k));
         self.learned.retain(|k, _| open_set.contains(k));
+        self.used.retain(|k, _| open_set.contains(k));
         for k in open {
             if !self.entries.contains_key(k) {
                 let due = self.next_due(now);
@@ -643,6 +675,26 @@ mod tests {
         // closing the room forgets them
         st.register(&[], t0);
         assert!(st.room_set(&r).is_empty());
+    }
+
+    #[test]
+    fn proof_is_capped_per_room_and_never_comes_from_seen_alone() {
+        let mut st = State::new();
+        let t0 = Instant::now();
+        let r = key(Platform::Kick, "room");
+        st.wanted(std::slice::from_ref(&r), t0);
+        st.learn(&r, &kick("Seen", "1"));
+        assert!(st.send_set(&r).get("Seen").is_none() && st.room_set(&r).get("Seen").is_some());
+        st.learn(&r, &kick("Mine", "2"));
+        st.prove(&r, &kick("Mine", "2"));
+        st.prove(&r, &kick("Bad", "x1"));
+        assert!(st.send_set(&r).get("Mine").is_some());
+        for i in 0..LEARN_CAP + 5 {
+            st.prove(&r, &kick("n", &format!("{}", 1000 + i)));
+        }
+        assert_eq!(st.used[&r].len(), LEARN_CAP);
+        st.register(&[], t0);
+        assert!(st.send_set(&r).is_empty());
     }
 
     #[test]
