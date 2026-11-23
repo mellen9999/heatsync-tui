@@ -102,9 +102,10 @@ fn refused(st: u16, v: &Value, base: &str) -> String {
         return tr("inventory.no_scope").into();
     }
     let err = v.get("error").and_then(Value::as_str).unwrap_or("");
-    // a 404 that says nothing is the router, not the handler: this server does
-    // not have the routes yet. a handler's own 404 carries an `error` body.
-    if st == 404 && err.is_empty() {
+    // the router's own 404 (no such route) is `{"error":"not found","path":…}`:
+    // this server does not have the routes yet. a handler's 404 about a slot
+    // has its own words and no `path`.
+    if st == 404 && (err.is_empty() || v.get("path").is_some()) {
         return tr("inventory.not_deployed").into();
     }
     match plain(err) {
@@ -466,8 +467,11 @@ mod tests {
             EmoteOp::Mv("catJAM".into(), "x".into()),
             EmoteOp::Undo,
         ] {
-            // elysia's router answers a missing route with no json error
-            let f = Fake::new(vec![Ok((404, Value::Null))]);
+            // the server's real body for a missing route (server.ts onError)
+            let f = Fake::new(vec![Ok((
+                404,
+                json!({"error": "not found", "path": "/api/cli/emotes"}),
+            ))]);
             let o = run_op(&client(&f), &call, Some(&emote("catJAM")));
             assert!(
                 !o.ok && o.text.contains("can't manage emotes yet"),
@@ -476,6 +480,10 @@ mod tests {
             );
             assert!(!o.text.contains("404"), "{}", o.text);
         }
+        // a handler's "not found" about a slot is not a missing route
+        let f = Fake::new(vec![Ok((404, json!({"error": "Emote not found in slot"})))]);
+        let o = run_op(&client(&f), &EmoteOp::Undo, None);
+        assert!(!o.text.contains("can't manage"), "{}", o.text);
         // a handler's own 404 keeps its words
         let f = Fake::new(vec![Ok((404, json!({"error": "no emote in that slot"})))]);
         let o = run_op(&client(&f), &EmoteOp::Undo, None);
