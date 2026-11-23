@@ -7,7 +7,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::inventory::Slot;
 use crate::palette;
@@ -170,7 +170,14 @@ impl EmoteList {
 
 fn row(s: &Slot, w: usize, selected: bool) -> Line<'static> {
     const NAME_W: usize = 28;
-    let name: String = s.name.chars().take(NAME_W).collect();
+    // cut by what the terminal shows (a wide character is two cells), not by count
+    let mut name = String::new();
+    for c in s.name.chars() {
+        if name.width() + c.width().unwrap_or(0) > NAME_W {
+            break;
+        }
+        name.push(c);
+    }
     let pad = NAME_W.saturating_sub(name.width());
     let head = format!(" {name}{}  ", " ".repeat(pad));
     if selected {
@@ -190,30 +197,42 @@ fn row(s: &Slot, w: usize, selected: bool) -> Line<'static> {
 /// the open list (if any) and the thread's way back.
 pub struct State {
     pub open: Option<EmoteList>,
-    tx: Sender<Fetched>,
-    rx: Receiver<Fetched>,
+    tx: Sender<(u64, Fetched)>,
+    rx: Receiver<(u64, Fetched)>,
+    /// which `start` the open list is waiting on: an older, slower fetch that
+    /// lands after a newer one is stale and dropped.
+    gen: u64,
 }
 
 impl State {
     pub fn new() -> State {
         let (tx, rx) = channel();
-        State { open: None, tx, rx }
+        State {
+            open: None,
+            tx,
+            rx,
+            gen: 0,
+        }
     }
 
     /// show the list (loading) and fetch it off-thread. a second `/emotes`
     /// while one is open just fetches again.
     pub fn start(&mut self, fetch: impl FnOnce() -> Fetched + Send + 'static) {
         self.open = Some(EmoteList::new());
-        let tx = self.tx.clone();
+        self.gen += 1;
+        let (tx, gen) = (self.tx.clone(), self.gen);
         std::thread::spawn(move || {
-            let _ = tx.send(fetch());
+            let _ = tx.send((gen, fetch()));
         });
     }
 
     /// land finished fetches into the open list; one that arrives after the
     /// list closed is dropped.
     pub fn drain(&mut self) {
-        while let Ok(f) = self.rx.try_recv() {
+        while let Ok((gen, f)) = self.rx.try_recv() {
+            if gen != self.gen {
+                continue;
+            }
             if let Some(l) = &mut self.open {
                 l.set(f);
             }
@@ -361,8 +380,35 @@ mod tests {
         }
         assert_eq!(st.open.as_ref().unwrap().rows.len(), 1);
         st.open = None;
-        st.tx.send(Ok(vec![slot(2, "b")])).unwrap();
+        st.tx.send((st.gen, Ok(vec![slot(2, "b")]))).unwrap();
         st.drain();
         assert!(st.open.is_none());
+    }
+
+    #[test]
+    fn an_older_fetch_landing_late_does_not_overwrite_a_newer_one() {
+        let mut st = State::new();
+        st.start(|| Ok(vec![slot(1, "old")]));
+        let first = st.gen;
+        st.start(|| Ok(vec![slot(2, "new")]));
+        for _ in 0..200 {
+            st.drain();
+            if !st.open.as_ref().unwrap().loading {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // the first, slow answer arrives after the second
+        st.tx.send((first, Ok(vec![slot(1, "old")]))).unwrap();
+        st.drain();
+        assert_eq!(st.open.as_ref().unwrap().rows[0].name, "new");
+    }
+
+    #[test]
+    fn a_wide_name_is_cut_by_cells_so_the_row_never_overflows() {
+        let wide = "日本語".repeat(20);
+        let r = row(&slot(1, &wide), 60, false);
+        let head: usize = r.spans[0].content.width();
+        assert_eq!(head, 1 + 28 + 2, "name column is 28 cells");
     }
 }

@@ -165,6 +165,9 @@ fn settle(
 }
 
 fn channel_answer(channel: &str, platform: Platform, etag: Option<&str>) -> Chan {
+    if !plain_channel(channel) {
+        return Chan::Failed;
+    }
     let url = format!(
         "{BASE}/api/channel/{channel}/emotes?platform={}",
         platform_q(platform)
@@ -194,6 +197,9 @@ fn channel_answer(channel: &str, platform: Platform, etag: Option<&str>) -> Chan
 }
 
 fn channel_emotes(channel: &str, platform: Platform) -> Option<Vec<heatsync_core::emote::Emote>> {
+    if !plain_channel(channel) {
+        return None;
+    }
     let url = format!(
         "{BASE}/api/channel/{channel}/emotes?platform={}",
         platform_q(platform)
@@ -209,14 +215,18 @@ fn owner_emotes(channel: &str, platform: Platform) -> Vec<heatsync_core::emote::
     owner_fetch(channel, platform).unwrap_or_default()
 }
 
+/// a channel that is safe to put in a url path as it is.
+fn plain_channel(channel: &str) -> bool {
+    !channel.is_empty()
+        && channel
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+}
+
 /// the same, but `None` says the request itself failed (an empty list is a
 /// real answer: the streamer has none).
 fn owner_fetch(channel: &str, platform: Platform) -> Option<Vec<heatsync_core::emote::Emote>> {
-    let plain = !channel.is_empty()
-        && channel
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.');
-    if platform == Platform::Youtube || !plain {
+    if platform == Platform::Youtube || !plain_channel(channel) {
         return Some(Vec::new());
     }
     let url = format!(
@@ -679,6 +689,18 @@ mod tests {
             Step::Done(o) => o,
             Step::Full => panic!("asked for the full body"),
         }
+    }
+
+    #[test]
+    fn only_a_plain_channel_goes_into_a_url_path() {
+        assert!(plain_channel("xqc") && plain_channel("a_b-c.d"));
+        for bad in ["", "a/b", "a?b", "a b", "a%2fb", "../x", "a#b"] {
+            assert!(!plain_channel(bad), "{bad}");
+        }
+        assert!(matches!(
+            channel_answer("a/b", Platform::Twitch, None),
+            Chan::Failed
+        ));
     }
 
     #[test]

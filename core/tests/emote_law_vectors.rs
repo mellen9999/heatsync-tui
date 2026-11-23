@@ -810,7 +810,15 @@ fn file() -> Map<String, Value> {
 #[test]
 fn the_vendored_file_has_a_known_hash() {
     // print it, so it can be compared with the site's `sha256sum shared/emote-law.vectors.json`
-    println!("emote-law.vectors.json sha256 {}", sha256(FILE.as_bytes()));
+    let got = sha256(FILE.as_bytes());
+    println!("emote-law.vectors.json sha256 {got}");
+    // the pinned hash is written by scripts/sync-emote-vectors.sh from the site's
+    // file: a hand-edited copy of the vectors no longer matches it
+    assert_eq!(
+        got,
+        include_str!("emote-law.vectors.sha256").trim(),
+        "the vendored vectors were edited: refresh them with scripts/sync-emote-vectors.sh"
+    );
     assert_eq!(
         sha256(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
