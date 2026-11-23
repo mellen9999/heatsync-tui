@@ -278,16 +278,27 @@ pub(crate) fn client(app: &App) -> Option<Client> {
 /// the lines whose emotes `/emote add` looks through (the screen's backlog).
 const RECENT: usize = 60;
 
-/// the emote `name` draws as: the tab's set first, then the newest line that
-/// carries one by that name.
+/// the emote `name` draws as, by the law's own reading: a pick a recent line
+/// carries (newest first) beats the tab's set; the set beats a sender's guess;
+/// a sender's own emote is what's left. a taken-down pick draws nothing and is
+/// never added.
 pub fn drawn_as<'a>(
     set: &'a heatsync_core::emote::EmoteSet,
     recent: impl Iterator<Item = &'a heatsync_core::emote::EmoteSet>,
     name: &str,
 ) -> Option<Emote> {
-    set.get(name)
-        .or_else(|| recent.into_iter().find_map(|r| r.get(name)))
-        .cloned()
+    use heatsync_core::emote::RefKind;
+    let mut sender = None;
+    for e in recent.filter_map(|r| r.get(name)) {
+        if e.kind == RefKind::Gone || e.url.is_empty() {
+            continue;
+        }
+        if e.kind == RefKind::Pick {
+            return Some(e.clone());
+        }
+        sender.get_or_insert(e);
+    }
+    set.get(name).or(sender).cloned()
 }
 
 /// `/emote …`: checks, then the call on its own thread; the words land as the
@@ -529,6 +540,33 @@ mod tests {
             "Kappa"
         );
         assert!(drawn_as(&room, [&line].into_iter(), "Nope").is_none());
+    }
+
+    #[test]
+    fn add_takes_what_a_visible_line_draws_by_the_laws_order() {
+        use heatsync_core::emote::{EmoteSet, RefKind};
+        let url = |u: &str| Emote {
+            url: u.into(),
+            ..emote("Pog")
+        };
+        let room = EmoteSet::from_list([url("https://room/pog")]);
+        let with = |e: Emote| EmoteSet::from_list([e]);
+        let pick = with(Emote {
+            kind: RefKind::Pick,
+            ..url("https://pick/pog")
+        });
+        let guess = with(url("https://sender/pog")); // a relay guess: below the room
+        let gone = with(Emote::gone("Pog").unwrap());
+        // a line's pick beats the room, even when a newer line only guessed
+        let got =
+            |lines: &[&EmoteSet]| drawn_as(&room, lines.iter().copied(), "Pog").map(|e| e.url);
+        assert_eq!(got(&[&guess, &pick]).as_deref(), Some("https://pick/pog"));
+        // a sender's guess loses to the room
+        assert_eq!(got(&[&guess]).as_deref(), Some("https://room/pog"));
+        // a taken-down pick is never added: not an empty url, not the pick
+        assert_eq!(got(&[&gone]).as_deref(), Some("https://room/pog"));
+        let bare = EmoteSet::new();
+        assert!(drawn_as(&bare, [&gone].into_iter(), "Pog").is_none());
     }
 
     #[test]
