@@ -48,6 +48,7 @@
     "cat_catjam": { "p": "7tv", "id": "k2", "name": "catJAM", "pop": 9000 },
     "cat_meow": { "p": "7tv", "id": "k3", "name": "meow", "pop": 9999 },
     "cat_catkiss": { "p": "7tv", "id": "k5", "name": "catKiss", "pop": 5 },
+    "cat_mine": { "p": "7tv", "id": "k6", "name": "myEmote", "pop": 3 },
     "odd_proto": { "p": "7tv", "id": "o1x", "name": "__proto__" },
     "odd_ctor": { "p": "bttv", "id": "o2x", "name": "constructor" },
     "odd_tostr": { "p": "ffz", "id": "203", "name": "toString" },
@@ -318,10 +319,45 @@
     { "kind": "browse", "name": "the picker with nothing typed: recents are pictures you can reach here; lists go most-used, then a-z", "world": "main", "room": "twitch:b", "who": "me",
       "recents": ["a_7tv_kekw", "b_kekw", "me_kekw", "b_kekw"], "usage": { "myEmote": 3 },
       "expect": {
+        "favorite": [],
         "recent": ["b_kekw", "me_kekw"],
         "room": ["b_kekw", "b_kekw_lc"],
         "own": ["me_mine", "me_catjam", "tw_kappa", "me_kekw", "me_megapog", "me_pog", "tw_sub", "me_twin_a"],
         "global": ["g_hs_wave", "g_kappa", "g_kekw", "g_kekw0", "g_poggers"]
-      } }
+      } },
+
+    { "kind": "browse", "name": "favorites lead the picker in your order and go where you go: one nothing here holds is still there, as a pick; a blocked one is hidden, a repeat counts once", "world": "main", "room": "twitch:b", "who": "me",
+      "recents": [], "favorites": ["a_catjam", "me_megapog", "a_scatter", "b_kekw", "a_scatter", "g_poggers"], "blocked": ["g_poggers"],
+      "expect": {
+        "favorite": [{ "emote": "a_catjam", "tier": "catalog" }, { "emote": "me_megapog", "tier": "own" }, { "emote": "a_scatter", "tier": "catalog" }, { "emote": "b_kekw", "tier": "room" }],
+        "recent": [],
+        "room": ["b_kekw", "b_kekw_lc"],
+        "own": ["me_catjam", "tw_kappa", "me_kekw", "me_megapog", "me_mine", "me_pog", "tw_sub", "me_twin_a"],
+        "global": ["g_hs_wave", "g_kappa", "g_kekw", "g_kekw0"]
+      } },
+
+    { "kind": "offer", "name": "a favorite whose name starts with what you typed leads the names you use; it is that picture, not every copy of its name, and one that only holds the text inside does not jump", "world": "main", "room": "twitch:a", "who": "me", "typed": "cat",
+      "usage": { "catKiss": 7 }, "favorites": ["a_copycat", "a_catjam"],
+      "expect": [{ "emote": "a_catjam", "tier": "room", "match": 1 }, { "emote": "a_catkiss", "tier": "room", "match": 1 }, { "emote": "a_sadcat", "tier": "room", "match": 2 }, { "emote": "a_copycat", "tier": "room", "match": 2 }, { "emote": "a_scatter", "tier": "room", "match": 3 }, { "emote": "me_catjam", "tier": "own", "match": 1 }] },
+
+    { "kind": "offer", "name": "a favorite nothing here holds is offered like a search answer and jumps the same way; one whose name is held here is no look-alike in the cycle", "world": "main", "room": "twitch:b", "who": "me", "typed": "ca",
+      "favorites": ["a_catjam", "a_catkiss", "a_scatter"],
+      "expect": [{ "emote": "a_catkiss", "tier": "catalog", "match": 1 }, { "emote": "me_catjam", "tier": "own", "match": 1 }, { "emote": "a_scatter", "tier": "catalog", "match": 3 }] },
+
+    { "kind": "offer", "name": "a favorite never changes what a fully typed name means: the first answer is still what typing it sends", "world": "main", "room": "twitch:b", "who": "me", "typed": "KEKW",
+      "favorites": ["a_7tv_kekw", "g_kekw"],
+      "expect": [{ "emote": "b_kekw", "tier": "room", "match": 0 }, { "emote": "me_kekw", "tier": "own", "match": 0 }, { "emote": "g_kekw", "tier": "global", "match": 0 }, { "emote": "b_kekw_lc", "tier": "room", "match": 0 }, { "emote": "g_kekw0", "tier": "global", "match": 1 }] },
+
+    { "kind": "offer", "name": "a favorite is the copy its name gets from a search, whichever is more carried", "world": "main", "room": "twitch:b", "who": "me", "typed": "catD",
+      "catalog": ["cat_dance", "cat_dance_dup"], "favorites": ["cat_dance_dup"],
+      "expect": [{ "emote": "cat_dance_dup", "tier": "catalog", "match": 1 }] },
+
+    { "kind": "offer", "name": "a blocked favorite is not offered, and a favorite no search asked for needs its name to match", "world": "main", "room": "twitch:b", "who": "me", "typed": "catD",
+      "catalog": ["cat_dance", "cat_dance_dup"], "favorites": ["cat_dance_dup", "a_rain"], "blocked": ["cat_dance_dup"],
+      "expect": [{ "emote": "cat_dance", "tier": "catalog", "match": 1 }] },
+
+    { "kind": "offer", "name": "suggest-my-emotes off does not hand your name to a look-alike: typing it still sends yours, so neither a search answer nor a favorite of that name is offered", "world": "main", "room": "twitch:b", "who": "me", "typed": "myEmote", "suggestOwn": false,
+      "catalog": ["cat_mine"], "favorites": ["cat_mine"],
+      "expect": [] }
   ]
 }

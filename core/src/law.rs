@@ -907,6 +907,8 @@ pub struct OfferCtx<'a, E> {
     pub blocked: Option<&'a dyn Fn(&str) -> bool>,
     /// false = the "suggest my emotes" setting is off
     pub suggest_own: bool,
+    /// pictures the person pinned, in their order. whole records: a favorite goes where they go, loaded here or not
+    pub favorites: &'a [E],
 }
 impl<E> Clone for OfferCtx<'_, E> {
     fn clone(&self) -> Self {
@@ -920,6 +922,7 @@ impl<E> Clone for OfferCtx<'_, E> {
             pop: self.pop,
             blocked: self.blocked,
             suggest_own: self.suggest_own,
+            favorites: self.favorites,
         }
     }
 }
@@ -948,6 +951,8 @@ struct Cand<'a, E> {
     used: f64,
     pop: u64,
     len16: usize,
+    /// place in the person's favorites
+    pin: Option<usize>,
 }
 
 fn sorted_values<E: Pic>(idx: &Index<E>) -> Vec<&E> {
@@ -958,46 +963,57 @@ fn sorted_values<E: Pic>(idx: &Index<E>) -> Vec<&E> {
 
 /// every reachable emote with its tier and send-order copy. `q` (lowercase) drops the ones that cannot match before they cost anything.
 fn gather<'a, E: Pic>(ctx: &OfferCtx<'a, E>, q: Option<&str>) -> Vec<Cand<'a, E>> {
-    let mut seen: HashSet<String> = HashSet::new();
+    let seen: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     let names: RefCell<HashSet<&str>> = RefCell::new(HashSet::new());
     let mut out: Vec<Cand<E>> = Vec::new();
     let blocked = |k: &str| ctx.blocked.is_some_and(|f| f(k));
-    let mut add =
-        |list: Vec<&'a E>, tier: Tier, copy: u8, local: bool, out: &mut Vec<Cand<'a, E>>| {
-            for e in list {
-                if e.name().is_empty() {
-                    continue;
-                }
-                let key = key_of(e);
-                if !seen.insert(key.clone()) {
-                    continue;
-                }
-                // a name you can reach here is held even when its emote is blocked: blocking hides, it never lets a search look-alike in
-                if local {
-                    names.borrow_mut().insert(e.name());
-                }
-                if blocked(&key) {
-                    continue;
-                }
-                let matched = match q {
-                    Some(q) => match_bucket(e.name(), q),
-                    None => BUCKET_NONE,
-                };
-                if q.is_some() && matched == BUCKET_NONE && tier != Tier::Catalog {
-                    continue;
-                }
-                out.push(Cand {
-                    emote: e,
-                    key,
-                    tier,
-                    matched,
-                    copy,
-                    used: 0.0,
-                    pop: 0,
-                    len16: utf16_len(e.name()),
-                });
+    let mut pins: HashMap<String, usize> = HashMap::new();
+    for (i, e) in ctx.favorites.iter().enumerate() {
+        if !e.name().is_empty() {
+            pins.entry(key_of(e)).or_insert(i);
+        }
+    }
+    // names a search answered with: its copy may match by tag, so it needs no name match
+    let hits: RefCell<HashSet<&str>> = RefCell::new(HashSet::new());
+    let add = |list: Vec<&'a E>, tier: Tier, copy: u8, local: bool, out: &mut Vec<Cand<'a, E>>| {
+        for e in list {
+            if e.name().is_empty() {
+                continue;
             }
-        };
+            let key = key_of(e);
+            if !seen.borrow_mut().insert(key.clone()) {
+                continue;
+            }
+            // a name you can reach here is held even when its emote is blocked: blocking hides, it never lets a search look-alike in
+            if local {
+                names.borrow_mut().insert(e.name());
+            }
+            if blocked(&key) {
+                continue;
+            }
+            let matched = match q {
+                Some(q) => match_bucket(e.name(), q),
+                None => BUCKET_NONE,
+            };
+            // a favorite no search asked for needs its name to match, like anything loaded
+            let hit = tier == Tier::Catalog && hits.borrow().contains(e.name());
+            if q.is_some() && matched == BUCKET_NONE && !hit {
+                continue;
+            }
+            let pin = pins.get(&key).copied();
+            out.push(Cand {
+                emote: e,
+                key,
+                tier,
+                matched,
+                copy,
+                used: 0.0,
+                pop: 0,
+                len16: utf16_len(e.name()),
+                pin,
+            });
+        }
+    };
     // copy order = send order, so the copy a hand-typed word would ship is the one a name keeps first
     if let Some(idx) = ctx.room.and_then(|r| ctx.own.native.get(&r.platform)) {
         add(sorted_values(idx), Tier::Own, 0, true, &mut out);
@@ -1020,28 +1036,50 @@ fn gather<'a, E: Pic>(ctx: &OfferCtx<'a, E>, q: Option<&str>) -> Vec<Cand<'a, E>
             true,
             &mut out,
         );
-    }
-    add(sorted_values(ctx.globals), Tier::Global, 4, true, &mut out);
-    if !ctx.catalog.is_empty() {
-        // one catalog copy per name (the most carried); a name already held locally keeps its local copy
-        let mut best: HashMap<&str, &E> = HashMap::new();
-        for e in ctx.catalog {
-            if e.name().is_empty() || names.borrow().contains(e.name()) || blocked(&key_of(e)) {
-                continue;
-            }
-            match best.get(e.name()) {
-                Some(p)
-                    if !(e.pop() > p.pop()
-                        || (e.pop() == p.pop() && cmp_cp(e.id(), p.id()) == Ordering::Less)) => {}
-                _ => {
-                    best.insert(e.name(), e);
-                }
+    } else {
+        // not suggested is not gone: typing the name still sends yours, so no search look-alike may take it
+        for e in ctx.own.inventory.values() {
+            if !e.name().is_empty() {
+                names.borrow_mut().insert(e.name());
             }
         }
-        let mut list: Vec<&E> = best.into_values().collect();
-        list.sort_by(|a, b| cmp_cp(a.name(), b.name()));
-        add(list, Tier::Catalog, 5, false, &mut out);
     }
+    add(sorted_values(ctx.globals), Tier::Global, 4, true, &mut out);
+    // one catalog copy per name (the most carried); a name already held locally keeps its local copy
+    let mut best: HashMap<&str, &E> = HashMap::new();
+    for e in ctx.catalog {
+        if e.name().is_empty() || names.borrow().contains(e.name()) || blocked(&key_of(e)) {
+            continue;
+        }
+        hits.borrow_mut().insert(e.name());
+        match best.get(e.name()) {
+            Some(p)
+                if !(e.pop() > p.pop()
+                    || (e.pop() == p.pop() && cmp_cp(e.id(), p.id()) == Ordering::Less)) => {}
+            _ => {
+                best.insert(e.name(), e);
+            }
+        }
+    }
+    // a favorite nothing here holds is offered like a search answer, and is the copy its name gets
+    // (the first pinned, when two share a name). a name held here keeps its own: no look-alike
+    let mut pinned_name: HashSet<&str> = HashSet::new();
+    for e in ctx.favorites {
+        let key = key_of(e);
+        if e.name().is_empty()
+            || seen.borrow().contains(&key)
+            || names.borrow().contains(e.name())
+            || pinned_name.contains(e.name())
+            || blocked(&key)
+        {
+            continue;
+        }
+        pinned_name.insert(e.name());
+        best.insert(e.name(), e);
+    }
+    let mut list: Vec<&E> = best.into_values().collect();
+    list.sort_by(|a, b| cmp_cp(a.name(), b.name()));
+    add(list, Tier::Catalog, 5, false, &mut out);
     add(ctx.emoji.iter().collect(), Tier::Emoji, 6, false, &mut out);
     out
 }
@@ -1052,7 +1090,7 @@ fn total(a: f64, b: f64) -> Ordering {
 
 /// tab, completion and picker search: one ranked list.
 ///   the exact name (the spelling typed leads its case twin)
-///   names you use — only when the name starts with what you typed
+///   your favorites, in your order, then names you use — only when the name starts with what you typed
 ///   the room · yours · globals · not loaded yet · emoji
 /// inside a tier: starts-with, word-start, inside; then ones you use, more carried, shorter, a-z.
 /// copies of one name always sit in send order wherever they land.
@@ -1090,7 +1128,7 @@ pub fn offer<'a, E: Pic>(
             0
         } else if c.matched == BUCKET_NONE {
             9
-        } else if c.used > 0.0 && c.matched == BUCKET_PREFIX {
+        } else if (c.used > 0.0 || c.pin.is_some()) && c.matched == BUCKET_PREFIX {
             1
         } else {
             2 + c.tier.rank()
@@ -1115,7 +1153,11 @@ pub fn offer<'a, E: Pic>(
                 .then_with(|| cmp_cp(a.emote.name(), b.emote.name()))
                 .then_with(|| a.copy.cmp(&b.copy))
                 .then_with(|| cmp_cp(&a.key, &b.key)),
-            1 => total(b.used, a.used)
+            1 => a
+                .pin
+                .unwrap_or(usize::MAX)
+                .cmp(&b.pin.unwrap_or(usize::MAX))
+                .then_with(|| total(b.used, a.used))
                 .then_with(|| a.tier.rank().cmp(&b.tier.rank()))
                 .then_with(|| b.pop.cmp(&a.pop))
                 .then_with(|| tail(a, b)),
@@ -1215,17 +1257,22 @@ pub fn extend_offer<'a, E: Pic>(
 }
 
 pub struct Browse<'a, E> {
+    pub favorite: Vec<Candidate<'a, E>>,
     pub recent: Vec<Candidate<'a, E>>,
     pub room: Vec<Candidate<'a, E>>,
     pub own: Vec<Candidate<'a, E>>,
     pub global: Vec<Candidate<'a, E>>,
 }
 
-/// the picker with nothing typed. recents are pictures, not names: one you can no longer reach here is simply absent.
+/// the picker with nothing typed. recents are pictures, not names: one you can no longer reach here is
+/// simply absent. a favorite is never absent: one nothing here holds is a `catalog` copy, picked like a
+/// search answer. a blocked one is hidden.
 pub fn browse<'a, E: Pic>(ctx: &OfferCtx<'a, E>, recents: &[String]) -> Browse<'a, E> {
+    let favorites: &'a [E] = ctx.favorites;
     let mut ctx = ctx.clone();
     ctx.catalog = &[];
     ctx.emoji = &[];
+    ctx.favorites = &[];
     let all = gather(&ctx, None);
     let used = |c: &Cand<E>| ctx.usage.map_or(0.0, |f| f(c.emote.name()));
     let order = |a: &Cand<E>, b: &Cand<E>| {
@@ -1259,7 +1306,28 @@ pub fn browse<'a, E: Pic>(ctx: &OfferCtx<'a, E>, recents: &[String]) -> Browse<'
             }
         }
     }
+    let mut favorite = Vec::new();
+    let mut pinned: HashSet<String> = HashSet::new();
+    for e in favorites {
+        let key = key_of(e);
+        if e.name().is_empty()
+            || ctx.blocked.is_some_and(|f| f(&key))
+            || !pinned.insert(key.clone())
+        {
+            continue;
+        }
+        favorite.push(match all.iter().find(|c| c.key == key) {
+            Some(c) => plain(c),
+            None => Candidate {
+                emote: e,
+                tier: Tier::Catalog,
+                matched: BUCKET_NONE,
+                shadowed: false,
+            },
+        });
+    }
     Browse {
+        favorite,
         recent,
         room: of(Tier::Room),
         own: of(Tier::Own),

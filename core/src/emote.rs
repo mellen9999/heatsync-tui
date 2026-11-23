@@ -363,6 +363,7 @@ impl EmoteSet {
             pop: None,
             blocked: None,
             suggest_own: true,
+            favorites: &[],
         };
         let mut out = Ranked::default();
         for c in law::offer(typed, &ctx, None) {

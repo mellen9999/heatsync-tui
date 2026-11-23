@@ -398,9 +398,10 @@ struct Surroundings {
     pop: Option<HashMap<String, f64>>,
     blocked: HashSet<String>,
     suggest_own: bool,
+    favorites: Vec<Em>,
 }
 
-const OFFER_PART: [&str; 7] = [
+const OFFER_PART: [&str; 8] = [
     "room",
     "catalog",
     "emoji",
@@ -408,6 +409,7 @@ const OFFER_PART: [&str; 7] = [
     "pop",
     "blocked",
     "suggestOwn",
+    "favorites",
 ];
 
 impl Surroundings {
@@ -439,6 +441,7 @@ impl Surroundings {
                 .get("suggestOwn")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            favorites: list("favorites")?,
         })
     }
 }
@@ -463,6 +466,7 @@ fn offer_ctx<'a>(
         pop: s.pop.as_ref().map(|_| pop),
         blocked: Some(blocked),
         suggest_own: s.suggest_own,
+        favorites: &s.favorites,
     })
 }
 
@@ -506,6 +510,7 @@ const KNOWN_KIND: [(&str, &[&str]); 5] = [
             "pop",
             "blocked",
             "suggestOwn",
+            "favorites",
             "limit",
             "expect",
         ],
@@ -528,6 +533,7 @@ const KNOWN_KIND: [(&str, &[&str]); 5] = [
             "usage",
             "blocked",
             "suggestOwn",
+            "favorites",
             "expect",
         ],
     ),
@@ -772,8 +778,14 @@ fn run(file: &Map<String, Value>, c: &Value, seed: u32) -> Res<Value> {
             let names = |l: &[law::Candidate<Em>]| {
                 Value::Array(l.iter().map(|x| w.alias(Some(x.emote))).collect())
             };
+            // a favorite says its tier: the same picture is the room's here and a pick somewhere else
+            let pinned: Vec<Value> = b
+                .favorite
+                .iter()
+                .map(|x| json!({ "emote": w.alias(Some(x.emote)), "tier": x.tier.as_str() }))
+                .collect();
             Ok(
-                json!({ "recent": names(&b.recent), "room": names(&b.room), "own": names(&b.own), "global": names(&b.global) }),
+                json!({ "favorite": pinned, "recent": names(&b.recent), "room": names(&b.room), "own": names(&b.own), "global": names(&b.global) }),
             )
         }
     }
@@ -1092,9 +1104,9 @@ fn the_terminals_drawing_path_agrees_with_the_law_on_every_read_case_it_can_say(
     }
     println!("terminal drawing: {said} read cases agree under every shuffle, {skipped} cases it cannot say (tokens, case fold, and the other jobs)");
     // exact, so a quietly shrinking set fails: 22 read cases agree, 5 of the 27
-    // read cases are skipped (3 token spans, 2 case fold), and the other 51
+    // read cases are skipped (3 token spans, 2 case fold), and the other 58
     // cases (session, offer, extend, browse) are not drawing
-    assert_eq!((said, skipped), (22, 56), "the drawing split moved");
+    assert_eq!((said, skipped), (22, 63), "the drawing split moved");
     assert!(
         failed.is_empty(),
         "{} case(s) differ:\n{}",
