@@ -31,6 +31,7 @@ pub mod slash;
 pub mod social;
 pub mod streamev;
 pub mod tabsets;
+pub mod usage;
 
 use std::collections::{HashSet, VecDeque};
 

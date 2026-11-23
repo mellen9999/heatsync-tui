@@ -613,6 +613,8 @@ pub(crate) mod tests {
             me_kick: Vec::new(),
             names_rx: channel().1,
             names_tx: channel().0,
+            usage: Default::default(),
+            usage_tx: channel().0,
             stamps: false,
             streams: StreamEvents::new(),
             rooms: RoomModes::new(),

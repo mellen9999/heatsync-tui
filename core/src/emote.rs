@@ -331,14 +331,30 @@ impl EmoteSet {
     /// rest. inside each, starts-with, word-start, inside, then shorter, then
     /// a-z. blocked emotes are left out.
     pub fn offer(&self, typed: &str) -> Ranked {
+        self.offer_with(typed, None)
+    }
+
+    /// [`offer`] with this person's own usage (`(usage, now)`): a name they use
+    /// jumps ahead of the room only when what was typed STARTS the name — typing
+    /// `pog` does not pull a used `MegaPog` over the room's `PogU`. inside its own
+    /// tier a used name still leads. usage is by picture, so it follows the
+    /// emote the name means here.
+    pub fn offer_with(&self, typed: &str, usage: Option<(&crate::usage::Usage, u64)>) -> Ranked {
         let own = Own::default();
+        let used = |name: &str| -> f64 {
+            usage.map_or(0.0, |(u, now)| {
+                self.get(name)
+                    .map_or(0.0, |e| u.score(&law::key_of(e), now))
+            })
+        };
+        let usage_fn: &dyn Fn(&str) -> f64 = &used;
         let ctx = law::OfferCtx {
             room: Some(&self.room),
             own: &own,
             globals: &self.globals,
             catalog: &[],
             emoji: &[],
-            usage: None,
+            usage: usage.map(|_| usage_fn),
             pop: None,
             blocked: None,
             suggest_own: true,
@@ -348,7 +364,10 @@ impl EmoteSet {
             if crate::block::is_blocked(c.emote) {
                 continue;
             }
-            let side = if c.matched == law::BUCKET_EXACT || c.tier == law::Tier::Room {
+            // the people go after what leads: the exact name, a used name that
+            // starts with the typed word, and the room's own emotes
+            let jumped = c.matched == law::BUCKET_PREFIX && used(&c.emote.name) > 0.0;
+            let side = if c.matched == law::BUCKET_EXACT || c.tier == law::Tier::Room || jumped {
                 &mut out.first
             } else {
                 &mut out.rest
@@ -1482,6 +1501,63 @@ mod tests {
             url: format!("https://files.kick.com/emotes/{id}/fullsize"),
             ..e(name)
         }
+    }
+
+    fn pog_world(champ_id: &str) -> EmoteSet {
+        let mut set = EmoteSet::from_list([e("PogU")]);
+        set.merge(EmoteSet::from_global_list([
+            e("MegaPog"),
+            Emote {
+                id: champ_id.into(),
+                ..e("PogChamp")
+            },
+        ]));
+        set
+    }
+
+    #[test]
+    fn a_used_name_jumps_the_room_only_when_the_typed_word_starts_it() {
+        use crate::usage::Usage;
+        let set = pog_world("PogChamp");
+        let mut u = Usage::default();
+        for _ in 0..9 {
+            u.note("7tv:MegaPog", 10); // heavily used, but `pog` only sits inside it
+        }
+        u.note("7tv:PogChamp", 10); // lightly used, and `pog` starts it
+        let got = set.offer_with("pog", Some((&u, 10)));
+        // the used one that starts with `pog` leads the room; MegaPog stays behind it
+        assert_eq!(got.first, ["PogChamp", "PogU"]);
+        assert_eq!(got.rest, ["MegaPog"]);
+        // no usage, no jump
+        let plain = set.offer("pog");
+        assert_eq!(plain.first, ["PogU"]);
+        assert_eq!(plain.rest, ["PogChamp", "MegaPog"]);
+    }
+
+    #[test]
+    fn usage_belongs_to_the_picture_not_the_name() {
+        use crate::usage::Usage;
+        let mut u = Usage::default();
+        u.note("7tv:PogChamp", 10);
+        // another emote that is now called PogChamp is not the one that was used
+        let set = pog_world("a-different-id");
+        let got = set.offer_with("pog", Some((&u, 10)));
+        assert_eq!(got.first, ["PogU"]);
+    }
+
+    #[test]
+    fn last_months_use_no_longer_jumps_the_room_much_but_a_fresh_one_does() {
+        use crate::usage::Usage;
+        let set = pog_world("PogChamp");
+        let mut u = Usage::default();
+        u.note("7tv:PogChamp", 0);
+        // a still-positive but faded score still counts as "used": the order
+        // inside the group is what decays, so a fresher one beats it
+        let day = 86_400;
+        let mut both = u.clone();
+        both.note("7tv:PogU", 90 * day);
+        let got = set.offer_with("pog", Some((&both, 90 * day)));
+        assert_eq!(got.first[0], "PogU");
     }
 
     #[test]

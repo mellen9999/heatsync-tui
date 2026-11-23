@@ -6,6 +6,7 @@
 //! is no message cursor and no keyboard nav over messages.
 
 mod app;
+mod usagestore;
 
 mod blocks;
 mod cli;
@@ -162,6 +163,8 @@ fn chat(args: &[String]) -> io::Result<()> {
             me_kick: Vec::new(),
             names_rx: std::sync::mpsc::channel().1,
             names_tx: std::sync::mpsc::channel().0,
+            usage: Default::default(),
+            usage_tx: std::sync::mpsc::channel().0,
             stamps: cfg.timestamps,
             emote_tx,
             emote_rx,
@@ -358,6 +361,8 @@ fn build_live(
         me_kick: Vec::new(),
         names_rx,
         names_tx,
+        usage: usagestore::load(),
+        usage_tx: usagestore::spawn_writer(),
         stamps,
         emote_tx,
         emote_rx,

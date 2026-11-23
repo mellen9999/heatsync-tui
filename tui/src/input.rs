@@ -853,6 +853,7 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
         let c = &app.channels[app.focus];
         (c.platform, c.name.clone())
     };
+    note_usage(app, &text);
     // kick draws its emotes only from its own token format, on every send path
     let text = if platform == Platform::Kick {
         kick_text(app, &name, &text)
@@ -924,6 +925,24 @@ fn send_line(app: &mut App, reply: Option<String>) -> Flow {
     Flow::Continue
 }
 
+/// the emotes in a line being sent count as used (by picture), and the file is
+/// saved on its own thread.
+fn note_usage(app: &mut App, text: &str) {
+    let now = crate::clock::now_secs();
+    let keys: Vec<String> = text
+        .split_whitespace()
+        .filter_map(|w| app.emotes[app.focus].get(w))
+        .map(heatsync_core::law::key_of)
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    for k in keys {
+        app.usage.note(&k, now);
+    }
+    let _ = app.usage_tx.send(app.usage.render());
+}
+
 /// what kick receives for a line typed in the room `name`: a word is written
 /// as kick's own token only when this account has itself used that emote in
 /// that room (its own echo carried it). a kick emote merely seen from others
@@ -979,10 +998,11 @@ fn complete_step(app: &mut App, dir: i32) {
             }
         }
         let text = app.line.text();
+        let now = crate::clock::now_secs();
         app.completion = Completion::build(
             &text,
             app.line.cursor(),
-            |typed| app.emotes[app.focus].offer(typed),
+            |typed| app.emotes[app.focus].offer_with(typed, Some((&app.usage, now))),
             users.into_iter(),
         );
     }
@@ -1206,6 +1226,52 @@ mod send_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn what_you_send_leads_tab_next_time_and_is_saved_off_the_ui_thread() {
+        use heatsync_core::emote::{Emote, EmoteSet};
+        let em = |n: &str| Emote {
+            name: n.into(),
+            url: format!("https://cdn/{n}.webp"),
+            provider: "7tv".into(),
+            id: n.into(),
+            animated: false,
+            zero_width: false,
+            global: false,
+            kind: Default::default(),
+        };
+        let (mut a, _rx) = app();
+        a.focus = 0;
+        let mut set = EmoteSet::from_list([em("PogU")]);
+        set.merge(EmoteSet::from_global_list([em("PogChamp"), em("MegaPog")]));
+        a.emotes[0] = set.into();
+        let (tx, saved) = channel();
+        a.usage_tx = tx;
+        // nothing used yet: the room's PogU leads
+        let walk = |a: &mut App| {
+            a.line
+                .replace_range(0, a.line.text().chars().count(), "pog");
+            a.completion = None;
+            complete_step(a, 1);
+            a.line.text()
+        };
+        assert_eq!(walk(&mut a), "PogU");
+        // the person sends PogChamp (and a plain word): it is counted by picture
+        a.line.replace_range(0, a.line.text().chars().count(), "");
+        a.mode = InputMode::Insert;
+        enter(&mut a, "gg PogChamp", 1);
+        let file = saved.try_recv().expect("a snapshot goes to the saver");
+        assert!(
+            file.contains("7tv:PogChamp\t1.0000\t") && !file.contains("gg"),
+            "{file}"
+        );
+        // now it starts with what they typed, so it leads the room
+        a.line.replace_range(0, a.line.text().chars().count(), "");
+        assert_eq!(walk(&mut a), "PogChamp");
+        // a line with no emote in it saves nothing
+        enter(&mut a, "hello there", 1);
+        assert!(saved.try_recv().is_err());
     }
 
     /// a kick room where this account has itself used one of kick's own emotes.
