@@ -1,0 +1,3 @@
+# pinned vectors are hashed byte for byte: a windows checkout must not turn them into crlf
+core/tests/*.vectors.json -text
+core/tests/*.vectors.sha256 -text
