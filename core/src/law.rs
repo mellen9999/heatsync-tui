@@ -826,6 +826,11 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// the tiers a hand-typed word can send: an exact name leads the offer only from these
+    pub fn local(self) -> bool {
+        matches!(self, Tier::Room | Tier::Own | Tier::Global)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Tier::Room => "room",
@@ -1123,12 +1128,15 @@ pub fn offer<'a, E: Pic>(
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
+    // the exact name leads only where typing it sends it: a copy held here (the room, yours, a global).
+    // a search answer or an emoji of that exact name leads its own tier, and a favorite or a name you
+    // use counts its exact name as starting with what you typed
     let group = |c: &Cand<E>| -> u8 {
-        if c.matched == BUCKET_EXACT {
+        if c.matched == BUCKET_EXACT && c.tier.local() {
             0
         } else if c.matched == BUCKET_NONE {
             9
-        } else if (c.used > 0.0 || c.pin.is_some()) && c.matched == BUCKET_PREFIX {
+        } else if (c.used > 0.0 || c.pin.is_some()) && c.matched <= BUCKET_PREFIX {
             1
         } else {
             2 + c.tier.rank()
@@ -1162,9 +1170,11 @@ pub fn offer<'a, E: Pic>(
                 .then_with(|| b.pop.cmp(&a.pop))
                 .then_with(|| tail(a, b)),
             9 => b.pop.cmp(&a.pop).then_with(|| tail(a, b)),
+            // the spelling typed leads its case twin in every tier, the way it does as the exact name
             _ => a
                 .matched
                 .cmp(&b.matched)
+                .then_with(|| (a.emote.name() != typed).cmp(&(b.emote.name() != typed)))
                 .then_with(|| total(b.used, a.used))
                 .then_with(|| b.pop.cmp(&a.pop))
                 .then_with(|| tail(a, b)),
