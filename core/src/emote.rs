@@ -364,6 +364,7 @@ impl EmoteSet {
             blocked: None,
             suggest_own: true,
             favorites: &[],
+            emoji_first: false,
         };
         let mut out = Ranked::default();
         for c in law::offer(typed, &ctx, None) {

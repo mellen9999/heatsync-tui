@@ -914,6 +914,8 @@ pub struct OfferCtx<'a, E> {
     pub suggest_own: bool,
     /// pictures the person pinned, in their order. whole records: a favorite goes where they go, loaded here or not
     pub favorites: &'a [E],
+    /// the `:` list's own setting: every emoji ahead of every emote. Tab and the picker never set it
+    pub emoji_first: bool,
 }
 impl<E> Clone for OfferCtx<'_, E> {
     fn clone(&self) -> Self {
@@ -928,6 +930,7 @@ impl<E> Clone for OfferCtx<'_, E> {
             blocked: self.blocked,
             suggest_own: self.suggest_own,
             favorites: self.favorites,
+            emoji_first: self.emoji_first,
         }
     }
 }
@@ -1234,6 +1237,13 @@ pub fn offer<'a, E: Pic>(
         }
         by_slot.sort_by_key(|(i, _)| *i);
         by_slot.into_iter().map(|(_, c)| c).collect()
+    };
+    // "emoji first" (the `:` list only): every emoji leads, then the emotes, each part in the order above
+    let list = if ctx.emoji_first {
+        let (emoji, rest): (Vec<_>, Vec<_>) = list.into_iter().partition(|c| c.tier == Tier::Emoji);
+        emoji.into_iter().chain(rest).collect()
+    } else {
+        list
     };
     match limit {
         Some(n) if n > 0 => list.into_iter().take(n).collect(),

@@ -54,11 +54,15 @@
     "q_pep": { "p": "7tv", "id": "pep3", "name": "pep" },
     "cat_sadge": { "p": "7tv", "id": "sad1", "name": "sadge", "pop": 10 },
     "cat_sadge_up": { "p": "7tv", "id": "sad2", "name": "Sadge", "pop": 500 },
+    "c_cat": { "p": "7tv", "id": "cat1", "name": "cat" },
+    "c_catjam": { "p": "bttv", "id": "cat2", "name": "catJAM" },
+    "c_catdance": { "p": "7tv", "id": "cat3", "name": "catDance" },
     "cat_mine": { "p": "7tv", "id": "k6", "name": "myEmote", "pop": 3 },
     "odd_proto": { "p": "7tv", "id": "o1x", "name": "__proto__" },
     "odd_ctor": { "p": "bttv", "id": "o2x", "name": "constructor" },
     "odd_tostr": { "p": "ffz", "id": "203", "name": "toString" },
-    "emoji_cat": { "p": "emoji", "id": "1f431", "name": "cat" }
+    "emoji_cat": { "p": "emoji", "id": "1f431", "name": "cat" },
+    "emoji_smiley_cat": { "p": "emoji", "id": "1f63a", "name": "smiley_cat" }
   },
   "worlds": {
     "main": {
@@ -71,6 +75,7 @@
         "twitch:loading": { "loaded": false },
         "twitch:p": { "third": ["p_pepepls", "p_pepega"] },
         "twitch:q": { "third": ["q_pep"] },
+        "twitch:cats": { "third": ["c_cat", "c_catjam", "c_catdance"] },
         "kick:x": { "third": ["x_kekw"], "native": ["x_kick_kekw", "x_kick_free"] },
         "youtube:y": { "third": ["y_kekw"] }
       },
@@ -385,6 +390,18 @@
       "expect": [{ "emote": "q_pep", "tier": "room", "match": 0 }] },
     { "kind": "offer", "name": "two search answers of the exact name in two spellings: the one spelled as typed leads its case twin, more carried or not", "world": "main", "room": "twitch:loading", "who": "me", "typed": "sadge",
       "catalog": ["cat_sadge_up", "cat_sadge"],
-      "expect": [{ "emote": "cat_sadge", "tier": "catalog", "match": 0 }, { "emote": "cat_sadge_up", "tier": "catalog", "match": 0 }] }
+      "expect": [{ "emote": "cat_sadge", "tier": "catalog", "match": 0 }, { "emote": "cat_sadge_up", "tier": "catalog", "match": 0 }] },
+    { "kind": "offer", "name": "the `:` list on \"emotes first\" (the default): the room's exact name leads, its other emotes follow, the emoji come last", "world": "main", "room": "twitch:cats", "who": "me", "typed": "cat",
+      "emoji": ["emoji_smiley_cat", "emoji_cat"],
+      "expect": [{ "emote": "c_cat", "tier": "room", "match": 0 }, { "emote": "c_catjam", "tier": "room", "match": 1 }, { "emote": "c_catdance", "tier": "room", "match": 1 }, { "emote": "me_catjam", "tier": "own", "match": 1 }, { "emote": "emoji_cat", "tier": "emoji", "match": 0 }, { "emote": "emoji_smiley_cat", "tier": "emoji", "match": 2 }] },
+    { "kind": "offer", "name": "the `:` list on \"emoji first\": every emoji leads, then the emotes in the order they had, the exact name heading them", "world": "main", "room": "twitch:cats", "who": "me", "typed": "cat",
+      "emoji": ["emoji_smiley_cat", "emoji_cat"], "emojiFirst": true,
+      "expect": [{ "emote": "emoji_cat", "tier": "emoji", "match": 0 }, { "emote": "emoji_smiley_cat", "tier": "emoji", "match": 2 }, { "emote": "c_cat", "tier": "room", "match": 0 }, { "emote": "c_catjam", "tier": "room", "match": 1 }, { "emote": "c_catdance", "tier": "room", "match": 1 }, { "emote": "me_catjam", "tier": "own", "match": 1 }] },
+    { "kind": "offer", "name": "\"emoji first\": a name you use leads the emotes, never an emoji", "world": "main", "room": "twitch:cats", "who": "me", "typed": "cat",
+      "emoji": ["emoji_smiley_cat", "emoji_cat"], "emojiFirst": true, "usage": { "catDance": 1 },
+      "expect": [{ "emote": "emoji_cat", "tier": "emoji", "match": 0 }, { "emote": "emoji_smiley_cat", "tier": "emoji", "match": 2 }, { "emote": "c_cat", "tier": "room", "match": 0 }, { "emote": "c_catdance", "tier": "room", "match": 1 }, { "emote": "c_catjam", "tier": "room", "match": 1 }, { "emote": "me_catjam", "tier": "own", "match": 1 }] },
+    { "kind": "offer", "name": "\"emoji first\": a favorite leads the emotes, never an emoji", "world": "main", "room": "twitch:cats", "who": "me", "typed": "cat",
+      "emoji": ["emoji_smiley_cat", "emoji_cat"], "emojiFirst": true, "favorites": ["c_catdance"],
+      "expect": [{ "emote": "emoji_cat", "tier": "emoji", "match": 0 }, { "emote": "emoji_smiley_cat", "tier": "emoji", "match": 2 }, { "emote": "c_cat", "tier": "room", "match": 0 }, { "emote": "c_catdance", "tier": "room", "match": 1 }, { "emote": "c_catjam", "tier": "room", "match": 1 }, { "emote": "me_catjam", "tier": "own", "match": 1 }] }
   ]
 }

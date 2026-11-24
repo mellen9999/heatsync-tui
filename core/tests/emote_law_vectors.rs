@@ -399,9 +399,10 @@ struct Surroundings {
     blocked: HashSet<String>,
     suggest_own: bool,
     favorites: Vec<Em>,
+    emoji_first: bool,
 }
 
-const OFFER_PART: [&str; 8] = [
+const OFFER_PART: [&str; 9] = [
     "room",
     "catalog",
     "emoji",
@@ -410,6 +411,7 @@ const OFFER_PART: [&str; 8] = [
     "blocked",
     "suggestOwn",
     "favorites",
+    "emojiFirst",
 ];
 
 impl Surroundings {
@@ -442,6 +444,10 @@ impl Surroundings {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
             favorites: list("favorites")?,
+            emoji_first: part
+                .get("emojiFirst")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })
     }
 }
@@ -467,6 +473,7 @@ fn offer_ctx<'a>(
         blocked: Some(blocked),
         suggest_own: s.suggest_own,
         favorites: &s.favorites,
+        emoji_first: s.emoji_first,
     })
 }
 
@@ -511,6 +518,7 @@ const KNOWN_KIND: [(&str, &[&str]); 5] = [
             "blocked",
             "suggestOwn",
             "favorites",
+            "emojiFirst",
             "limit",
             "expect",
         ],
@@ -1104,9 +1112,9 @@ fn the_terminals_drawing_path_agrees_with_the_law_on_every_read_case_it_can_say(
     }
     println!("terminal drawing: {said} read cases agree under every shuffle, {skipped} cases it cannot say (tokens, case fold, and the other jobs)");
     // exact, so a quietly shrinking set fails: 22 read cases agree, 5 of the 27
-    // read cases are skipped (3 token spans, 2 case fold), and the other 64
+    // read cases are skipped (3 token spans, 2 case fold), and the other 68
     // cases (session, offer, extend, browse) are not drawing
-    assert_eq!((said, skipped), (22, 69), "the drawing split moved");
+    assert_eq!((said, skipped), (22, 73), "the drawing split moved");
     assert!(
         failed.is_empty(),
         "{} case(s) differ:\n{}",
