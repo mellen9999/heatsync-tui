@@ -45,6 +45,7 @@ mod streamrow;
 mod talk;
 mod temp;
 mod twitch;
+mod ytid;
 
 use std::io::{self, IsTerminal};
 use std::time::{Duration, Instant};

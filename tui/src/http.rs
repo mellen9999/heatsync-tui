@@ -230,6 +230,34 @@ fn owner_emotes(channel: &str, platform: Platform) -> Vec<heatsync_core::emote::
     owner_fetch(channel, platform).unwrap_or_default()
 }
 
+/// a video id that is safe to hand the resolve route as it is.
+pub fn plain_video(v: &str) -> bool {
+    v.len() <= 32 && plain_channel(v)
+}
+
+/// the stream's channel id for a video, from the site's resolve route. `None`
+/// for anything but a real id (not live, an older server, a failed request):
+/// the caller just asks again later. the answer is checked here, not trusted.
+pub fn youtube_channel_id(video: &str) -> Option<String> {
+    if !plain_video(video) {
+        return None;
+    }
+    let v: serde_json::Value = agent()
+        .get(&format!("{BASE}/api/youtube/resolve"))
+        .query("url", format!("https://www.youtube.com/watch?v={video}"))
+        .call()
+        .ok()?
+        .body_mut()
+        .read_json()
+        .ok()?;
+    channel_id_of(&v)
+}
+
+fn channel_id_of(v: &serde_json::Value) -> Option<String> {
+    let id = v.get("channelId")?.as_str()?;
+    crate::ytid::valid(id).then(|| id.to_string())
+}
+
 /// a channel that is safe to put in a url path as it is.
 fn plain_channel(channel: &str) -> bool {
     !channel.is_empty()
@@ -680,6 +708,25 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_resolve_answer_is_checked_not_trusted() {
+        let uc = "UCaB3_-xyzABC01234567890";
+        let ok = serde_json::json!({"videoId":"v","channelId":uc});
+        assert_eq!(channel_id_of(&ok).as_deref(), Some(uc));
+        for bad in [
+            serde_json::json!({"videoId":"v"}),
+            serde_json::json!({"channelId":null}),
+            serde_json::json!({"channelId":"dQw4w9WgXcQ"}),
+            serde_json::json!({"channelId":"@handle"}),
+            serde_json::json!({"channelId":7}),
+            serde_json::json!({"channelId":"UCaB3_-xyzABC01234567890/../x"}),
+        ] {
+            assert_eq!(channel_id_of(&bad), None, "{bad}");
+        }
+        assert!(plain_video("dQw4w9WgXcQ"));
+        assert!(!plain_video("a/b") && !plain_video("") && !plain_video(&"a".repeat(33)));
+    }
     use heatsync_core::emote::Emote;
 
     fn em(name: &str, provider: &str, url: &str) -> Emote {

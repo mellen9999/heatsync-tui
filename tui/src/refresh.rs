@@ -39,6 +39,10 @@ pub const LEARN_CAP: usize = 256;
 const MAX_INFLIGHT: usize = 4;
 
 pub fn key(platform: Platform, name: &str) -> Key {
+    // a youtube room is named by its channel id, which is case-sensitive
+    if platform == Platform::Youtube {
+        return (platform, name.to_string());
+    }
     (platform, name.to_ascii_lowercase())
 }
 
@@ -99,6 +103,8 @@ pub struct State {
     seed: u64,
     /// the earliest the open rooms are looked at again (once a second is plenty).
     look: Instant,
+    /// each open youtube tab's channel id, learned from the site.
+    pub yt: crate::ytid::YtIds,
 }
 
 impl State {
@@ -111,6 +117,7 @@ impl State {
             rx,
             was_down: false,
             look: Instant::now(),
+            yt: crate::ytid::YtIds::new(),
             seed: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(1, |d| d.as_nanos() as u64 | 1),

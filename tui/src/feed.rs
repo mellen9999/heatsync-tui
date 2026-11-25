@@ -181,7 +181,7 @@ pub(crate) fn drain_emotes(app: &mut App) {
         // rebuild every tab that draws from this room, whole, from its sources
         // in the tab's own order — arrival order never decides a word.
         for (i, ch) in channels.iter().enumerate() {
-            if crate::emotesync::keys_of(ch).contains(&key) {
+            if crate::emotesync::keys_of(ch, refresh).contains(&key) {
                 emotes[i] = crate::emotesync::tab_set(ch, refresh, globals);
                 // rescan only the channel on screen — a background channel's
                 // backlog is warmed by the tick sweep if and when it's focused.
@@ -252,7 +252,7 @@ fn learn_kick(app: &mut App, l: &ChatLine) {
         return;
     }
     for i in 0..app.channels.len() {
-        if crate::emotesync::keys_of(&app.channels[i]).contains(&key) {
+        if crate::emotesync::keys_of(&app.channels[i], &app.refresh).contains(&key) {
             app.emotes[i] = crate::emotesync::tab_set(&app.channels[i], &app.refresh, &app.globals);
         }
     }

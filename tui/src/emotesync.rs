@@ -11,13 +11,32 @@ use heatsync_core::i18n::{tr, trf};
 use heatsync_core::tabsets::TabSets;
 use heatsync_core::{Channel, Platform};
 
-/// the rooms a tab draws from. youtube tabs are named by video id and have no
-/// emote api, so they are never refreshed.
-pub(crate) fn keys_of(ch: &Channel) -> Vec<Key> {
-    ch.subs()
-        .filter(|(p, _)| *p != Platform::Youtube)
-        .map(|(p, n)| refresh::key(p, n))
-        .collect()
+/// the rooms a tab draws from. a youtube tab is named by video id: its room is
+/// the stream's channel id, once the site has said it. until then it has no
+/// room (globals and the sender's shipped picks only) and nothing is fetched.
+pub(crate) fn keys_of(ch: &Channel, st: &refresh::State) -> Vec<Key> {
+    ch.subs().filter_map(|(p, n)| room_key(p, n, st)).collect()
+}
+
+fn room_key(p: Platform, n: &str, st: &refresh::State) -> Option<Key> {
+    if p == Platform::Youtube {
+        return st.yt.id(n).map(|id| refresh::key(p, id));
+    }
+    Some(refresh::key(p, n))
+}
+
+/// every youtube video open in any tab, once.
+fn open_videos(app: &App) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for ch in &app.channels {
+        for (p, n) in ch.subs() {
+            if p == Platform::Youtube && crate::http::plain_video(n) && !out.iter().any(|v| v == n)
+            {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// one tab's emote set: its sources' latest sets in the tab's order, then the
@@ -28,17 +47,13 @@ pub(crate) fn tab_set(
     st: &refresh::State,
     globals: &heatsync_core::emote::EmoteSet,
 ) -> TabSets {
-    let pooled = refresh::rebuild(&keys_of(ch), st, globals);
-    // a merged tab also keeps each source room apart (youtube has no room set:
-    // its rows read the globals alone), so a row reads its own room's emotes
+    let pooled = refresh::rebuild(&keys_of(ch, st), st, globals);
+    // a merged tab also keeps each source room apart (a youtube source with no
+    // channel id yet reads the globals alone), so a row reads its own room's emotes
     let rooms = if ch.merged() {
         ch.subs()
             .map(|(p, n)| {
-                let keys = if p == Platform::Youtube {
-                    Vec::new()
-                } else {
-                    vec![refresh::key(p, n)]
-                };
+                let keys: Vec<Key> = room_key(p, n, st).into_iter().collect();
                 (
                     p,
                     n.to_ascii_lowercase(),
@@ -56,7 +71,7 @@ pub(crate) fn tab_set(
 fn open_keys(app: &App) -> Vec<Key> {
     let mut out: Vec<Key> = Vec::new();
     for ch in &app.channels {
-        for k in keys_of(ch) {
+        for k in keys_of(ch, &app.refresh) {
             if !out.contains(&k) {
                 out.push(k);
             }
@@ -106,6 +121,7 @@ pub(crate) fn pump(app: &mut App) {
     if !app.refresh.look(now) {
         return;
     }
+    pump_youtube_ids(app, now);
     let open = open_keys(app);
     for (k, etag) in app.refresh.wanted(&open, now) {
         let held = app.refresh.set(&k).cloned();
@@ -115,12 +131,31 @@ pub(crate) fn pump(app: &mut App) {
     }
 }
 
+/// learn each open youtube tab's channel id (once, quietly), and when one
+/// arrives rebuild the tabs that hold that video so the room draws.
+fn pump_youtube_ids(app: &mut App, now: Instant) {
+    let open = open_videos(app);
+    for v in app.refresh.yt.drain(&open, now) {
+        for i in 0..app.channels.len() {
+            if app.channels[i]
+                .subs()
+                .any(|(p, n)| p == Platform::Youtube && n == v)
+            {
+                app.emotes[i] = tab_set(&app.channels[i], &app.refresh, &app.globals);
+            }
+        }
+    }
+    for v in app.refresh.yt.wanted(&open, now) {
+        app.refresh.yt.spawn(v, http::youtube_channel_id);
+    }
+}
+
 /// replace the set of every tab that draws from `key` with one rebuilt from its
 /// sources' latest sets + the globals.
 fn swap_in(app: &mut App, key: &Key) -> bool {
     let mut any = false;
     for i in 0..app.channels.len() {
-        let subs = keys_of(&app.channels[i]);
+        let subs = keys_of(&app.channels[i], &app.refresh);
         if subs.contains(key) {
             app.emotes[i] = tab_set(&app.channels[i], &app.refresh, &app.globals);
             any = true;
@@ -171,7 +206,11 @@ fn prefetch_focused(app: &mut App) {
 
 /// `/emotes refresh`: re-read the focused tab's rooms now.
 pub(crate) fn manual(app: &mut App) {
-    let keys = app.channels.get(app.focus).map(keys_of).unwrap_or_default();
+    let keys = app
+        .channels
+        .get(app.focus)
+        .map(|c| keys_of(c, &app.refresh))
+        .unwrap_or_default();
     if !matches!(app.feed, Feed::Live { .. }) || keys.is_empty() {
         app.status = Some(tr("emotes.nothing_to_refresh").into());
         return;
@@ -333,6 +372,7 @@ mod tests {
             url(&row(Platform::Kick, "xqc")).as_deref(),
             Some("kick-pog")
         );
+        // no channel id yet: globals only (the set here has none)
         assert_eq!(url(&row(Platform::Youtube, "vid")), None);
         // a plain one-source tab has just its set
         let one = Channel::new("xqc", Platform::Kick, 10);
@@ -342,6 +382,65 @@ mod tests {
                 .get("Pog")
                 .map(|e| e.url.as_str()),
             Some("kick-pog")
+        );
+    }
+
+    const UC: &str = "UCaB3_-xyzABC01234567890";
+
+    #[test]
+    fn a_youtube_room_has_no_key_until_its_channel_id_is_known() {
+        let mut st = refresh::State::new();
+        let ch = Channel::new("vid", Platform::Youtube, 10);
+        assert!(keys_of(&ch, &st).is_empty(), "no id, no fetch");
+        // the tab draws globals meanwhile
+        let globals = room("global-pog");
+        let tab = tab_set(&ch, &st, &globals);
+        assert_eq!(
+            tab.for_row(&row(Platform::Youtube, "vid"))
+                .get("Pog")
+                .map(|e| e.url.as_str()),
+            Some("global-pog")
+        );
+        // the id arrives: the key keeps its case, and the room draws once fetched
+        assert!(st.yt.learn("vid", UC));
+        let k = keys_of(&ch, &st);
+        assert_eq!(k, vec![(Platform::Youtube, UC.to_string())]);
+        st.seed(k[0].clone(), &room("yt-pog"), Instant::now());
+        let tab = tab_set(&ch, &st, &globals);
+        assert_eq!(
+            tab.for_row(&row(Platform::Youtube, "vid"))
+                .get("Pog")
+                .map(|e| e.url.as_str()),
+            Some("yt-pog")
+        );
+    }
+
+    #[test]
+    fn a_merged_tabs_youtube_row_reads_its_own_room_once_the_id_lands() {
+        let mut st = refresh::State::new();
+        let t = Instant::now();
+        st.seed(
+            refresh::key(Platform::Twitch, "xqc"),
+            &room("twitch-pog"),
+            t,
+        );
+        let mut ch = Channel::new("xqc", Platform::Twitch, 10);
+        ch.extra = vec![(Platform::Youtube, "vid".into())];
+        let globals = room("global-pog");
+        let url = |st: &refresh::State, m: &Message| {
+            tab_set(&ch, st, &globals)
+                .for_row(m)
+                .get("Pog")
+                .map(|e| e.url.clone())
+        };
+        let yt = row(Platform::Youtube, "vid");
+        assert_eq!(url(&st, &yt).as_deref(), Some("global-pog"));
+        st.yt.learn("vid", UC);
+        st.seed((Platform::Youtube, UC.to_string()), &room("yt-pog"), t);
+        assert_eq!(url(&st, &yt).as_deref(), Some("yt-pog"));
+        assert_eq!(
+            url(&st, &row(Platform::Twitch, "xqc")).as_deref(),
+            Some("twitch-pog")
         );
     }
 }
