@@ -86,8 +86,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install stable --profile minimal --target "${{ matrix.target }}"
-          rustup default stable
+          # rust-toolchain.toml pins the version: install that one, with this
+          # target. installing stable left the pinned toolchain without the
+          # musl std, and 0.5.0's musl build failed on "can't find crate for core"
+          rustup toolchain install --profile minimal
+          rustup target add "${{ matrix.target }}"
           rustc --version
 
       - name: musl compiler (ring builds c and asm)
