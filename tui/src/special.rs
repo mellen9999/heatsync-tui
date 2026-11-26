@@ -624,7 +624,7 @@ pub(crate) mod tests {
             inv_busy: false,
             usage_tx: channel().0,
             stamps: false,
-            big_lines: true,
+            big_lines: false,
             streams: StreamEvents::new(),
             rooms: RoomModes::new(),
             seen: Default::default(),

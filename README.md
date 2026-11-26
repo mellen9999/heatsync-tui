@@ -113,7 +113,7 @@ graphics, detected automatically — nothing to set:
 
 works inside tmux (it asks tmux for the outer terminal).
 
-a line of only emotes (up to 5) is drawn twice as big: 4 rows tall instead of 2. `B` turns it off and on, kept in `~/.config/heatsync/config` (`big_emote_lines=off`). it follows the site's rule (`core/tests/emote-only.vectors.json`) and never touches events, notices or any line with a fill.
+a line of only emotes (up to 5) is drawn twice as big: 4 rows tall instead of 2. off by default: `B` turns it on and off, kept in `~/.config/heatsync/config` (`big_emote_lines=on`). it follows the site's rule (`core/tests/emote-only.vectors.json`) and never touches events, notices or any line with a fill.
 
 ## more
 

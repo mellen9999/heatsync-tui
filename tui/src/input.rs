@@ -1231,14 +1231,14 @@ mod alt_tests {
     #[test]
     fn b_turns_big_emote_lines_off_and_on_and_says_which() {
         let mut a = crate::special::tests::app();
-        assert!(a.big_lines, "on by default");
+        assert!(!a.big_lines, "off by default");
         let b = KeyEvent::new(KeyCode::Char('B'), KeyModifiers::SHIFT);
-        handle_key(&mut a, b);
-        assert!(!a.big_lines);
-        assert_eq!(a.status.as_deref(), Some(tr("input.status_big_off")));
         handle_key(&mut a, b);
         assert!(a.big_lines);
         assert_eq!(a.status.as_deref(), Some(tr("input.status_big_on")));
+        handle_key(&mut a, b);
+        assert!(!a.big_lines);
+        assert_eq!(a.status.as_deref(), Some(tr("input.status_big_off")));
     }
 
     #[test]

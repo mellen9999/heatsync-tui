@@ -54,8 +54,8 @@ pub struct Config {
     pub tab_pos: TabPos,
     /// dim `HH:MM` before each chat line (`timestamps=on`).
     pub timestamps: bool,
-    /// a chat line of only emotes draws them twice as big (`big_emote_lines=off`
-    /// turns it off; on by default, so only the off is written).
+    /// a chat line of only emotes draws them twice as big (`big_emote_lines=on`
+    /// turns it on; off by default since 0.5.1, so only the on is written).
     pub big_lines: bool,
     /// open tabs, in order — restored on next launch (unless CLI args
     /// override). each tab is one or more `+`-merged (platform, channel) subs.
@@ -229,7 +229,7 @@ pub fn load() -> Config {
     let mut cfg = Config {
         tab_pos: TabPos::Top,
         timestamps: false,
-        big_lines: true,
+        big_lines: false,
         channels: Vec::new(),
         special: Vec::new(),
         blocks: Vec::new(),
@@ -339,8 +339,8 @@ pub fn save(cfg: &Config) {
         if cfg.timestamps {
             out.push_str("timestamps=on\n");
         }
-        if !cfg.big_lines {
-            out.push_str("big_emote_lines=off\n");
+        if cfg.big_lines {
+            out.push_str("big_emote_lines=on\n");
         }
         if !cfg.channels.is_empty() {
             let joined = cfg
