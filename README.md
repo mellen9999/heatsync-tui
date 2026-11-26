@@ -50,7 +50,7 @@ heatsync-tui xqc forsen kick:trainwreckstv     # pick channels (youtube: yt:<vid
 heatsync-tui login                             # pair this terminal (see login)
 ```
 
-keys: `j`/`k` scroll · `h`/`l` (or `j`/`k` with a side tab bar) switch channel ·
+keys (press `?` in the app for this list): `j`/`k` (or `h`/`l`) switch channel · `enter` on the mentions tab: go to where the newest came from ·
 `i` compose · `o` pick a live channel (opens a temp tab, underlined) · `s` keep the temp tab · `m` manage · `x` close · `T` move tab bar · `v` message cursor (`j`/`k` `ctrl-d`/`ctrl-u` `g`/`G` move · `r` reply · `y` yank · `d` delete · `b` block an emote on the line · `esc` back) · `t` timestamps · `B` big emote-only lines · `P` hide the pinned message · `space` pause · `q` quit.
 open channels + tab-bar position persist in `~/.config/heatsync/config`.
 

@@ -57,6 +57,16 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
         return;
     }
 
+    if let InputMode::Keys(at) = app.mode {
+        let at = at.min(crate::keyhelp::max_scroll(main.width, main.height));
+        f.render_widget(
+            Paragraph::new(crate::keyhelp::lines(main.width, at, main.height)),
+            main,
+        );
+        draw_footer(f, footer, app, app.channels.len());
+        return;
+    }
+
     if let (InputMode::Emotes, Some(l)) = (app.mode, &app.emote_list.open) {
         f.render_widget(Paragraph::new(l.lines(main.width, main.height)), main);
         draw_footer(f, footer, app, app.channels.len());
@@ -567,6 +577,17 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
+    if matches!(app.mode, InputMode::Keys(_)) {
+        let mut spans = vec![
+            Span::styled(format!(" {} ", tr("keys.title")), tag),
+            Span::raw("  "),
+        ];
+        for pair in [hint("jk", "draw.h_move"), hint("esc", "draw.h_close")] {
+            spans.extend(pair);
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     if app.mode == InputMode::Emotes {
         let mut spans = vec![
             Span::styled(format!(" {} ", tr("draw.mode_emotes")), tag),
@@ -747,6 +768,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, n: usize) {
     if app.channels.get(app.focus).is_some_and(|c| c.temp) {
         spans.extend(hint("s", "draw.h_keep"));
     }
+    // every other key is one press away, named on the ? screen (keyhelp.rs)
+    spans.extend(hint("?", "draw.h_keys"));
     spans.extend(hint("q", "draw.h_quit"));
     if app.paused {
         spans.push(Span::styled(

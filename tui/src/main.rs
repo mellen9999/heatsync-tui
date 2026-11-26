@@ -27,6 +27,7 @@ mod input;
 mod intr;
 mod inventory;
 mod key;
+mod keyhelp;
 mod kick;
 mod lang;
 mod layout;

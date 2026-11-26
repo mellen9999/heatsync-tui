@@ -68,6 +68,7 @@ fn handle_key_inner(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
         }
         InputMode::Pick => pick_key(app, k),
         InputMode::Emotes => emotes_key(app, k),
+        InputMode::Keys(at) => keys_key(app, k, at),
         InputMode::Cursor => return cursor_key(app, k),
         // rover-style channel manager: j/k move, enter open, a add, x leave,
         // e edit slots, K/J reorder, esc back.
@@ -244,12 +245,32 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             app.paused = !app.paused;
             Flow::Continue
         }
+        KeyCode::Char('?') => {
+            app.mode = InputMode::Keys(0);
+            app.status = None;
+            Flow::Continue
+        }
         KeyCode::Esc => {
             app.status = None;
             Flow::Continue
         }
         _ => Flow::Continue,
     }
+}
+
+/// the `?` list: j/k scroll, esc / q / ? close.
+fn keys_key(app: &mut App, k: crossterm::event::KeyEvent, at: usize) {
+    // the list fills the screen above the one-row footer
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let max = crate::keyhelp::max_scroll(cols, rows.saturating_sub(1));
+    app.mode = match k.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => InputMode::Normal,
+        KeyCode::Char('j') | KeyCode::Down => InputMode::Keys((at + 1).min(max)),
+        KeyCode::Char('k') | KeyCode::Up => InputMode::Keys(at.saturating_sub(1)),
+        KeyCode::Char('g') | KeyCode::Home => InputMode::Keys(0),
+        KeyCode::Char('G') | KeyCode::End => InputMode::Keys(max),
+        _ => InputMode::Keys(at),
+    };
 }
 
 /// alt+1..alt+9 → tab index 0..8.

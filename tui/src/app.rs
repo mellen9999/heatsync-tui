@@ -41,6 +41,8 @@ pub(crate) enum InputMode {
     Cursor,
     /// `/emotes`: your own heatsync emotes, a scrollable list.
     Emotes,
+    /// `?`: every key the chat view answers (keyhelp.rs), scrolled this far.
+    Keys(usize),
 }
 
 /// a fetched pin for (platform, channel); `None` = the channel has none.
