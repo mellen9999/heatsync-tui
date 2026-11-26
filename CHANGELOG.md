@@ -2,6 +2,14 @@
 
 what changed in each release, newest first. the release workflow copies the section for a tag into the github release notes, so every `## x.y.z` heading needs a matching tag.
 
+## 0.5.1 - 2026-11-26
+
+`heatsync-core` moves to 0.5.1 with it.
+
+### emotes
+
+- big emote-only lines are off by default, as on the site, the extension and the desktop app: a big line takes 4 rows instead of 2. `B` turns them on, and the terminal remembers it
+
 ## 0.5.0 - 2026-11-26
 
 `heatsync-core` moves to 0.5.0 with it.

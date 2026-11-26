@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "heatsync-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "heatsync-tui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "color_quant",
  "crossterm",
