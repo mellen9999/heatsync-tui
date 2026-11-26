@@ -1,9 +1,10 @@
 use crate::emote::fb::FbEmotes;
-use crate::emote::render::{EmoteStore, EMOTE_H};
+use crate::emote::render::{big_key, EmoteStore, BIG_H, EMOTE_H, MAX_W};
 use crate::paints::UserLook;
 use crate::palette;
 use heatsync_core::emote::{segments_with, EmoteSet, Segment};
 use heatsync_core::i18n::tr;
+use heatsync_core::only::{self, BIG_SCALE};
 use heatsync_core::paint::Paint;
 use heatsync_core::{Badge, Message, Platform, Tag, TagKind};
 use ratatui::style::{Color, Modifier, Style};
@@ -42,6 +43,16 @@ impl EmoteMode<'_> {
         }
     }
 
+    /// [`Self::square_cells`] for a big emote. `None` in text mode, where there
+    /// is nothing to enlarge.
+    pub(crate) fn big_square_cells(&self) -> Option<u16> {
+        match self {
+            EmoteMode::Term(s) => Some(s.big_square_cells()),
+            EmoteMode::Fb(f) => Some(f.big_square_cells()),
+            EmoteMode::Text => None,
+        }
+    }
+
     /// how long until any loaded emote flips to its next frame.
     pub(crate) fn next_flip_in(&self) -> Option<Duration> {
         match self {
@@ -55,10 +66,24 @@ impl EmoteMode<'_> {
 /// walk a message's emote STACKS in order, yielding each stack's cache key.
 /// core's [`segments`] owns the grammar — zero-width overlays, `w!`-style BTTV
 /// prefixes, `z!` forcing, FFZ effect words. shared by layout and prefetch.
-pub(crate) fn each_stack(text: &str, set: &EmoteSet, refs: &EmoteSet, mut f: impl FnMut(&str)) {
-    for seg in segments_with(text, set, refs) {
+/// with `big` (the setting is on), a line that draws its pictures big yields
+/// each stack's big key too.
+pub(crate) fn each_stack(
+    text: &str,
+    set: &EmoteSet,
+    refs: &EmoteSet,
+    big: bool,
+    mut f: impl FnMut(&str),
+) {
+    let segs = segments_with(text, set, refs);
+    let big = big && only::verdict_of(&segs).big;
+    for seg in &segs {
         if let Segment::Stack(s) = seg {
-            f(&s.key());
+            let key = s.key();
+            f(&key);
+            if big {
+                f(&big_key(&key));
+            }
         }
     }
 }
@@ -132,7 +157,7 @@ pub(crate) fn replies_to_me(reply_to: Option<&str>, me: &[String]) -> bool {
 }
 
 /// how a message is laid out beyond its own fields.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Look<'a> {
     /// my names — a line that mentions or answers one gets the ping bar.
     pub(crate) me: &'a [String],
@@ -142,6 +167,9 @@ pub(crate) struct Look<'a> {
     pub(crate) stamps: bool,
     /// the sender's heatsync name paint / picked color, once resolved.
     pub(crate) user: Option<&'a UserLook>,
+    /// the pane's height, when big emote-only lines are on (0 = off): a big line
+    /// has to fit in it, or it draws at the normal size.
+    pub(crate) big_rows: u16,
 }
 
 /// one-cell role badge: black glyph on the role's color. same black-on-color
@@ -177,6 +205,13 @@ pub(crate) struct Rows {
     pub(crate) col: u16,
     pub(crate) row_start: u16, // col where content on this row begins (prefix or indent)
     pub(crate) has_stack: bool,
+    /// how tall a row holding an image is: EMOTE_H, or BIG_H on a big emote-only line.
+    stack_h: u16,
+    /// this line draws its emotes big.
+    big: bool,
+    /// a big emote found no room even on a row of its own: the line has to be
+    /// laid out normal instead.
+    big_miss: bool,
     pub(crate) full: bool, // hit MAX_MSG_ROWS — stop consuming
     /// the row wears a fill: names sit on a black cutout.
     pub(crate) cut: bool,
@@ -193,6 +228,9 @@ impl Rows {
             col: 0,
             row_start: 0,
             has_stack: false,
+            stack_h: EMOTE_H,
+            big: false,
+            big_miss: false,
             full: false,
             cut: false,
         }
@@ -211,7 +249,7 @@ impl Rows {
 
     /// close the current visual row and open an indented continuation.
     fn newline(&mut self) {
-        let h = if self.has_stack { EMOTE_H } else { 1 };
+        let h = if self.has_stack { self.stack_h } else { 1 };
         self.rows.push(RowPlan {
             line: Line::from(std::mem::take(&mut self.spans)),
             places: std::mem::take(&mut self.places),
@@ -281,15 +319,19 @@ impl Rows {
         if self.full {
             return;
         }
-        let key = s.key();
+        // a big line draws every emote from its own, larger image
+        let key = if self.big { big_key(&s.key()) } else { s.key() };
         // a loaded emote knows its width; a loading one is laid out at the
         // provisional square footprint (doubled for w!/ffzW) so nothing
         // reflows when the image lands.
+        let (square, cap) = if self.big {
+            (mode.big_square_cells(), MAX_W * BIG_SCALE)
+        } else {
+            (mode.square_cells(), MAX_W)
+        };
         let sized = match mode.cells(&key) {
             Some(w) => Some((w, true)),
-            None => mode
-                .square_cells()
-                .map(|w| (if s.wide() { (w * 2).min(8) } else { w }, false)),
+            None => square.map(|w| (if s.wide() { (w * 2).min(cap) } else { w }, false)),
         };
         let Some((w, ready)) = sized else {
             // text tier — the name is just a word on the line.
@@ -302,6 +344,7 @@ impl Rows {
             }
         }
         if self.col + w > self.maxw {
+            self.big_miss |= self.big;
             return self.word(&s.base, palette::TEXT);
         }
         self.has_stack = true;
@@ -329,7 +372,7 @@ impl Rows {
                 last.line.spans.push(Span::styled("…", palette::DIM));
             }
         } else if !self.spans.is_empty() || self.rows.is_empty() {
-            let h = if self.has_stack { EMOTE_H } else { 1 };
+            let h = if self.has_stack { self.stack_h } else { 1 };
             self.rows.push(RowPlan {
                 line: Line::from(std::mem::take(&mut self.spans)),
                 places: std::mem::take(&mut self.places),
@@ -350,10 +393,12 @@ pub(crate) fn layout_text(
 ) {
     // message text is plain white — heat lives in the bar and tab numbers,
     // never in the reading surface.
-    layout_text_in(b, text, set, refs, mode, palette::TEXT);
+    layout_text_in(b, text, set, refs, mode, palette::TEXT, false);
 }
 
-/// `layout_text` in a given style (`/me` and highlighted lines).
+/// `layout_text` in a given style (`/me` and highlighted lines). `big`: this is
+/// a plain chat line, so one that is only pictures (see [`only`]) draws its
+/// emotes big. the verdict reads the segments this call lays out anyway.
 fn layout_text_in(
     b: &mut Rows,
     text: &str,
@@ -361,8 +406,14 @@ fn layout_text_in(
     refs: &EmoteSet,
     mode: EmoteMode,
     text_hue: Style,
+    big: bool,
 ) {
-    for seg in segments_with(text, set, refs) {
+    let segs = segments_with(text, set, refs);
+    if big && only::verdict_of(&segs).big {
+        b.big = true;
+        b.stack_h = BIG_H;
+    }
+    for seg in segs {
         if b.full {
             break;
         }
@@ -452,13 +503,23 @@ pub(crate) fn layout_message(
 ) -> Vec<RowPlan> {
     let pinged = mentions_any(&m.text, look.me) || replies_to_me(m.reply_to.as_deref(), look.me);
     let fill = crate::fill::of(m, pinged);
-    let mut rows = layout_rows(m, set, mode, maxw, look, pinged, fill.is_some());
+    let (mut rows, retry) = layout_rows(m, set, mode, maxw, look, pinged, fill.is_some());
+    if retry {
+        let normal = Look {
+            big_rows: 0,
+            ..*look
+        };
+        rows = layout_rows(m, set, mode, maxw, &normal, pinged, fill.is_some()).0;
+    }
     if let Some(f) = fill {
         crate::fill::paint(&mut rows, f);
     }
     rows
 }
 
+/// the rows of one message, and whether they must be laid out again at the
+/// normal size: a big line whose emotes found no room, or that is taller than
+/// the pane.
 fn layout_rows(
     m: &Message,
     set: &EmoteSet,
@@ -467,7 +528,7 @@ fn layout_rows(
     look: &Look,
     pinged: bool,
     cut: bool,
-) -> Vec<RowPlan> {
+) -> (Vec<RowPlan>, bool) {
     // the chat color wins; a heatsync-picked one fills in for a user with none.
     let user_color = m
         .color
@@ -517,7 +578,7 @@ fn layout_rows(
         for w in game.split(' ').filter(|w| !w.is_empty()) {
             b.word(w, palette::TEXT);
         }
-        return b.finish();
+        return (b.finish(), false);
     }
     // an event line: glyph + actor + headline in the event's hue, then any
     // attached chat text (resub message, kicks message) laid out like chat.
@@ -536,7 +597,7 @@ fn layout_rows(
             b.word("·", palette::DIM);
             layout_text(&mut b, &m.text, set, m.refs(), mode);
         }
-        return b.finish();
+        return (b.finish(), false);
     }
     // role badges, capped — a badge wall must not eat the line.
     for &bd in m.badges.iter().take(3) {
@@ -570,13 +631,17 @@ fn layout_rows(
     if m.extra.highlight {
         hue = hue.add_modifier(Modifier::REVERSED);
     }
-    layout_text_in(&mut b, &m.text, set, m.refs(), mode, hue);
+    // a plain chat line only: not an event or notice, nothing the row wears a
+    // fill for, not a removed line; and only where there is a picture to enlarge
+    let big = look.big_rows > 0 && !cut && m.gone.is_none() && mode.big_square_cells().is_some();
+    layout_text_in(&mut b, &m.text, set, m.refs(), mode, hue, big);
     if m.extra.first {
         b.word(
             &format!("◇ {}", tr("layout.first_message")),
             palette::DIM_TAG,
         );
     }
+    let (was_big, missed) = (b.big, b.big_miss);
     let mut rows = match &m.gone {
         Some(g) => {
             b.word(&format!("[{g}]"), palette::GONE_TAG);
@@ -602,7 +667,11 @@ fn layout_rows(
             },
         );
     }
-    rows
+    // a big line the pane cannot hold (too narrow for an emote, too short for
+    // the rows) draws at the normal size instead
+    let tall: usize = rows.iter().map(|r| r.h as usize).sum();
+    let retry = was_big && (missed || tall > look.big_rows as usize);
+    (rows, retry)
 }
 
 /// a removed line: gray + crossed out, everything but its own `[tag]`.
@@ -1199,7 +1268,7 @@ mod stack_tests {
     fn overlay_groups_onto_base() {
         let set = EmoteSet::from_list([em("GAMBA", false), em("notL", true)]);
         let mut keys = Vec::new();
-        each_stack("GAMBA notL", &set, EmoteSet::none(), |k| {
+        each_stack("GAMBA notL", &set, EmoteSet::none(), false, |k| {
             keys.push(k.to_string())
         });
         assert_eq!(keys, vec!["u/GAMBA\nu/notL"]); // one stack, base + overlay
@@ -1209,7 +1278,7 @@ mod stack_tests {
     fn text_breaks_stack() {
         let set = EmoteSet::from_list([em("GAMBA", false), em("KEKW", false)]);
         let mut keys = Vec::new();
-        each_stack("GAMBA lol KEKW", &set, EmoteSet::none(), |k| {
+        each_stack("GAMBA lol KEKW", &set, EmoteSet::none(), false, |k| {
             keys.push(k.to_string())
         });
         assert_eq!(keys, vec!["u/GAMBA", "u/KEKW"]); // separate, text between
@@ -1219,7 +1288,7 @@ mod stack_tests {
     fn multiple_overlays_stack() {
         let set = EmoteSet::from_list([em("A", false), em("h1", true), em("h2", true)]);
         let mut keys = Vec::new();
-        each_stack("A h1 h2", &set, EmoteSet::none(), |k| {
+        each_stack("A h1 h2", &set, EmoteSet::none(), false, |k| {
             keys.push(k.to_string())
         });
         assert_eq!(keys, vec!["u/A\nu/h1\nu/h2"]);
@@ -1253,5 +1322,338 @@ mod stack_tests {
             UnicodeWidthStr::width(fit("日本語日本語".to_string(), 7).as_str()),
             6
         );
+    }
+}
+
+#[cfg(test)]
+mod big_tests {
+    use super::*;
+    use crate::emote::render::{big_key, BIG_H};
+    use heatsync_core::emote::Emote;
+    use heatsync_core::{Note, NoteKind};
+
+    fn em(name: &str, zw: bool) -> Emote {
+        Emote {
+            name: name.into(),
+            url: format!("u/{name}"),
+            provider: "7tv".into(),
+            id: name.into(),
+            animated: false,
+            zero_width: zw,
+            global: false,
+            kind: Default::default(),
+        }
+    }
+
+    fn set() -> EmoteSet {
+        let names = ["Kappa", "Keepo", "PogU", "KEKW", "LUL", "OMEGALUL"];
+        let zw = ["RainTime"];
+        EmoteSet::from_list(
+            names
+                .iter()
+                .map(|n| em(n, false))
+                .chain(zw.iter().map(|n| em(n, true))),
+        )
+    }
+
+    /// 8x16-pixel cells: a normal square emote is 4x2 cells, a big one 8x4.
+    fn store() -> EmoteStore {
+        let mut s = EmoteStore::test_store(8, 16);
+        for n in ["Kappa", "Keepo", "PogU", "KEKW", "LUL", "OMEGALUL"] {
+            let k = format!("u/{n}");
+            s.test_ready(&big_key(&k), 8, &[100, 100]);
+            s.test_ready(&k, 4, &[100, 100]);
+        }
+        s
+    }
+
+    fn msg(text: &str) -> Message {
+        Message {
+            platform: Platform::Twitch,
+            user: "u".into(),
+            text: text.into(),
+            color: None,
+            badges: Vec::new(),
+            id: None,
+            gone: None,
+            reply_to: None,
+            note: None,
+            extra: Default::default(),
+            emotes: None,
+            tags: Vec::new(),
+            heat: 0.0,
+            uid: None,
+        }
+    }
+
+    const ON: Look<'static> = Look {
+        me: &[],
+        tag_platform: false,
+        stamps: false,
+        user: None,
+        big_rows: 40,
+    };
+
+    fn plan(m: &Message, s: &EmoteStore, maxw: u16, look: &Look) -> Vec<RowPlan> {
+        layout_message(m, &set(), EmoteMode::Term(s), maxw, look)
+    }
+
+    /// (row heights, place widths, whether each place is the big variant).
+    fn shape(rows: &[RowPlan]) -> (Vec<u16>, Vec<u16>, Vec<bool>) {
+        let places = rows.iter().flat_map(|r| &r.places);
+        (
+            rows.iter().map(|r| r.h).collect(),
+            places.clone().map(|p| p.w).collect(),
+            places.map(|p| p.key.ends_with("big")).collect(),
+        )
+    }
+
+    #[test]
+    fn an_emote_only_line_draws_four_rows_tall_and_reserves_its_cells() {
+        let s = store();
+        let rows = plan(&msg("Kappa"), &s, 40, &ON);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].h, BIG_H);
+        assert_eq!(BIG_H, 4);
+        let p = &rows[0].places[0];
+        assert_eq!(
+            (p.col, p.w, p.key.as_str()),
+            (3, 8, big_key("u/Kappa").as_str())
+        );
+        // the cells the image takes are held by spaces: nothing shifts when it decodes
+        let text: String = rows[0]
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text, format!("u: {}", " ".repeat(8)));
+    }
+
+    #[test]
+    fn off_is_todays_rendering() {
+        let s = store();
+        for text in [
+            "Kappa",
+            "Kappa Keepo",
+            "w! Kappa RainTime",
+            "Kappa lol",
+            "hi",
+        ] {
+            let off = plan(&msg(text), &s, 40, &Look::default());
+            for r in &off {
+                assert!(r.h == 1 || r.h == EMOTE_H, "{text}: {}", r.h);
+                assert!(r.places.iter().all(|p| !p.key.ends_with("big")));
+                assert!(r.places.iter().all(|p| p.w == 4));
+            }
+        }
+        let off = plan(&msg("Kappa"), &s, 40, &Look::default());
+        assert_eq!(shape(&off), (vec![EMOTE_H], vec![4], vec![false]));
+    }
+
+    #[test]
+    fn five_pictures_are_big_and_six_are_a_wall() {
+        let s = store();
+        let five = plan(&msg("Kappa Keepo PogU KEKW LUL"), &s, 80, &ON);
+        assert_eq!(shape(&five), (vec![BIG_H], vec![8; 5], vec![true; 5]));
+        let six = plan(&msg("Kappa Keepo PogU KEKW LUL OMEGALUL"), &s, 80, &ON);
+        assert_eq!(shape(&six), (vec![EMOTE_H], vec![4; 6], vec![false; 6]));
+    }
+
+    #[test]
+    fn a_word_anywhere_keeps_the_line_normal() {
+        let s = store();
+        for text in [
+            "lol Kappa",
+            "Kappa lol",
+            "Kappa lol Keepo",
+            "Kappa! Keepo",
+            "@u Kappa",
+        ] {
+            let (h, w, big) = shape(&plan(&msg(text), &s, 80, &ON));
+            assert_eq!(h, vec![EMOTE_H], "{text}");
+            assert!(
+                w.iter().all(|w| *w == 4) && big.iter().all(|b| !b),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_modifier_and_an_overlay_do_not_count() {
+        let s = store();
+        let mut s2 = store();
+        // the stack with its overlay is one picture with its own cached image
+        s2.test_ready(&big_key("u/Kappa\nu/RainTime"), 8, &[100]);
+        s2.test_ready("u/Kappa\nu/RainTime", 4, &[100]);
+        let m = msg("Kappa RainTime w! Keepo");
+        let rows = plan(&m, &s2, 80, &ON);
+        assert_eq!(shape(&rows).0, vec![BIG_H]);
+        assert!(rows[0].places[0].key.starts_with("u/Kappa\nu/RainTime"));
+        // no picture for a lone modifier: it is a word, so the line is normal
+        assert_eq!(shape(&plan(&msg("w!"), &s, 80, &ON)).0, vec![1]);
+    }
+
+    #[test]
+    fn emoji_count_as_pictures_but_draw_as_they_do_today() {
+        let s = store();
+        // an emote and an emoji: two pictures, so the emote goes big; the emoji is a text cell
+        let rows = plan(&msg("Kappa 😂"), &s, 40, &ON);
+        assert_eq!(shape(&rows), (vec![BIG_H], vec![8], vec![true]));
+        let text: String = rows[0]
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.ends_with(" 😂"), "{text:?}");
+        // three emote and four emoji are a wall
+        let wall = plan(&msg("Kappa Keepo PogU 😂😂😂😂"), &s, 80, &ON);
+        assert_eq!(shape(&wall).0, vec![EMOTE_H]);
+        // emoji alone: nothing to enlarge, a plain row
+        let alone = plan(&msg("😂😂"), &s, 40, &ON);
+        assert_eq!(shape(&alone), (vec![1], vec![], vec![]));
+    }
+
+    #[test]
+    fn a_reply_body_and_a_me_line_draw_big_and_the_context_row_does_not() {
+        let s = store();
+        let mut r = msg("Kappa");
+        r.reply_to = Some("tar".into());
+        r.extra.reply_text = "an earlier line".into();
+        let rows = plan(&r, &s, 40, &ON);
+        assert_eq!(rows.iter().map(|r| r.h).collect::<Vec<_>>(), vec![1, BIG_H]);
+        let mut me = msg("Kappa");
+        me.extra.action = true;
+        assert_eq!(shape(&plan(&me, &s, 40, &ON)).0, vec![BIG_H]);
+    }
+
+    #[test]
+    fn notices_fills_and_removed_lines_stay_normal() {
+        let s = store();
+        let mut note = msg("Kappa");
+        note.note = Some(Note {
+            kind: NoteKind::Notice,
+            what: "x".into(),
+        });
+        let mut sub = msg("Kappa");
+        sub.note = Some(Note {
+            kind: NoteKind::Sub,
+            what: "subbed".into(),
+        });
+        let mut first = msg("Kappa");
+        first.extra.first = true;
+        let mut hi = msg("Kappa");
+        hi.extra.highlight = true;
+        let mut gone = msg("Kappa");
+        gone.gone = Some("timed out".into());
+        let mut ping = msg("Kappa");
+        ping.reply_to = Some("me".into());
+        let me = vec!["me".to_string()];
+        let pinged = Look { me: &me, ..ON };
+        for (name, m, look) in [
+            ("notice", &note, &ON),
+            ("sub", &sub, &ON),
+            ("first", &first, &ON),
+            ("highlight", &hi, &ON),
+            ("removed", &gone, &ON),
+            ("aimed at me", &ping, &pinged),
+        ] {
+            let (h, w, big) = shape(&plan(m, &s, 40, look));
+            assert!(h.iter().all(|h| *h != BIG_H), "{name}: {h:?}");
+            assert!(
+                w.iter().all(|w| *w == 4) && big.iter().all(|b| !b),
+                "{name}"
+            );
+        }
+        // the same line, plain, is big
+        assert_eq!(shape(&plan(&msg("Kappa"), &s, 40, &ON)).0, vec![BIG_H]);
+    }
+
+    #[test]
+    fn the_composer_preview_never_draws_big() {
+        let s = store();
+        let mut b = Rows::new(40);
+        layout_text(
+            &mut b,
+            "Kappa",
+            &set(),
+            EmoteSet::none(),
+            EmoteMode::Term(&s),
+        );
+        let rows = b.finish();
+        assert_eq!(shape(&rows), (vec![EMOTE_H], vec![4], vec![false]));
+    }
+
+    #[test]
+    fn a_big_emote_still_loading_holds_its_big_footprint() {
+        // nothing decoded yet: the layout holds the big square block, name shown in it
+        let s = EmoteStore::test_store(8, 16);
+        let rows = plan(&msg("Kappa"), &s, 40, &ON);
+        assert_eq!(rows[0].h, BIG_H);
+        assert!(
+            rows[0].places.is_empty(),
+            "no image yet, only the held cells"
+        );
+        let text: String = rows[0]
+            .line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 3 + 8);
+        assert!(text.starts_with("u: Kappa"), "{text:?}");
+        // and it is the width the decoded square emote takes, so nothing moves when it lands
+        let ready = plan(&msg("Kappa"), &store(), 40, &ON);
+        assert_eq!(rows[0].line.width(), ready[0].line.width());
+    }
+
+    #[test]
+    fn too_narrow_or_too_short_falls_back_to_the_normal_size() {
+        let s = store();
+        // a big emote (8 cells) cannot stand in a 7 wide pane: the whole line goes normal
+        let narrow = plan(&msg("Kappa"), &s, 7, &ON);
+        assert_eq!(shape(&narrow), (vec![EMOTE_H], vec![4], vec![false]));
+        // a pane only 3 rows tall cannot hold a 4 row emote
+        let short = plan(&msg("Kappa"), &s, 40, &Look { big_rows: 3, ..ON });
+        assert_eq!(shape(&short).0, vec![EMOTE_H]);
+        let fits = plan(&msg("Kappa"), &s, 40, &Look { big_rows: 4, ..ON });
+        assert_eq!(shape(&fits).0, vec![BIG_H]);
+    }
+
+    #[test]
+    fn a_wall_of_big_lines_is_still_capped_by_the_per_message_row_cap() {
+        let s = store();
+        // five 8-cell emotes in a 20 wide pane wrap onto rows; never more than the cap
+        let rows = plan(&msg("Kappa Keepo PogU KEKW LUL"), &s, 20, &ON);
+        assert!(rows.len() <= MAX_MSG_ROWS, "{}", rows.len());
+        assert!(rows.iter().all(|r| r.line.width() <= 20));
+    }
+
+    #[test]
+    fn the_text_tier_has_nothing_to_enlarge() {
+        let big = layout_message(&msg("Kappa"), &set(), EmoteMode::Text, 40, &ON);
+        let off = layout_message(&msg("Kappa"), &set(), EmoteMode::Text, 40, &Look::default());
+        assert_eq!(big.len(), 1);
+        assert_eq!(big[0].h, 1);
+        assert_eq!(big[0].line, off[0].line);
+    }
+
+    #[test]
+    fn prefetch_asks_for_the_big_image_only_for_a_line_that_draws_big() {
+        let keys = |text: &str, big: bool| {
+            let mut v = Vec::new();
+            each_stack(text, &set(), EmoteSet::none(), big, |k| {
+                v.push(k.to_string())
+            });
+            v
+        };
+        assert_eq!(keys("Kappa", false), vec!["u/Kappa"]);
+        assert_eq!(
+            keys("Kappa", true),
+            vec!["u/Kappa".to_string(), big_key("u/Kappa")]
+        );
+        assert_eq!(keys("lol Kappa", true), vec!["u/Kappa"]);
+        assert_eq!(keys("Kappa Keepo PogU KEKW LUL OMEGALUL", true).len(), 6);
     }
 }

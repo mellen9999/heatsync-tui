@@ -194,12 +194,20 @@ fn prefetch_focused(app: &mut App) {
         store,
         fb,
         focus,
+        big_lines,
         ..
     } = app;
     if let Some(ch) = channels.get(*focus) {
         let from = ch.messages.len().saturating_sub(60);
         for m in ch.messages.iter().skip(from) {
-            request_stacks(store, fb, emotes[*focus].for_row(m), m.refs(), &m.text);
+            request_stacks(
+                store,
+                fb,
+                emotes[*focus].for_row(m),
+                m.refs(),
+                &m.text,
+                *big_lines,
+            );
         }
     }
 }

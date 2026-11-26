@@ -41,8 +41,28 @@ use crate::http;
 /// from the emote's real aspect and the terminal's cell aspect — so a square
 /// emote renders square and a wide one isn't crushed into a square hole.
 pub const EMOTE_H: u16 = 2;
+/// a big emote-only line's emote height in cells: EMOTE_H times the rule's scale.
+pub const BIG_H: u16 = EMOTE_H * heatsync_core::only::BIG_SCALE;
 /// widest an emote may get, in cells. a hostile 20:1 image can't eat the row.
-const MAX_W: u16 = 8;
+/// a big emote is as many times wider as it is taller.
+pub(crate) const MAX_W: u16 = 8;
+
+/// the cache key of a stack drawn BIG: its own key plus a tag no url, effect
+/// line or overlay can hold (a control byte; chat text never carries one). a big
+/// emote is a separate image, encoded for 4 rows, that the one clock plays.
+const BIG_TAG: &str = "\n\u{1}big";
+
+pub(crate) fn big_key(key: &str) -> String {
+    format!("{key}{BIG_TAG}")
+}
+
+/// a cache key's own stack key and the rows it is drawn at.
+pub(crate) fn split_big(key: &str) -> (&str, u16) {
+    match key.strip_suffix(BIG_TAG) {
+        Some(k) => (k, BIG_H),
+        None => (key, EMOTE_H),
+    }
+}
 /// frames kept per emote. longer animations are resampled onto this many slots
 /// at the same total duration — bounds memory and terminal-side image handles
 /// without changing playback speed.
@@ -116,6 +136,8 @@ pub struct EmoteStore {
     /// footprint of a 1:1 emote in cells. the layout reserves this BEFORE an
     /// emote finishes loading, so nothing reflows when the image lands.
     square_w: u16,
+    /// the same footprint for a big emote (4 rows tall).
+    big_square_w: u16,
     cache: HashMap<String, Entry>,
     jobs: Sender<Job>,
     done: Receiver<Done>,
@@ -177,6 +199,7 @@ impl EmoteStore {
         }
         let (cw, ch) = picker.font_size();
         let square_w = width_cells(1.0, cw, ch);
+        let big_square_w = width_cells_in(1.0, cw, ch, BIG_H);
         let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Done>();
         // a small loader pool: fetch + decode + scale + encode off the render
@@ -241,6 +264,7 @@ impl EmoteStore {
             watcher,
             last_area: Cell::new(Rect::default()),
             square_w,
+            big_square_w,
             cache: HashMap::new(),
             jobs: jobs_tx,
             done: done_rx,
@@ -260,6 +284,11 @@ impl EmoteStore {
     /// (and every sixel below from being re-emitted) as images arrive.
     pub fn square_cells(&self) -> u16 {
         self.square_w
+    }
+
+    /// [`Self::square_cells`] for a big emote, the width a decoded square one takes.
+    pub fn big_square_cells(&self) -> u16 {
+        self.big_square_w
     }
 
     /// can the terminal that is on screen RIGHT NOW display our frames?
@@ -779,9 +808,16 @@ fn frame_at(frames: &[FrameProto], now_ms: u64, total_ms: u64) -> (usize, u64) {
 /// the whole fix for "square emotes look squashed": cells are ~1:2, so a square
 /// emote spanning EMOTE_H rows needs ≈ EMOTE_H·ch/cw columns, not a fixed 3.
 pub(crate) fn width_cells(aspect: f32, cw: u16, ch: u16) -> u16 {
-    let block_h = (EMOTE_H as f32) * (ch.max(1) as f32);
+    width_cells_in(aspect, cw, ch, EMOTE_H)
+}
+
+/// [`width_cells`] for an emote `rows` cells tall (EMOTE_H, or BIG_H for a big one,
+/// whose width cap grows with it).
+pub(crate) fn width_cells_in(aspect: f32, cw: u16, ch: u16, rows: u16) -> u16 {
+    let block_h = (rows as f32) * (ch.max(1) as f32);
     let want_px = block_h * aspect.max(0.01);
-    ((want_px / cw.max(1) as f32).round() as i64).clamp(1, MAX_W as i64) as u16
+    let cap = (MAX_W * (rows / EMOTE_H).max(1)) as i64;
+    ((want_px / cw.max(1) as f32).round() as i64).clamp(1, cap) as u16
 }
 
 /// scale `src` to fit inside `tw`×`th` preserving aspect, then CENTRE it on a
@@ -1099,18 +1135,34 @@ pub fn composite_frames(key: &str, min_px: u32) -> Option<Vec<(RgbaImage, u32)>>
     }
 }
 
-/// composite a stack (see [`composite_frames`]), scale every frame to exactly its
-/// cell block, share one palette across the animation, and encode to the
-/// terminal's inline-graphics protocol. any failure → None.
+/// composite a stack (see [`composite_frames`]) at the size its key asks for (the
+/// normal block, or the big one: the CDN tier is picked for the pixels it needs,
+/// so a big emote stays sharp), then encode it. any failure → None.
 fn build(picker: &Picker, key: &str, flatten: bool, wrap: SixelWrap) -> Option<Built> {
+    let (key, rows) = split_big(key);
+    let block_h = rows as u32 * picker.font_size().1.max(1) as u32;
+    encode(picker, composite_frames(key, block_h)?, rows, flatten, wrap)
+}
+
+/// scale every frame to exactly its `rows`-tall cell block, share one palette
+/// across the animation, and encode to the terminal's inline-graphics protocol.
+/// the frames' delays are kept as they are, so a big and a normal build of one
+/// emote have the same timeline. any failure → None.
+fn encode(
+    picker: &Picker,
+    frames: Vec<(RgbaImage, u32)>,
+    rows: u16,
+    flatten: bool,
+    wrap: SixelWrap,
+) -> Option<Built> {
     let (cw, ch) = picker.font_size();
-    let block_h = EMOTE_H as u32 * ch.max(1) as u32;
-    let frames = subsample(composite_frames(key, block_h)?, MAX_FRAMES);
-    let (sw, sh) = frames[0].0.dimensions();
+    let block_h = rows as u32 * ch.max(1) as u32;
+    let frames = subsample(frames, MAX_FRAMES);
+    let (sw, sh) = frames.first()?.0.dimensions();
     if sw == 0 || sh == 0 {
         return None;
     }
-    let w_cells = width_cells(sw as f32 / sh as f32, cw, ch);
+    let w_cells = width_cells_in(sw as f32 / sh as f32, cw, ch, rows);
     let (tw, th) = (w_cells as u32 * cw.max(1) as u32, block_h);
 
     let mut canvases: Vec<RgbaImage> = frames.iter().map(|(f, _)| fit_center(f, tw, th)).collect();
@@ -1123,7 +1175,7 @@ fn build(picker: &Picker, key: &str, flatten: bool, wrap: SixelWrap) -> Option<B
         stabilize_palette(&mut canvases);
     }
 
-    let size = Rect::new(0, 0, w_cells, EMOTE_H);
+    let size = Rect::new(0, 0, w_cells, rows);
     let mut out = Vec::with_capacity(canvases.len());
     let mut total_ms = 0u64;
     for (canvas, (_, delay_ms)) in canvases.into_iter().zip(frames.iter()) {
@@ -1150,6 +1202,106 @@ fn build(picker: &Picker, key: &str, flatten: bool, wrap: SixelWrap) -> Option<B
             w_cells,
             total_ms,
         })
+    }
+}
+
+/// an 8x16 pixel cell terminal that speaks sixel, no terminal needed.
+#[cfg(test)]
+fn test_picker() -> Picker {
+    #[allow(deprecated)] // the one constructor that never asks stdin
+    let mut p = Picker::from_fontsize((8, 16));
+    p.set_protocol_type(ProtocolType::Sixel);
+    p
+}
+
+/// one flat 32x32 frame per delay, each a different colour.
+#[cfg(test)]
+fn test_frames(delays: &[u32]) -> Vec<(RgbaImage, u32)> {
+    delays
+        .iter()
+        .enumerate()
+        .map(|(i, &d)| {
+            let px = image::Rgba([(i * 70) as u8, 200, 40, 255]);
+            (RgbaImage::from_pixel(32, 32, px), d)
+        })
+        .collect()
+}
+
+/// a store with no terminal behind it, for the layout's tests: nothing loads and
+/// nothing draws, `test_ready` says which keys count as decoded.
+#[cfg(test)]
+impl EmoteStore {
+    pub(crate) fn test_store(cw: u16, ch: u16) -> EmoteStore {
+        EmoteStore {
+            proto: ProtocolType::Halfblocks,
+            tmux: false,
+            native: false,
+            outer_ok: Arc::new(AtomicBool::new(true)),
+            pane_off: Arc::new(AtomicU32::new(NO_OFFSET)),
+            watcher: None,
+            last_area: Cell::new(Rect::default()),
+            square_w: width_cells(1.0, cw, ch),
+            big_square_w: width_cells_in(1.0, cw, ch, BIG_H),
+            cache: HashMap::new(),
+            jobs: mpsc::channel().0,
+            done: mpsc::channel().1,
+            start: Instant::now(),
+            now_ms: Cell::new(0),
+            next_flip_ms: Cell::new(u64::MAX),
+            budget_left: Cell::new(DRAW_BUDGET),
+            lru: Cell::new(0),
+            frame_mark: Cell::new(0),
+            live_frames: 0,
+            blit: RefCell::new(Blitter::default()),
+        }
+    }
+
+    /// `key` is decoded for real: square frames, sixel-encoded at the rows the key
+    /// asks for, on an 8x16 pixel cell grid, one frame per delay.
+    pub(crate) fn test_ready_sixel(&mut self, key: &str, delays: &[u32]) {
+        let (_, rows) = split_big(key);
+        let built = encode(
+            &test_picker(),
+            test_frames(delays),
+            rows,
+            true,
+            SixelWrap::Bare,
+        )
+        .expect("a flat square encodes");
+        self.live_frames += built.frames.len();
+        self.cache.insert(
+            key.to_string(),
+            Entry::Ready(Anim {
+                frames: built.frames,
+                w_cells: built.w_cells,
+                total_ms: built.total_ms,
+                shown: Cell::new(0),
+                used: Cell::new(0),
+            }),
+        );
+    }
+
+    /// `key` is decoded: `w_cells` wide, one frame per delay.
+    pub(crate) fn test_ready(&mut self, key: &str, w_cells: u16, delays: &[u32]) {
+        let frames = delays
+            .iter()
+            .map(|&delay_ms| FrameProto {
+                proto: Protocol::Halfblocks(Default::default()),
+                delay_ms,
+            })
+            .collect::<Vec<_>>();
+        let total_ms = delays.iter().map(|d| (*d).max(MIN_DELAY_MS) as u64).sum();
+        self.live_frames += frames.len();
+        self.cache.insert(
+            key.to_string(),
+            Entry::Ready(Anim {
+                frames,
+                w_cells,
+                total_ms,
+                shown: Cell::new(0),
+                used: Cell::new(0),
+            }),
+        );
     }
 }
 
@@ -1481,6 +1633,76 @@ mod tests {
     #[test]
     fn static_image_never_schedules_a_redraw() {
         assert_eq!(frame_at(&protos(&[0]), 12_345, 0).1, u64::MAX);
+    }
+
+    // ---- big emotes -------------------------------------------------------
+
+    /// a big emote is its own image, 4 rows tall and twice as wide; its timeline
+    /// is the normal one's, frame for frame, since it comes from the same frames.
+    #[test]
+    fn a_big_build_is_four_rows_and_keeps_the_timeline() {
+        let delays = [60, 80, 100, 40];
+        let at = |rows| {
+            encode(
+                &test_picker(),
+                test_frames(&delays),
+                rows,
+                true,
+                SixelWrap::Bare,
+            )
+            .unwrap()
+        };
+        let (normal, big) = (at(EMOTE_H), at(BIG_H));
+        let area = |b: &Built| match &b.frames[0].proto {
+            Protocol::Sixel(s) => s.area,
+            _ => panic!("sixel"),
+        };
+        assert_eq!(area(&normal), Rect::new(0, 0, 4, 2));
+        assert_eq!(area(&big), Rect::new(0, 0, 8, 4));
+        assert_eq!((normal.w_cells, big.w_cells), (4, 8));
+        let times = |b: &Built| b.frames.iter().map(|f| f.delay_ms).collect::<Vec<_>>();
+        assert_eq!(times(&normal), times(&big));
+        assert_eq!(normal.total_ms, big.total_ms);
+    }
+
+    /// the one clock plays both sizes: at any instant the big emote shows the
+    /// frame the normal one does, and nothing but `begin_frame`'s snapshot moves it.
+    #[test]
+    fn a_big_emote_shows_the_same_frame_as_the_normal_one_at_the_same_instant() {
+        let mut s = EmoteStore::test_store(8, 16);
+        let delays = [60, 80, 100, 40];
+        s.test_ready_sixel("u/Dance", &delays);
+        s.test_ready_sixel(&big_key("u/Dance"), &delays);
+        let shown = |s: &EmoteStore, k: &str| {
+            s.budget_left.set(DRAW_BUDGET); // a fresh draw: the budget never freezes the test
+            s.frame(k).expect("ready");
+            let Some(Entry::Ready(a)) = s.cache.get(k) else {
+                unreachable!()
+            };
+            a.shown.get()
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for now in (0..640).step_by(7) {
+            s.now_ms.set(now);
+            let (a, b) = (shown(&s, "u/Dance"), shown(&s, &big_key("u/Dance")));
+            assert_eq!(a, b, "at {now}ms");
+            seen.insert(a);
+        }
+        assert_eq!(seen.len(), delays.len(), "every frame was shown: {seen:?}");
+        // and it is the clock's frame, not a counter of its own
+        s.now_ms.set(70);
+        assert_eq!(shown(&s, &big_key("u/Dance")), 1);
+    }
+
+    #[test]
+    fn a_big_emote_is_as_wide_as_it_is_tall() {
+        assert_eq!(width_cells_in(1.0, 8, 16, BIG_H), 8); // 4 rows of a 1:1 emote
+        assert_eq!(width_cells_in(2.0, 8, 16, BIG_H), 16); // wide ones double the cap too
+        assert_eq!(width_cells_in(50.0, 8, 16, BIG_H), MAX_W * 2);
+        assert_eq!(width_cells_in(1.0, 8, 16, EMOTE_H), width_cells(1.0, 8, 16));
+        let key = "https://cdn.7tv.app/emote/ABC/1x.webp\n#w";
+        assert_eq!(split_big(&big_key(key)), (key, BIG_H));
+        assert_eq!(split_big(key), (key, EMOTE_H));
     }
 
     // ---- resampling ------------------------------------------------------

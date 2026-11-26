@@ -54,6 +54,9 @@ pub struct Config {
     pub tab_pos: TabPos,
     /// dim `HH:MM` before each chat line (`timestamps=on`).
     pub timestamps: bool,
+    /// a chat line of only emotes draws them twice as big (`big_emote_lines=off`
+    /// turns it off; on by default, so only the off is written).
+    pub big_lines: bool,
     /// open tabs, in order — restored on next launch (unless CLI args
     /// override). each tab is one or more `+`-merged (platform, channel) subs.
     pub channels: Vec<Vec<(Platform, String)>>,
@@ -129,6 +132,15 @@ pub fn save_blocks(blocks: &[(String, String)]) {
         let _ = fs::create_dir_all(d);
     }
     let _ = fs::write(&p, out);
+}
+
+/// `on` / `off` (or `true` / `false`, `1` / `0`); anything else is no answer.
+fn flag(v: &str) -> Option<bool> {
+    match v.trim() {
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// parse one `twitch:name` / `kick:name` / `yt:id` / `name` token (bare = twitch).
@@ -217,6 +229,7 @@ pub fn load() -> Config {
     let mut cfg = Config {
         tab_pos: TabPos::Top,
         timestamps: false,
+        big_lines: true,
         channels: Vec::new(),
         special: Vec::new(),
         blocks: Vec::new(),
@@ -233,6 +246,7 @@ pub fn load() -> Config {
                             }
                         }
                         "timestamps" => cfg.timestamps = matches!(v.trim(), "on" | "true" | "1"),
+                        "big_emote_lines" => cfg.big_lines = flag(v).unwrap_or(cfg.big_lines),
                         "channels" => cfg.channels = parse_channels(v),
                         "special" => cfg.special = parse_special(v),
                         "block" => cfg.blocks.extend(parse_block(v)),
@@ -325,6 +339,9 @@ pub fn save(cfg: &Config) {
         if cfg.timestamps {
             out.push_str("timestamps=on\n");
         }
+        if !cfg.big_lines {
+            out.push_str("big_emote_lines=off\n");
+        }
         if !cfg.channels.is_empty() {
             let joined = cfg
                 .channels
@@ -365,6 +382,17 @@ mod tests {
             .collect();
         assert_eq!(back, blocks);
         assert_eq!(parse_block("  "), None);
+    }
+
+    #[test]
+    fn a_flag_reads_on_and_off_and_nothing_else() {
+        assert_eq!(flag("on"), Some(true));
+        assert_eq!(flag(" off "), Some(false));
+        assert_eq!((flag("1"), flag("0")), (Some(true), Some(false)));
+        // big emote lines keep their default (on) for anything unclear
+        for v in ["", "yes", "maybe"] {
+            assert_eq!(flag(v), None, "{v:?}");
+        }
     }
 
     #[test]

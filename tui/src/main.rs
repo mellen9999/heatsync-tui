@@ -172,6 +172,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             inv_busy: false,
             usage_tx: std::sync::mpsc::channel().0,
             stamps: cfg.timestamps,
+            big_lines: cfg.big_lines,
             emote_tx,
             emote_rx,
             hist_tx,
@@ -201,6 +202,7 @@ fn chat(args: &[String]) -> io::Result<()> {
             &chan_args,
             cfg.tab_pos,
             cfg.timestamps,
+            cfg.big_lines,
             cfg.channels,
             feed_open,
         )
@@ -241,6 +243,7 @@ fn build_live(
     chan_args: &[&String],
     tab_pos: TabPos,
     stamps: bool,
+    big_lines: bool,
     saved: Vec<Vec<Sub>>,
     feed_open: bool,
 ) -> App {
@@ -376,6 +379,7 @@ fn build_live(
         inv_busy: false,
         usage_tx: usagestore::spawn_writer(),
         stamps,
+        big_lines,
         emote_tx,
         emote_rx,
         hist_tx,
@@ -426,6 +430,7 @@ pub(crate) fn persisted(app: &App) -> config::Config {
     config::Config {
         tab_pos: app.tab_pos,
         timestamps: app.stamps,
+        big_lines: app.big_lines,
         channels,
         special,
         blocks: heatsync_core::block::list(),
@@ -545,7 +550,7 @@ fn run(terminal: &mut Terminal<held::HeldBackend>, mut app: App) -> io::Result<(
             let App {
                 store, fb, emotes, ..
             } = &mut app;
-            request_stacks(store, fb, &emotes[focus], EmoteSet::none(), &text);
+            request_stacks(store, fb, &emotes[focus], EmoteSet::none(), &text, false);
         }
         if dirty || emote_mode(&app).next_flip_in().is_some() {
             // snapshot the animation clock + reset the per-draw blit budget, so every

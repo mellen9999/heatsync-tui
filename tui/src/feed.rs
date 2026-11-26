@@ -107,6 +107,7 @@ pub(crate) fn drain_history(app: &mut App) {
         fb,
         hist_rx,
         focus,
+        big_lines,
         ..
     } = app;
     while let Ok(Hist {
@@ -141,7 +142,14 @@ pub(crate) fn drain_history(app: &mut App) {
             if i == *focus {
                 let from = channels[i].messages.len().saturating_sub(60);
                 for m in channels[i].messages.iter().skip(from) {
-                    request_stacks(store, fb, emotes[i].for_row(m), m.refs(), &m.text);
+                    request_stacks(
+                        store,
+                        fb,
+                        emotes[i].for_row(m),
+                        m.refs(),
+                        &m.text,
+                        *big_lines,
+                    );
                 }
             }
         }
@@ -161,6 +169,7 @@ pub(crate) fn drain_emotes(app: &mut App) {
         emote_rx,
         focus,
         refresh,
+        big_lines,
         ..
     } = app;
     let mut dirty = false;
@@ -194,7 +203,14 @@ pub(crate) fn drain_emotes(app: &mut App) {
         let i = (*focus).min(channels.len() - 1);
         let from = channels[i].messages.len().saturating_sub(60);
         for m in channels[i].messages.iter().skip(from) {
-            request_stacks(store, fb, emotes[i].for_row(m), m.refs(), &m.text);
+            request_stacks(
+                store,
+                fb,
+                emotes[i].for_row(m),
+                m.refs(),
+                &m.text,
+                *big_lines,
+            );
         }
     }
 }
@@ -209,15 +225,16 @@ pub(crate) fn request_stacks(
     set: &EmoteSet,
     refs: &EmoteSet,
     text: &str,
+    big: bool,
 ) {
     // per-message refs can resolve emotes the channel set doesn't have.
     if set.is_empty() && refs.is_empty() {
         return;
     }
     if let Some(s) = store {
-        each_stack(text, set, refs, |k| s.request(k));
+        each_stack(text, set, refs, big, |k| s.request(k));
     } else if let Some(f) = fb {
-        each_stack(text, set, refs, |k| f.request(k));
+        each_stack(text, set, refs, big, |k| f.request(k));
     }
 }
 
@@ -280,6 +297,7 @@ fn deliver_at(app: &mut App, i: usize, l: ChatLine, now: u64, own: bool) {
         me,
         paints,
         seen,
+        big_lines,
         ..
     } = app;
     // one platform message is one row: the server replays a joined room's backlog
@@ -310,6 +328,7 @@ fn deliver_at(app: &mut App, i: usize, l: ChatLine, now: u64, own: bool) {
             emotes[i].for_line(l.platform, &l.channel),
             r,
             &l.content,
+            *big_lines,
         );
     }
     let pinged = l.note.is_none()
@@ -602,6 +621,7 @@ pub(crate) fn tick_advance(app: &mut App) {
         store,
         fb,
         focus,
+        big_lines,
         ..
     } = app;
     match feed {
@@ -618,7 +638,14 @@ pub(crate) fn tick_advance(app: &mut App) {
     if let Some(ch) = channels.get(*focus) {
         let from = ch.messages.len().saturating_sub(60);
         for m in ch.messages.iter().skip(from) {
-            request_stacks(store, fb, emotes[*focus].for_row(m), m.refs(), &m.text);
+            request_stacks(
+                store,
+                fb,
+                emotes[*focus].for_row(m),
+                m.refs(),
+                &m.text,
+                *big_lines,
+            );
         }
     }
 }

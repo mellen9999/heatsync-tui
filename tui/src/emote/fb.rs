@@ -78,6 +78,16 @@ impl FbEmotes {
         1
     }
 
+    /// [`Self::square_cells`] for a big emote (4 rows tall).
+    pub fn big_square_cells(&self) -> u16 {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.big_square_cells()
+        }
+        #[cfg(not(target_os = "linux"))]
+        2
+    }
+
     /// how long until the soonest-flipping loaded emote changes frame — the event
     /// loop sleeps exactly this long so animations run at their authored fps.
     pub fn next_flip_in(&self) -> Option<std::time::Duration> {
@@ -121,7 +131,8 @@ mod linux {
 
     use super::Placement;
     use crate::emote::render::{
-        composite_frames, fit_center, subsample, width_cells, EMOTE_H, MAX_FRAMES, MIN_DELAY_MS,
+        composite_frames, fit_center, split_big, subsample, width_cells, width_cells_in, BIG_H,
+        MAX_FRAMES, MIN_DELAY_MS,
     };
 
     // fb blits are plain mmap writes (~3KB each) — far cheaper than terminal
@@ -182,6 +193,7 @@ mod linux {
         start: Instant,
         budget: std::cell::Cell<usize>,
         square_w: u16,
+        big_square_w: u16,
         /// ms until the soonest flip among animations DRAWN last blit — what
         /// the event loop sleeps on. off-screen animations schedule nothing.
         next_flip: std::cell::Cell<u64>,
@@ -242,6 +254,7 @@ mod linux {
                 start: Instant::now(),
                 budget: std::cell::Cell::new(DRAW_BUDGET),
                 square_w: width_cells(1.0, cw, ch),
+                big_square_w: width_cells_in(1.0, cw, ch, BIG_H),
                 next_flip: std::cell::Cell::new(u64::MAX),
             })
         }
@@ -276,6 +289,10 @@ mod linux {
 
         pub fn square_cells(&self) -> u16 {
             self.square_w
+        }
+
+        pub fn big_square_cells(&self) -> u16 {
+            self.big_square_w
         }
 
         /// re-read the pane origin at most 4x/sec. a `tmux display -p` fork is
@@ -456,7 +473,9 @@ mod linux {
     }
 
     fn build(cw: u16, ch: u16, key: &str) -> Option<Anim> {
-        let block_h = EMOTE_H as u32 * ch.max(1) as u32;
+        // a big emote's key says so: the same stack, drawn BIG_H rows tall
+        let (key, rows) = split_big(key);
+        let block_h = rows as u32 * ch.max(1) as u32;
         // key is one url or a '\n'-joined overlay stack — composite_frames
         // handles both (base at the bottom, zero-width overlays on top).
         let frames = subsample(composite_frames(key, block_h)?, MAX_FRAMES);
@@ -467,7 +486,7 @@ mod linux {
         // width from the emote's REAL aspect — the old code stretched every emote
         // onto a fixed 3x2 block, so square emotes came out squashed and wide ones
         // came out mangled.
-        let w_cells = width_cells(sw as f32 / sh as f32, cw, ch);
+        let w_cells = width_cells_in(sw as f32 / sh as f32, cw, ch, rows);
         let (tw, th) = (w_cells as u32 * cw.max(1) as u32, block_h);
         let mut out = Vec::with_capacity(frames.len());
         let mut total_ms = 0u64;

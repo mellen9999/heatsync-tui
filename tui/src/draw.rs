@@ -285,6 +285,7 @@ fn draw_active(f: &mut Frame, area: Rect, app: &App, mode: EmoteMode) {
                 tag_platform: ch.merged(),
                 stamps: app.stamps,
                 user: user.as_deref(),
+                big_rows: if app.big_lines { body.height } else { 0 },
             },
         );
         if cursor_on && n == 0 {
@@ -783,5 +784,106 @@ mod fb_reserve_tests {
         assert_eq!(reserved.diff(&scrolled).len(), 3);
         // plain spaces would be invisible to the diff (the smear bug)
         assert!(scrolled.diff(&scrolled).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod big_draw_tests {
+    use super::*;
+    use crate::emote::render::{big_key, BIG_H};
+    use heatsync_core::emote::Emote;
+    use heatsync_core::{Message, Platform};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn msg(text: &str) -> Message {
+        Message {
+            platform: Platform::Twitch,
+            user: "u".into(),
+            text: text.into(),
+            color: None,
+            badges: Vec::new(),
+            id: None,
+            gone: None,
+            reply_to: None,
+            note: None,
+            extra: Default::default(),
+            emotes: None,
+            tags: Vec::new(),
+            heat: 0.0,
+            uid: None,
+        }
+    }
+
+    /// the line through the real layout and the real draw path, onto a 40x12
+    /// screen: the cells it reserved for images (NBSP) and the sixel bytes the
+    /// terminal would be sent after the text.
+    fn draw(text: &str, big_rows: u16) -> (Vec<(u16, u16)>, String) {
+        let kappa = Emote {
+            name: "Kappa".into(),
+            url: "u/Kappa".into(),
+            provider: "7tv".into(),
+            id: "Kappa".into(),
+            animated: true,
+            zero_width: false,
+            global: false,
+            kind: Default::default(),
+        };
+        let set = EmoteSet::from_list([kappa]);
+        let mut store = crate::emote::render::EmoteStore::test_store(8, 16);
+        store.test_ready_sixel("u/Kappa", &[60, 80]);
+        store.test_ready_sixel(&big_key("u/Kappa"), &[60, 80]);
+        store.begin_frame();
+        let mode = EmoteMode::Term(&store);
+        let look = Look {
+            big_rows,
+            ..Look::default()
+        };
+        let rows = layout_message(&msg(text), &set, mode, 40, &look);
+        let mut t = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        t.draw(|f| {
+            let area = f.area();
+            let mut y = 0;
+            for row in rows {
+                draw_planned(f, mode, area, y, row.line, &row.places, row.h);
+                y += row.h;
+            }
+        })
+        .unwrap();
+        let buf = t.backend().buffer();
+        let cells = (0..12)
+            .flat_map(|y| (0..40).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].symbol() == "\u{a0}")
+            .collect();
+        let mut sent = Vec::new();
+        store.blit(Rect::new(0, 0, 40, 12), &mut sent).unwrap();
+        (cells, String::from_utf8_lossy(&sent).into_owned())
+    }
+
+    fn block(x: std::ops::Range<u16>, y: std::ops::Range<u16>) -> Vec<(u16, u16)> {
+        y.flat_map(|y| x.clone().map(move |x| (x, y))).collect()
+    }
+
+    #[test]
+    fn a_big_line_takes_a_four_row_block_where_a_normal_one_takes_two() {
+        // after the 3 cells of `u: `; sorted by column then row to compare as blocks
+        let norm = |mut v: Vec<(u16, u16)>| {
+            v.sort();
+            v
+        };
+        let (cells, sent) = draw("Kappa", 20);
+        assert_eq!(norm(cells), norm(block(3..11, 0..BIG_H)));
+        assert!(
+            sent.contains("\x1b[1;4H"),
+            "the sixel is placed at its block's corner"
+        );
+
+        let (cells, sent) = draw("Kappa", 0);
+        assert_eq!(norm(cells), norm(block(3..7, 0..2)));
+        assert!(sent.contains("\x1b[1;4H"));
+
+        // a word beside it: normal, and the line's text rides the block's bottom row
+        let (cells, _) = draw("Kappa hi", 20);
+        assert_eq!(norm(cells), norm(block(3..7, 0..2)));
     }
 }

@@ -96,6 +96,8 @@ pub(crate) struct App {
     pub(crate) usage_tx: Sender<crate::usagestore::Uses>,
     /// dim `HH:MM` before each line (`t`, persisted).
     pub(crate) stamps: bool,
+    /// a line of only emotes draws them twice as big (`B`, persisted).
+    pub(crate) big_lines: bool,
     // emote sets are fetched off-thread (a blocking HTTP call would freeze the
     // UI); results arrive here keyed by (platform, name) and merge in.
     pub(crate) emote_tx: Sender<(Platform, String, EmoteSet)>,
