@@ -414,24 +414,8 @@ impl EmoteSet {
             })
         };
         let usage_fn: &dyn Fn(&str) -> f64 = &used;
-        let ctx = law::OfferCtx {
-            room: Some(&self.room),
-            own: &own,
-            globals: &self.globals,
-            catalog: &[],
-            emoji: &[],
-            usage: usage.map(|_| usage_fn),
-            pop: None,
-            blocked: None,
-            suggest_own: true,
-            favorites: &[],
-            emoji_first: false,
-        };
         let mut out = Ranked::default();
-        for c in law::offer(typed, &ctx, None) {
-            if crate::block::is_blocked(c.emote) {
-                continue;
-            }
+        for c in self.tiles(typed, &own, usage.map(|_| usage_fn)) {
             // the people go after what leads: the exact name, a used name that
             // starts with the typed word, and the room's own emotes
             let jumped = c.matched == law::BUCKET_PREFIX && used(&c.emote.name) > 0.0;
@@ -443,6 +427,46 @@ impl EmoteSet {
             side.push(c.emote.name.clone());
         }
         out
+    }
+
+    /// the law's offer for `typed` as tiles: one name, one picture, one tile.
+    /// a picture the room's send of that name does not carry (your saved copy
+    /// under the room's own name, a global your set covers) is not offered, and
+    /// a blocked emote is left out. the seam between what leads and the rest is
+    /// drawn from what is left, so a dropped copy leaves no hole on either side.
+    fn tiles<'a>(
+        &'a self,
+        typed: &str,
+        own: &'a Own<Emote>,
+        usage: Option<&'a dyn Fn(&str) -> f64>,
+    ) -> Vec<law::Candidate<'a, Emote>> {
+        let ctx = law::OfferCtx {
+            room: Some(&self.room),
+            own,
+            globals: &self.globals,
+            catalog: &[],
+            emoji: &[],
+            usage,
+            pop: None,
+            blocked: None,
+            suggest_own: true,
+            favorites: &[],
+            emoji_first: false,
+        };
+        // the box a tab press writes in: this room, no draft picks, nothing of
+        // the platform's own to send (a tab word is typed text)
+        let send = law::SendCtx {
+            room: Some(&self.room),
+            legs: &[],
+            own,
+            globals: &self.globals,
+            picks: None,
+            fold: false,
+        };
+        law::offer(typed, &ctx, None)
+            .into_iter()
+            .filter(|c| !crate::block::is_blocked(c.emote) && crate::mark::offered(&send, c.emote))
+            .collect()
     }
 
     /// the text kick receives for `text`: kick draws its own emotes only from
@@ -1622,6 +1646,83 @@ mod tests {
         assert!(own_at < global_at, "{rest:?}");
         // none of yours: just the room and the globals, as before
         assert_eq!(set.offer("pog").first, ["PogU"]);
+    }
+
+    /// a room that has `PogU`, and a person who saved a different picture under the same name
+    fn pogu_twice() -> (EmoteSet, Vec<Emote>) {
+        let mine = |n: &str| Emote {
+            provider: "hs".into(),
+            url: format!("https://hs/{n}.webp"),
+            ..e(n)
+        };
+        let mut set = EmoteSet::from_list([e("PogU")]);
+        set.merge(EmoteSet::from_global_list([e("PogChamp"), mine("Pogo")]));
+        (set, vec![mine("PogU"), mine("PogMine")])
+    }
+
+    #[test]
+    fn tab_offers_one_tile_per_name_and_it_is_the_picture_the_room_sends() {
+        let (set, mine) = pogu_twice();
+        let own = law::build_own(&mine, &[], &[]);
+        let tiles = set.tiles("pogu", &own, None);
+        // the room answers `PogU` with its own: the saved copy is no tile
+        assert_eq!(
+            tiles.len(),
+            1,
+            "{:?}",
+            tiles.iter().map(|c| &c.emote.url).collect::<Vec<_>>()
+        );
+        assert_eq!(tiles[0].tier, law::Tier::Room);
+        assert_eq!(tiles[0].emote.url, "https://cdn/PogU.webp");
+        // and the offer holds each name once, not once per picture
+        let got = set.offer_with("pog", None, &mine);
+        let mut names: Vec<&str> = got
+            .first
+            .iter()
+            .chain(&got.rest)
+            .map(String::as_str)
+            .collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "{got:?}");
+        assert_eq!(got.first, ["PogU"]);
+    }
+
+    #[test]
+    fn a_saved_copy_of_a_name_the_room_does_not_have_is_still_offered() {
+        let (set, mine) = pogu_twice();
+        let own = law::build_own(&mine, &[], &[]);
+        let tiles = set.tiles("pogmine", &own, None);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].tier, law::Tier::Own);
+    }
+
+    #[test]
+    fn a_global_the_room_or_your_set_covers_is_no_tile_either() {
+        let (set, _) = pogu_twice();
+        // a global `Pogo` and a saved `Pogo`: yours sends, the global is covered
+        let mine = [Emote {
+            provider: "hs".into(),
+            url: "https://hs/mine-pogo.webp".into(),
+            id: "mine-pogo".into(),
+            ..e("Pogo")
+        }];
+        let own = law::build_own(&mine, &[], &[]);
+        let tiles = set.tiles("pogo", &own, None);
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].tier, law::Tier::Own);
+    }
+
+    #[test]
+    fn the_seam_between_what_leads_and_the_rest_follows_what_is_left() {
+        let (set, mine) = pogu_twice();
+        let got = set.offer_with("pog", None, &mine);
+        // the room's PogU leads; what was dropped leaves no hole in either side
+        assert_eq!(got.first, ["PogU"]);
+        assert!(got.rest.iter().all(|n| n != "PogU"), "{got:?}");
+        assert!(got.rest.contains(&"PogMine".to_string()), "{got:?}");
+        assert!(got.rest.contains(&"PogChamp".to_string()), "{got:?}");
     }
 
     #[test]

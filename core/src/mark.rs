@@ -17,7 +17,7 @@
 //!
 //! pure: no clock, no io, no state. it reads the law's own send context.
 
-use crate::law::{send_word, Pic, Room, SendCtx, SendFrom};
+use crate::law::{send_word, Pic, Room, SendCtx, SendFrom, SendHit};
 
 pub const MARK_VERSION: u32 = 1;
 
@@ -238,14 +238,7 @@ pub fn tile_says<E: Pic>(ctx: &SendCtx<E>, e: &E, tier: &str) -> TileSays {
         }
         None => &[],
     };
-    let blind = SendCtx {
-        picks: None,
-        ..ctx.clone()
-    };
-    let hit = ctx
-        .room
-        .filter(|_| !e.name().is_empty())
-        .and_then(|_| send_word(e.name(), &blind));
+    let hit = answer(ctx, e);
     let same = hit.as_ref().is_some_and(|h| same_picture(h.emote, e));
     let (mut says, at) = match &hit {
         Some(h) if same => {
@@ -267,4 +260,27 @@ pub fn tile_says<E: Pic>(ctx: &SendCtx<E>, e: &E, tier: &str) -> TileSays {
         says = heatsync();
     }
     TileSays::of(hit.is_none() || same, at, says)
+}
+
+/// whether the room offers this tile at all: its word's answer is this picture
+/// (or has none). the same answer as [`tile_says`]`.offered`, without the mark
+/// and the words, for a list that only needs to know what to leave out.
+pub fn offered<E: Pic>(ctx: &SendCtx<E>, e: &E) -> bool {
+    silent(canon(e.provider())) || answer(ctx, e).is_none_or(|h| same_picture(h.emote, e))
+}
+
+/// the room's answer for the tile's word: what typing it sends. picks are never
+/// read, a tile is judged by its word alone.
+fn answer<'a, E: Pic>(ctx: &SendCtx<'a, E>, e: &E) -> Option<SendHit<'a, E>> {
+    ctx.room?;
+    if e.name().is_empty() {
+        return None;
+    }
+    send_word(
+        e.name(),
+        &SendCtx {
+            picks: None,
+            ..ctx.clone()
+        },
+    )
 }

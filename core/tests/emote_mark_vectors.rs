@@ -244,7 +244,12 @@ fn run(file: &Map<String, Value>, c: &Value, seed: u32) -> Res<Value> {
         .get("tier")
         .and_then(Value::as_str)
         .ok_or("a case without a tier")?;
-    Ok(says_json(&mark::tile_says(&ctx, tile, tier)))
+    let says = mark::tile_says(&ctx, tile, tier);
+    // the cheap answer a list asks is the tile's own `offered`, never another rule
+    if mark::offered(&ctx, tile) != says.offered {
+        return Err(format!("{name}: offered() and tile_says().offered differ"));
+    }
+    Ok(says_json(&says))
 }
 
 fn file() -> Map<String, Value> {
