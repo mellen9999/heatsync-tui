@@ -51,7 +51,7 @@ heatsync-tui login                             # pair this terminal (see login)
 ```
 
 keys: `j`/`k` scroll · `h`/`l` (or `j`/`k` with a side tab bar) switch channel ·
-`i` compose · `o` pick a live channel (opens a temp tab, underlined) · `s` keep the temp tab · `m` manage · `x` close · `T` move tab bar · `v` message cursor (`j`/`k` `ctrl-d`/`ctrl-u` `g`/`G` move · `r` reply · `y` yank · `d` delete · `b` block an emote on the line · `esc` back) · `t` timestamps · `P` hide the pinned message · `space` pause · `q` quit.
+`i` compose · `o` pick a live channel (opens a temp tab, underlined) · `s` keep the temp tab · `m` manage · `x` close · `T` move tab bar · `v` message cursor (`j`/`k` `ctrl-d`/`ctrl-u` `g`/`G` move · `r` reply · `y` yank · `d` delete · `b` block an emote on the line · `esc` back) · `t` timestamps · `B` big emote-only lines · `P` hide the pinned message · `space` pause · `q` quit.
 open channels + tab-bar position persist in `~/.config/heatsync/config`.
 
 ## language
@@ -112,6 +112,8 @@ graphics, detected automatically — nothing to set:
 - anything else — emote names as text, fully usable
 
 works inside tmux (it asks tmux for the outer terminal).
+
+a line of only emotes (up to 5) is drawn twice as big: 4 rows tall instead of 2. `B` turns it off and on, kept in `~/.config/heatsync/config` (`big_emote_lines=off`). it follows the site's rule (`core/tests/emote-only.vectors.json`) and never touches events, notices or any line with a fill.
 
 ## more
 

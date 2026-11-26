@@ -222,6 +222,19 @@ fn normal_key(app: &mut App, k: crossterm::event::KeyEvent) -> Flow {
             save_state(app);
             Flow::Continue
         }
+        KeyCode::Char('B') => {
+            app.big_lines = !app.big_lines;
+            app.status = Some(
+                tr(if app.big_lines {
+                    "input.status_big_on"
+                } else {
+                    "input.status_big_off"
+                })
+                .into(),
+            );
+            save_state(app);
+            Flow::Continue
+        }
         KeyCode::Char('T') => {
             app.tab_pos = app.tab_pos.next();
             save_state(app);
@@ -1193,6 +1206,19 @@ fn cursor_delete(app: &mut App) {
 mod alt_tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn b_turns_big_emote_lines_off_and_on_and_says_which() {
+        let mut a = crate::special::tests::app();
+        assert!(a.big_lines, "on by default");
+        let b = KeyEvent::new(KeyCode::Char('B'), KeyModifiers::SHIFT);
+        handle_key(&mut a, b);
+        assert!(!a.big_lines);
+        assert_eq!(a.status.as_deref(), Some(tr("input.status_big_off")));
+        handle_key(&mut a, b);
+        assert!(a.big_lines);
+        assert_eq!(a.status.as_deref(), Some(tr("input.status_big_on")));
+    }
 
     #[test]
     fn alt_digits_map_to_tab_indexes_and_plain_digits_do_not() {
