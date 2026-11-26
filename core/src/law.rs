@@ -37,10 +37,21 @@ pub trait Pic {
     fn pop(&self) -> u64 {
         0
     }
+    /// the picture this copy shows, when a client reads it from an address and
+    /// it is another's: a saved copy of a 7tv emote at another size has its own
+    /// key and the picture's `pic` (`7tv:<id>`). only `mark` reads it.
+    fn pic(&self) -> String {
+        key_of(self)
+    }
+    /// one of our own uploads is the same picture under any host: its hash.
+    /// only `mark` reads it.
+    fn hash(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// `provider:id` — the picture
-pub fn key_of<E: Pic>(e: &E) -> String {
+pub fn key_of<E: Pic + ?Sized>(e: &E) -> String {
     format!("{}:{}", e.provider(), e.id())
 }
 

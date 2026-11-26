@@ -84,6 +84,67 @@ impl crate::law::Pic for Emote {
     fn zero_width(&self) -> bool {
         self.zero_width
     }
+    /// the picture the address names, a size, a format and a host aside.
+    fn pic(&self) -> String {
+        if self.url.is_empty() {
+            return law::key_of(self);
+        }
+        picture_of(&self.url)
+    }
+    /// one of our own uploads is its hash under any host. an upload's id is its hash.
+    fn hash(&self) -> Option<&str> {
+        matches!(
+            self.provider.as_str(),
+            "hs" | "heatsync" | "upload" | "inventory"
+        )
+        .then_some(self.id.as_str())
+        .filter(|h| !h.is_empty())
+    }
+}
+
+/// the picture behind a url. one emote is met at several: a size, a format, the
+/// still of an animation. where the address names the picture's id (the three
+/// addon cdns, twitch, kick) the id says which picture it is; anywhere else the
+/// url does. the site's `pictureOf`, so a favorite or a tile means the same
+/// picture in every client.
+pub fn picture_of(url: &str) -> String {
+    // the id sits between `prefix` and the next `/`, and must pass `ok`
+    let id = |prefix: &str, ok: fn(&str) -> bool| -> Option<String> {
+        let rest = url.strip_prefix(prefix)?;
+        let id = &rest[..rest.find('/')?];
+        ok(id).then(|| id.to_string())
+    };
+    let alnum =
+        |s: &str| (24..=26).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric());
+    let hex = |s: &str| s.len() == 24 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let digits = |s: &str| (1..=9).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    let own = |s: &str| !s.is_empty() && !s.contains(['?', '#']);
+    if let Some(i) = id("https://cdn.7tv.app/emote/", alnum) {
+        return format!("7tv:{i}");
+    }
+    if let Some(i) = id("https://cdn.betterttv.net/emote/", hex) {
+        return format!("bttv:{i}");
+    }
+    for prefix in [
+        "https://cdn.frankerfacez.com/emote/",
+        "https://cdn.frankerfacez.com/emoticon/",
+    ] {
+        if let Some(i) = id(prefix, digits) {
+            return format!("ffz:{i}");
+        }
+    }
+    for (host, prefix) in [
+        (
+            "static-cdn.jtvnw.net",
+            "https://static-cdn.jtvnw.net/emoticons/v2/",
+        ),
+        ("files.kick.com", "https://files.kick.com/emotes/"),
+    ] {
+        if let Some(i) = id(prefix, own) {
+            return format!("{host}:{i}");
+        }
+    }
+    url.to_string()
 }
 
 /// the /api/channel/:c/emotes envelope (only the bits we need).
@@ -2149,5 +2210,80 @@ mod tests {
         );
         crate::block::unblock_key(&crate::block::key(&mine).unwrap());
         assert_eq!(text(&segments("BlockTwin", &set_a)), "<emote>");
+    }
+
+    #[test]
+    fn a_picture_is_the_id_in_its_address_whatever_the_size_or_format() {
+        let seven = "01J0K2M3N4P5Q6R7S8T9V0W1X2";
+        for url in [
+            format!("https://cdn.7tv.app/emote/{seven}/1x.webp"),
+            format!("https://cdn.7tv.app/emote/{seven}/4x.avif"),
+        ] {
+            assert_eq!(picture_of(&url), format!("7tv:{seven}"));
+        }
+        let bttv = "5f1b0186cf6d2144653d2970";
+        assert_eq!(
+            picture_of(&format!("https://cdn.betterttv.net/emote/{bttv}/3x.webp")),
+            format!("bttv:{bttv}")
+        );
+        for kind in ["emote", "emoticon"] {
+            assert_eq!(
+                picture_of(&format!("https://cdn.frankerfacez.com/{kind}/28138/4")),
+                "ffz:28138"
+            );
+        }
+        // twitch hands one emote out as default|static|animated, dark|light, 1.0-4.0
+        let a = "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0";
+        let b = "https://static-cdn.jtvnw.net/emoticons/v2/25/static/light/4.0";
+        assert_eq!(picture_of(a), picture_of(b));
+        assert_eq!(picture_of(a), "static-cdn.jtvnw.net:25");
+        assert_eq!(
+            picture_of("https://files.kick.com/emotes/37226/fullsize"),
+            "files.kick.com:37226"
+        );
+    }
+
+    #[test]
+    fn an_address_that_names_no_id_is_its_own_picture() {
+        for url in [
+            "https://cdn.heatsync.org/a.webp",
+            "https://cdn.7tv.app/emote/short/1x.webp",
+            "https://cdn.betterttv.net/emote/NOTHEX0186cf6d2144653d29/1x.webp",
+            "https://cdn.frankerfacez.com/emote/1234567890/1",
+            "https://static-cdn.jtvnw.net/emoticons/v2/25",
+            "http://cdn.7tv.app/emote/01J0K2M3N4P5Q6R7S8T9V0W1X2/1x.webp",
+        ] {
+            assert_eq!(picture_of(url), url);
+        }
+    }
+
+    #[test]
+    fn one_emote_at_two_sizes_is_one_picture_and_an_upload_is_its_hash() {
+        use crate::law::Pic;
+        let seven = |size: &str, id: &str| Emote {
+            url: format!("https://cdn.7tv.app/emote/01J0K2M3N4P5Q6R7S8T9V0W1X2/{size}.webp"),
+            id: id.into(),
+            ..e("BigDog")
+        };
+        assert_eq!(seven("1x", "a").pic(), seven("4x", "b").pic());
+        assert_ne!(seven("1x", "a").pic(), e("Other").pic());
+        let up = |host: &str, provider: &str, hash: &str| Emote {
+            url: format!("https://{host}/u.webp"),
+            provider: provider.into(),
+            id: hash.into(),
+            ..e("Mine")
+        };
+        assert_eq!(up("a.example", "upload", "h1").hash(), Some("h1"));
+        assert_eq!(up("b.example", "hs", "h1").hash(), Some("h1"));
+        assert_eq!(up("a.example", "hs", "").hash(), None);
+        // a platform's or an addon's id is not a hash
+        assert_eq!(up("a.example", "7tv", "h1").hash(), None);
+        // a url-less emote (a taken-down pick) falls back to its key, never to "" == ""
+        let gone = |id: &str| Emote {
+            url: String::new(),
+            id: id.into(),
+            ..e("x")
+        };
+        assert_ne!(gone("a").pic(), gone("b").pic());
     }
 }
