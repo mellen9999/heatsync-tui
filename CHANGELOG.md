@@ -2,6 +2,29 @@
 
 what changed in each release, newest first. the release workflow copies the section for a tag into the github release notes, so every `## x.y.z` heading needs a matching tag.
 
+## 0.5.0 - 2026-11-26
+
+`heatsync-core` moves to 0.5.0 with it.
+
+### emotes
+
+- a word draws the same emote here as on the site, the extension and the desktop app: the room's own emote wins its name, then a pick the sender shipped, then yours. one rule, tested against the site's own cases
+- your heatsync emotes from the composer: `/emote add`, `/emote rm`, `/emote mv`, `/emote undo`, and `/emotes` for a list you can scroll
+- tab lists each name once: the exact name first, then the room's emotes, your own, then globals. emotes you send often move up, kept on this machine only
+- kick rooms send kick's own emotes, once you've used one there
+- a youtube tab draws its channel's emotes
+- a line of only emotes (1 to 5) draws them twice as big. `B` turns that off and on
+- when 7tv, bttv or ffz answers badly, the emotes you had stay instead of vanishing, and the room is read again on its own
+
+### keys
+
+- `?` lists every key the chat view answers, one plain line each. it wraps to fit a phone-width terminal
+- the readme said `j`/`k` scroll. they switch channel
+
+### smaller
+
+- newer ratatui, crossterm, ureq and tungstenite
+
 ## 0.4.1 - 2026-11-12
 
 `heatsync-core` moves to 0.4.1 with it.
